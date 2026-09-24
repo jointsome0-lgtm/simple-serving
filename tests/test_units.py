@@ -11,9 +11,10 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
-from simple_serving import log
+from simple_serving import log, vast
 from simple_serving.admission import Admission, CountPlaces
 from simple_serving.config import ConfigError, Listener, from_service_block, load
 from simple_serving.engine import EngineError, refusal
@@ -445,3 +446,52 @@ def test_the_service_block_of_the_cases_is_a_valid_configuration() -> None:
     assert {key.label: key.outside for key in settings.keys} == {"bot": False, "control": False, "outside-a": True,
                                                                  "outside-b": True}
     assert OUTSIDE_B not in repr(settings)
+
+
+# The stop of the instance (section 8)
+
+@pytest.mark.anyio
+async def test_a_stop_puts_stopped_to_the_fixed_endpoint_with_the_key_in_a_header() -> None:
+    requests: list[httpx.Request] = []
+
+    def accept(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"success": True})
+
+    await vast.stop("123", MARKER, transport=httpx.MockTransport(accept))
+    (request,) = requests
+    assert (request.method, str(request.url)) == ("PUT", "https://console.vast.ai/api/v0/instances/123/")
+    assert request.headers["authorization"] == f"Bearer {MARKER}"
+    assert json.loads(request.content) == {"state": "stopped"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("answer", "code", "status"), [
+    (httpx.Response(200, json={"success": False}), "answer", None),
+    (httpx.Response(200, content=b"<html>"), "answer", None),
+    (httpx.Response(200, content=b" " * (vast.MAX_ANSWER_BYTES + 1)), "answer", None),
+    (httpx.Response(401), "forbidden", 401),
+    (httpx.Response(403), "forbidden", 403),
+    (httpx.Response(503), "http", 503),
+    (httpx.Response(301, headers={"location": "https://console.vast.ai/elsewhere/"}), "http", 301),
+    (httpx.ConnectError("synthetic"), "network", None),
+    (httpx.ReadTimeout("synthetic"), "timeout", None),
+])
+async def test_anything_but_success_is_a_failure_of_a_fixed_category(
+        answer: httpx.Response | Exception, code: str, status: int | None) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    with pytest.raises(vast.VastError) as caught:
+        await vast.stop("123", MARKER, transport=httpx.MockTransport(respond))
+    assert (caught.value.code, caught.value.status, str(caught.value)) == (code, status, code)
+
+
+def test_a_stop_needs_the_containers_instance_and_its_key() -> None:
+    for environ in ({}, {"CONTAINER_ID": "123"}, {"CONTAINER_ID": "0", "CONTAINER_API_KEY": MARKER},
+                    {"CONTAINER_ID": "12/", "CONTAINER_API_KEY": MARKER},
+                    {"CONTAINER_ID": "123", "CONTAINER_API_KEY": f"{MARKER}\r\n"}):
+        assert vast.from_environment(environ) is vast.unconfigured
+    assert vast.from_environment({"CONTAINER_ID": "123", "CONTAINER_API_KEY": MARKER}) is not vast.unconfigured
