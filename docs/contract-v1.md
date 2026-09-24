@@ -1,238 +1,363 @@
 # Contract v1 (draft)
 
 The HTTP API of simple-serving, version 1. Status: draft, nothing is implemented. The bot's side is in
-simple-story-chat (`local/model.ts`, `local/llama.ts`); section 11 lists what it sends to llama-server today.
+simple-story-chat; section 13 is written from its `local/llama.ts` and `local/scheduler.ts` at commit 80fd241.
 
 ## 1. Scope
 
-- One text model behind a gateway. The gateway is FastAPI, the engine is vLLM, both on one rented card. Clients see
-  only the gateway. The engine, its metrics and its own API listen on loopback.
-- Version 1 does text chat only. No tools, no images, no audio, no logprobs, no `n > 1`, no LoRA adapters.
-- Clients are simple-story-chat (readers' turns, agent turns, our eval and probes) and outside users with keys.
+- One text model behind a gateway on one rented card. The gateway is FastAPI, run as one worker process in version 1,
+  because the drain state, the quotas and the boot identity live in its memory. The engine is vLLM.
+- Clients reach only the gateway. The engine, its metrics and its own API listen on loopback.
+- Version 1 is streamed text chat. There are no tools, images, audio, logprobs, LoRA adapters, `n > 1` or answers
+  without streaming.
+- The clients are simple-story-chat and outside keys. The bot sends readers' turns, agent turns and our eval and
+  probes, all through its own scheduler.
+- The bot's research batches stay on llama.cpp. They ask one server for several samples of one prompt in a single call
+  without streaming (`generateMany` in `local/llama.ts`, used by `local/memory-probe.ts --lab`).
 
-## 2. Keys and classes
+## 2. Keys, classes and cache scopes
 
-Every request carries `Authorization: Bearer <key>`. The gateway's configuration maps each key to a label, used in logs
-instead of the key, a set of allowed classes and a default class.
+### Keys
 
-| Class      | Who                                   | Order   | Preempted by the engine | Keeps the card awake |
-|------------|---------------------------------------|---------|-------------------------|----------------------|
-| `reader`   | a person's turn in the bot            | first   | never                   | yes                  |
-| `agent`    | a turn of the bot's agent interface   | second  | may be paused, not cut  | yes                  |
-| `internal` | our eval and probes                   | third   | may be paused           | open question 1      |
-| `external` | outside keys                          | last    | may be paused           | no                   |
+Every request carries `Authorization: Bearer <key>`, on loopback too. The gateway's configuration maps each key to:
+- a label, which logs show instead of the key;
+- the classes it may use and its default class;
+- whether it may name cache scopes.
 
-- A request may name its class in `X-Simple-Serving-Class`. A class the key does not allow is refused with 403. An
-  outside key allows `external` only, so an outside client can never ask for `reader`.
-- The gateway turns the class into the engine's priority. Clients never set engine priority: the gateway removes any
-  priority field from the body and any engine priority header before it forwards a request.
-- The engine may pause a running request of a lower class to make room for a higher one and resume it later. It does
-  not cancel it. Only limits (section 7), a drain (section 8) or the client cancel a request.
-- The bot keeps its own scheduler: turns, holders, yielding work prepared ahead. The classes above only order the bot's
-  calls against everyone else's.
+### Classes
+
+| Class      | Who                                  | Order |
+|------------|--------------------------------------|-------|
+| `reader`   | a person's turn in the bot           | 1     |
+| `agent`    | a turn of the bot's agent interface  | 2     |
+| `internal` | our eval and probes                  | 3     |
+| `external` | outside keys                         | 4     |
+
+- A request names its class in `X-Simple-Serving-Class`, otherwise the key's default applies. A class the key may not
+  use is refused with 403 `class_not_allowed`. Outside keys may use `external` only.
+- The class sets two things. The first is the order in which the gateway hands waiting requests to the engine. The
+  second is the engine priority the gateway attaches. The gateway removes any engine priority a client sends, whether
+  in the body or in a header.
+- The class does not protect a request from the engine's preemption. When the engine runs short of cache memory, its
+  scheduler takes a running request off and continues it later, sometimes after recomputing its cache. This happens
+  inside the engine. The HTTP request is not cancelled, and its tokens arrive later. The contract promises readers
+  two things only: the order above and a time to first token measured under load (section 15).
+
+### Cache scopes
+
+The engine reuses cached prompt prefixes across requests. A client that sends prompts and times the answers can tell
+whether a prefix is already cached. So a shared cache leaks, through timing, whether someone else sent the same text.
+The engine does not hand out other people's prompts; the channel is timing only.
+
+The gateway sets `cache_salt` on every request from a scope:
+- each outside key is one scope;
+- a key allowed to name scopes sends one in `X-Simple-Serving-Scope`. The bot sends `reader.<opaque>` for each reader,
+  or `agent`, or `internal`. The bot derives the opaque part from the reader's identity with a secret of its own. It
+  is never a Telegram ID. A scope from a key without that right is refused with 403 `scope_not_allowed`;
+- the salt is an HMAC of the scope under a secret that the gateway generates at every start and never shows. A salt in
+  the request body is refused as an unknown field.
+
+A reader's turns reuse that reader's own cached story. Readers share the cache neither with each other nor with
+agents, eval or outside keys. The price is that each reader's first turn reads the shared system prompt again.
+
+### Turns
+
+The service knows single HTTP requests. A turn of the bot is several requests, such as compaction, repair and the
+scene, and between them nothing runs. In version 1 every multi-step turn goes through the bot's scheduler, which is the
+only controller of the card (section 8). Eval, probes and the agent interface keep reaching the model through the
+bot's socket (`local/background.ts`) and do not call the service directly.
 
 ## 3. Routes
 
-| Route                                  | Method | Keys                  | Public |
-|----------------------------------------|--------|-----------------------|--------|
-| `/v1/chat/completions`                 | POST   | any                   | yes    |
-| `/v1/chat/completions/input_tokens`    | POST   | any                   | yes    |
-| `/v1/models`                           | GET    | any                   | yes    |
-| `/v1/state`                            | GET    | any                   | yes    |
-| `/v1/control/drain`, `/v1/control/open`| POST   | the control key only  | no     |
+| Route                                   | Method | Keys             | Reachable                     |
+|-----------------------------------------|--------|------------------|-------------------------------|
+| `/v1/chat/completions`                  | POST   | any              | HTTPS                         |
+| `/v1/chat/completions/input_tokens`     | POST   | any              | HTTPS                         |
+| `/v1/models`                            | GET    | any              | HTTPS                         |
+| `/v1/state`                             | GET    | any              | HTTPS                         |
+| `/v1/control/drain`, `/v1/control/open` | POST   | the control key  | loopback, over the SSH tunnel |
 
-Public means reachable from the internet through HTTPS. The control routes are served on loopback and reached over the
-SSH tunnel. Any other path is 404.
+Any other path is 404 `not_found`. The gateway holds at most 64 open connections (provisional, see section 7).
 
 ## 4. Generation: `POST /v1/chat/completions`
 
 ### Request
 
-The request is OpenAI chat completions, streaming only. Accepted fields:
+This is OpenAI chat completions with streaming. The body is at most 2 000 000 bytes. The gateway counts bytes as it
+reads, chunked bodies included, and stops reading past the limit with 413 `body_too_large`, before it parses JSON.
 
-| Field                                  | Rule                                                              |
-|----------------------------------------|-------------------------------------------------------------------|
-| `model`                                | the exact alias from `/v1/models`                                 |
-| `messages`                             | `system`, `user`, `assistant`; `content` is a string              |
-| `max_tokens`                           | required, at most the class limit                                 |
-| `stream`                               | must be `true`                                                    |
-| `stream_options.include_usage`         | must be `true`                                                    |
-| `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty` | optional sampling              |
-| `seed`                                 | optional                                                          |
-| `response_format`                      | optional, `{"type": "json_schema", "json_schema": {...}}`         |
-| `chat_template_kwargs.enable_thinking` | optional, the gateway's default is `false`                        |
+| Field                  | Type and range                                   | Rule                               |
+|------------------------|--------------------------------------------------|------------------------------------|
+| `model`                | string                                           | the exact alias from `/v1/models`  |
+| `messages`             | array of `{role, content}`                       | role `system`, `user` or `assistant`; content a string; no other keys |
+| `max_tokens`           | integer, at least 1                              | required, at most the class limit  |
+| `stream`               | `true`                                           | required                           |
+| `stream_options`       | `{"include_usage": true}`                        | required                           |
+| `temperature`          | number from 0 to 2                               | optional                           |
+| `top_p`                | number above 0, at most 1                        | optional                           |
+| `top_k`                | integer, at least 1                              | optional                           |
+| `min_p`                | number from 0 to 1                               | optional                           |
+| `repetition_penalty`   | number above 0, at most 2                        | optional                           |
+| `seed`                 | integer                                          | optional                           |
+| `response_format`      | `{"type": "json_schema", "json_schema": {"name": string, "strict": boolean, "schema": object}}` | optional |
+| `chat_template_kwargs` | `{"enable_thinking": boolean}`                   | optional, default `false`          |
 
-Any other field is refused with 400 `unsupported_field`, so a client that drifts from the contract fails in tests, not
-silently in production.
+Any other field, at any depth, is refused with 400 `unsupported_field`. A value of the wrong type or out of range is
+refused with 400 `invalid_request`.
 
-### Response
+### Before the stream starts
 
-`Content-Type: text/event-stream`. Every event is one `data:` line with a JSON chunk, UTF-8, and the stream ends with
-`data: [DONE]`.
+The gateway checks the key, the class, the scope, the body, the limits and the context. It hands the request to the
+engine and waits for the engine's first answer. Only then does it send 200 and the stream headers. Every refusal up to
+that point is a plain HTTP error from section 9.
 
-- Content chunks have exactly one choice, `index: 0`, with `delta.content`. If the model still writes reasoning, it
-  comes in `delta.reasoning_content` and is counted apart from the text.
-- `finish_reason` is `stop` or `length` and arrives exactly once, in the last content chunk.
-- The last chunk before `[DONE]` has `choices: []` and `usage`:
-  - `prompt_tokens`: equal to what `input_tokens` returns for the same body.
-  - `completion_tokens`.
-  - `prompt_tokens_details.cached_tokens`: optional; when absent it is unknown, not zero.
-  - `simple_serving`: the gateway's own measurements in milliseconds, `queue_ms`, `first_token_ms` and `total_ms`.
-    These are measured at the gateway, not the engine's internal timings.
-- `model` in every chunk is the alias.
-- A stream that ends without `finish_reason` and `[DONE]` is broken. A client must not treat its text as a finished
-  answer.
+### Stream
+
+`Content-Type: text/event-stream`. Each event is a line `data: <json>` followed by a blank line.
+
+- Every chunk has `model` equal to the alias.
+- A chunk has either one choice with `index: 0` or `choices: []`.
+- A choice's `delta` may be empty, may hold only `role`, or may hold `content` or `reasoning_content`. The gateway
+  renames whatever field the pinned engine uses for reasoning to `reasoning_content`. Reasoning is not part of the
+  text.
+- Exactly one chunk has a `finish_reason`, `stop` or `length`. Its delta may be empty.
+- After it comes exactly one usage chunk with `choices: []` and `usage`:
+  - `prompt_tokens`;
+  - `completion_tokens`;
+  - `prompt_tokens_details.cached_tokens`, optional. Absent means unknown, not zero;
+  - `simple_serving`, the measurements of section 11.
+- The stream ends with `data: [DONE]`.
+
+### Errors after the stream starts
+
+The status is already 200 and cannot change. The gateway sends one event `data: {"error": {"code": "<code>"}}`
+with a code from section 9. Then it ends the stream without a finish reason, a usage chunk or `[DONE]`. A client
+treats every stream without `[DONE]` as failed and never keeps its text as an answer.
 
 ## 5. Counting: `POST /v1/chat/completions/input_tokens`
 
-The body is the same as for generation. The gateway counts it with the tokenizer and chat template the engine uses
-and answers `{"input_tokens": n}`, `n > 0`. For the same body, `n` equals the `prompt_tokens` that generation reports.
-The test on the card checks this equality with the pinned template.
+- The body is the same as for generation. The answer is `{"input_tokens": n}` with `n` at least 1.
+- Counting and generation render the prompt through one code path, with the same chat template, template arguments
+  and special tokens, and nothing is cut silently. For the same body, `n` equals `usage.prompt_tokens`. A test on the
+  card checks the equality.
+- The body limit of section 4 applies. At most 8 counts run at once, and 2 per outside key (provisional).
+- A body whose `n` plus `max_tokens` exceeds the context is still counted. The answer is the count.
 
 ## 6. Models and state
 
-`GET /v1/models` lists one model: `{"object": "list", "data": [{"id": "<alias>", "object": "model",
-"max_model_len": <context tokens>}]}`.
+`GET /v1/models`:
+
+```json
+{"object": "list", "data": [{"id": "<alias>", "object": "model", "max_model_len": 65536}]}
+```
+
+`max_model_len` is the effective context. It is the engine's configured length, or the gateway's smaller limit if it
+sets one. `/v1/state` shows the same number.
 
 `GET /v1/state`:
 
 ```json
-{"contract": "1", "status": "ready", "model": "<alias>", "context_tokens": 65536}
+{"contract": "1", "boot_id": "<random at every start>", "status": "ready", "model": "<alias>",
+ "context_tokens": 65536, "drain_generation": 0}
 ```
 
-`status` is `starting`, `ready`, `draining` or `drained`. For the control key the answer also has `in_flight` and
-`queued`, each counted by class.
+- The gateway reports `starting` until it has verified the engine: the engine answers, serves the alias and reports
+  the context length. Then the status is `ready`.
+- The status is `draining` or `drained` during a stop (section 8), and `failed` if the engine stops answering after it
+  was ready.
+- In any status except `ready`, the inference routes answer 503. The code is the status itself, except `failed`,
+  which answers `engine_unavailable`.
+- For the control key the answer also holds `active` and `waiting`, counted by class, and the pinned versions of
+  section 12.
+- `/v1/state` and the control routes answer in every status.
 
 ## 7. Limits
 
-Each class has a cap on requests running at once, on requests queued, on input tokens, on `max_tokens` and on wall
-time. An outside key also has its own caps on requests running and queued. Requests per minute alone do not protect
-readers, because one long prompt costs more than many short ones.
+- **Waiting**: the gateway accepted the request and has not handed it to the engine yet.
+- **Active**: the gateway handed the request to the engine and it has not finished. That includes the engine's own
+  queue and its preemption. A request the engine paused still counts as active.
+- **Wall time**: from acceptance to the gateway's terminal event, waiting and preemption included.
 
-| Class      | Running | Queued | Input tokens | Output tokens | Wall time |
-|------------|---------|--------|--------------|---------------|-----------|
-| `reader`   | measure | measure| context      | measure       | measure   |
-| `agent`    | measure | measure| context      | measure       | measure   |
-| `internal` | measure | measure| measure      | measure       | measure   |
-| `external` | measure | measure| measure      | measure       | measure   |
+Provisional values, used until the first measurement on the card:
 
-The numbers come from the synthetic load test on the card. The rule is that the caps of `agent`, `internal` and
-`external` together leave room for the readers' peak. A request over a cap is refused with 429 `queue_full` or 400
-`context_limit`, and it is never queued behind the cap.
+| Class               | Active | Waiting | Input tokens | `max_tokens` | Wall time |
+|---------------------|--------|---------|--------------|--------------|-----------|
+| `reader`            | 4      | 8       | context      | 8192         | 300 s     |
+| `agent`             | 1      | 2       | context      | 8192         | 900 s     |
+| `internal`          | 2      | 8       | context      | 8192         | 900 s     |
+| `external`, all keys| 2      | 4       | 8192         | 1024         | 120 s     |
+| `external`, one key | 1      | 2       | 8192         | 1024         | 120 s     |
+
+- A request that would go over Active waits if Waiting has room. Otherwise it is refused with 429 `queue_full`. The
+  gateway never hands the engine a request past the cap.
+- Input or `max_tokens` over the class limit is refused with 400 `limit_exceeded`. Input plus `max_tokens` over the
+  context is refused with 400 `context_limit`. The first is our quota, the second the model's size.
+- Past the wall time the gateway cancels the request with the code `timeout` (section 9).
+- A limit on requests per minute alone would not protect readers: one long prompt costs more than many short ones.
+- The measured values follow one rule: the active caps of `agent`, `internal` and `external` together leave room for
+  the readers' peak.
 
 ## 8. Stopping the card
 
-One controller stops the card: the bot's GPU control (`local/gpu.ts` in simple-story-chat). A paused card runs
-nothing, so the service cannot wake itself.
+One controller stops the card: the bot's GPU control, `local/gpu.ts` in simple-story-chat. A paused card runs nothing,
+so the service cannot wake itself.
 
-1. The controller calls `POST /v1/control/drain`. From that moment every new request gets 503 `draining`.
-2. Requests of `reader`, `agent` and `internal` that are running finish. `external` requests that are running are
-   cancelled at once, and their streams end without `[DONE]`.
-3. The controller polls `/v1/state` until it reads `drained`, with nothing running and nothing queued.
-4. The controller stops the instance through the Vast API and reads the status back.
+1. The bot stops starting new turns and waits until its running turns end. Its existing rule stays: it does not pause
+   while a turn of its own or of an agent is running.
+2. The bot calls `POST /v1/control/drain` with `{"boot_id": "<from /v1/state>"}`. The gateway increments
+   `drain_generation` and answers 202 with `{"status": "draining", "boot_id": ..., "drain_generation": n}`. From then
+   on every new generation or count gets 503 `draining`. `/v1/state` and the control routes stay available.
+3. The gateway removes waiting requests of every class and answers them 503 `draining`. It cancels active outside
+   requests at once. Active requests of our classes finish. Any of them still running after 60 seconds is cancelled.
+4. The bot polls `/v1/state` until it reads `drained`, with nothing active and nothing waiting.
+5. The bot stops the instance through the Vast API and reads the status back.
 
-A drain that must be undone is undone with `POST /v1/control/open`. A service that starts is `starting` until the
-engine answers, then `ready`. The guard on the card deletes the instance at the rental's deadline whatever the bot and
-the service do; clients then see connection errors.
-
-Checking that the engine is idle and then stopping the card is not enough, because a request can arrive between the
-check and the stop. The drain closes that gap.
+- A second drain with the same `boot_id` answers the current state and does not increment the generation.
+- `POST /v1/control/open` with `{"boot_id": ..., "drain_generation": n}` undoes only that drain. With another
+  generation it answers 409 `stale_generation`, so a late open cannot undo a newer drain.
+- A control call with a `boot_id` other than the current one answers 409 `stale_boot`. A restarted service is a new
+  boot, and the controller reads `/v1/state` again.
+- The check "nothing runs" followed by a stop is not enough, because a request can arrive between the two. The drain
+  closes that gap.
+- The guard on the card deletes the instance at the rental's deadline, whatever the bot and the service do. Clients
+  then see connection errors.
 
 ## 9. Errors and cancellation
 
-The status carries the meaning, and the body is `{"error": {"code": "<code>"}}` with no text copied from the request.
+Every error body is `{"error": {"code": "<code>"}}`. The gateway installs its own handlers for validation errors, HTTP
+errors, unhandled exceptions and engine errors. None of them serializes an exception, its detail, the input or the
+body. FastAPI's default validation answer echoes the input, so it is replaced.
 
-| Status | Code                                       | When                                       |
-|--------|--------------------------------------------|--------------------------------------------|
-| 400    | `invalid_request`, `unsupported_field`     | the body breaks this contract              |
-| 400    | `context_limit`                            | input plus `max_tokens` exceeds the context|
-| 401    | `unauthorized`                             | no key or an unknown key                   |
-| 403    | `class_not_allowed`                        | the key may not use the class              |
-| 404    | `not_found`                                | a route outside section 3                  |
-| 413    | `body_too_large`                           | the request body is over 2 MB              |
-| 429    | `queue_full`                               | a class or key cap is reached              |
-| 503    | `starting`, `draining`, `drained`          | the service is not accepting               |
+| Status | Code                                              | When                                         |
+|--------|---------------------------------------------------|----------------------------------------------|
+| 400    | `invalid_request`, `unsupported_field`            | the body breaks section 4                    |
+| 400    | `limit_exceeded`                                  | input or `max_tokens` over the class limit   |
+| 400    | `context_limit`                                   | input plus `max_tokens` over the context     |
+| 401    | `unauthorized`                                    | no key or an unknown key                     |
+| 403    | `class_not_allowed`, `scope_not_allowed`          | the key may not use the class or the scope   |
+| 404    | `not_found`                                       | a route outside section 3                    |
+| 409    | `stale_boot`, `stale_generation`                  | control calls, section 8                     |
+| 413    | `body_too_large`                                  | the body is over 2 000 000 bytes             |
+| 429    | `queue_full`                                      | a cap of section 7                           |
+| 503    | `starting`, `draining`, `drained`, `engine_unavailable` | the service is not serving             |
+| 504    | `timeout`                                         | the wall time ran out before the stream started |
 
-Closing the HTTP connection cancels the request in the engine. The gateway passes the cancellation on at once, and the
-test measures how long the engine keeps generating after the client left. There is no retry inside the gateway, and no
-`Retry-After`.
+After the stream has started, the same codes arrive as the error event of section 4.
+
+Cancellation:
+- A client cancels by closing the connection.
+- The gateway watches for the disconnect in every phase: while the request waits, while the engine reads the prompt,
+  and while it streams. It sends nothing while the prompt is read, so it listens for the disconnect itself instead of
+  waiting for a failed send.
+- On a disconnect, a timeout or a drain, the gateway aborts the engine request in a `finally` block. It frees the
+  quota only after the engine has confirmed the abort.
+- Tests run the gateway in a real ASGI server over HTTP, not only through a test client. They measure how long the
+  engine keeps generating after the client left.
+- The gateway does not retry and sends no `Retry-After`.
 
 ## 10. Privacy
 
-- No log, trace, error report or metric label holds a request or a response body: not the messages, not the system
-  prompt, not the output, not the schema. This covers the gateway, the engine and the web server.
-- A log row may hold the time, route, key label, class, status, error code, token counts, the three durations of
-  section 4, whether the request was cancelled and the finish reason.
-- The engine's prefix cache is shared unless told otherwise, and shared caches leak prompts through timing. The gateway
-  sets `cache_salt` on every request. All of our classes share one salt, and each outside key gets its own. The salts
-  are random at every start and are never shown.
+- No log, trace, error report or metric label holds a request or response body. That means no messages, no system
+  prompt, no output and no schema. The rule covers the gateway, the web server and the engine, and the engine's
+  request logging stays off.
+- A log row may hold the time, route, key label, class, scope kind (`reader`, `agent`, `internal` or `external`, never
+  the opaque part), status, error code, token counts, the measurements of section 11, whether the request was
+  cancelled, and the finish reason.
+- Cache scopes and salts are described in section 2. They close the timing channel between scopes. They do not limit
+  memory.
 - Tests and load use synthetic stories only, never a real reader's story.
 - Before any outside key is issued, check Vast's terms and the license of the weights.
 
-## 11. What simple-story-chat sends llama-server today
+## 11. Measurements
 
-Written from `local/llama.ts` at 80fd241. The bot's new adapter follows sections 2 to 9; this list is what changes.
+The gateway measures in whole milliseconds, counting from the moment it accepted the request:
+- `wait_ms`: until it handed the request to the engine;
+- `first_token_ms`: until it received the first generated token of any kind from the engine, reasoning included;
+- `total_ms`: until it wrote its terminal event.
 
-| Today, llama-server                                          | Contract v1                                          |
-|--------------------------------------------------------------|------------------------------------------------------|
-| `GET /props`: `default_generation_settings.n_ctx` at least the configured context, `total_slots` equal to the configured slots | `GET /v1/state` and `/v1/models`; no slots |
-| `id_slot` and `cache_prompt: true`, so a reader's prefix stays in their slot | dropped: the engine's prefix cache has no slots and gives no placement guarantee |
-| `repeat_penalty`                                             | `repetition_penalty`                                 |
+These are the gateway's own numbers, not llama.cpp's timings. The engine's queue and preemption are inside
+`first_token_ms` and `total_ms`. The numbers arrive in `usage.simple_serving`.
+
+## 12. Pinned versions
+
+Before any contract run on the card, a lock file in this repository pins:
+- vLLM and its GGUF plugin;
+- FastAPI, Starlette and the ASGI server;
+- the model file, with its hash;
+- the revision of the tokenizer and the chat template.
+
+`/v1/state` shows them to the control key. A change to any of them makes a new configuration, which is measured again.
+
+## 13. What changes in simple-story-chat
+
+The new adapter is separate from `createLlama` and `createOpenAI`. `SIMPLE_CHAT_ALLOW_HOSTED` stays as it is.
+
+| Today, llama-server                                          | Contract v1                                     |
+|--------------------------------------------------------------|-------------------------------------------------|
+| `GET /props`: `n_ctx` at least the configured context, `total_slots` equal to the configured slots | `/v1/models` and `/v1/state`, no slots |
+| `id_slot` when the scheduler names a slot, and `cache_prompt: true` | dropped                                  |
+| `repeat_penalty`                                             | `repetition_penalty`                            |
 | `reasoning_format: "deepseek"`, `reasoning_effort: "none"`   | dropped; thinking is off through `chat_template_kwargs` |
-| `response_format: {"type": "json_object", "schema": ...}`    | `{"type": "json_schema", "json_schema": ...}`         |
-| `timings`: `cache_n`, `prompt_n`, `prompt_ms`, `predicted_n`, `predicted_ms`, `draft_n`, `draft_n_accepted` | `usage.simple_serving`: `queue_ms`, `first_token_ms`, `total_ms` |
-| no class                                                     | `X-Simple-Serving-Class`                             |
+| `response_format: {"type": "json_object", "schema": ...}`    | `{"type": "json_schema", "json_schema": {"name", "strict", "schema"}}` |
+| `timings` from llama-server                                  | `usage.simple_serving` and new log fields       |
+| the key is optional                                          | the key is required                             |
+| `model` in a chunk is checked when present                   | `model` is required in every chunk              |
+| `usage` is optional; with an exact count before generation, a stream may pass without it | the usage chunk is required |
+| a status other than 401/403/429/503/404 is `provider_failed`; after a 400 on a trusted estimate the adapter counts the input and may report `context_limit` | the adapter reads `error.code`, and `context_limit` arrives as a code; the recount after a 400 stays until the adapter trusts the code |
+| no class, no scope                                           | `X-Simple-Serving-Class`, `X-Simple-Serving-Scope` |
 
-Kept as they are:
-- the model alias checked in `/v1/models` and in every chunk;
-- `POST .../input_tokens` with the generation body;
-- streaming with usage;
-- sampling `temperature` (0.2 for memory, otherwise the configured value, 0.8 by default), `top_p` 0.95, `top_k` 64,
+Unchanged:
+- the count request carries the generation body, without `id_slot` as today;
+- sampling: `temperature` 0.2 for memory, otherwise the configured value, 0.8 by default; `top_p` 0.95, `top_k` 64,
   `min_p` 0;
-- the status mapping 401/403, 429, 503, 404 and anything else;
-- the client's limits of 2 MB per response body and 100 000 characters of text.
+- the client's limits: 2 000 000 bytes per response body and 100 000 characters of text;
+- neighbouring messages of the same role are merged before sending.
 
-The bot also merges neighbouring messages of the same role before it sends them.
+Also in simple-story-chat:
+- The service's address and key are configured apart from the rental control. Today `local/gpu-connection.ts` starts
+  `gpu/ensure-server.sh` on the card and forwards port 8080.
+- Over the new adapter the scheduler runs one lane, so the bot's calls stay one at a time. The guarantees built on
+  slots are off. Work marked `sharesPrefix` no longer has a slot where its prefix is sure to be cached, and the engine
+  may evict any prefix. This is a limitation of version 1. Several lanes without placement come later.
+- `usage.simple_serving` goes into new log fields, added to the whitelist in `local/model-error.ts` as non-negative
+  integers. The adapter does not write these numbers into `promptMs` or `predictedMs`.
+- `generateMany` stays on llama.cpp (section 1).
 
-Two changes follow in simple-story-chat. First, the address and the key of the service are configured apart from the
-rental control; today `local/gpu-connection.ts` starts `gpu/ensure-server.sh` on the card and forwards port 8080.
-Second, the scheduler runs over a provider without slots. It keeps its turns and its order, and it stops placing calls
-in slots.
+## 14. Shared cases
 
-## 12. Versions and shared cases
-
-- `/v1/state` reports `contract: "1"`. A change that breaks a client makes it `"2"`.
-- The contract cases live in this repository, in `contract/cases/`. A case holds the request, a script for the fake
-  engine, the expected status and stream from the fake, and the expected normalized result or error code. Expected
-  streams are compared only for the fake. Real model output is never compared byte for byte.
+- `/v1/state` reports the contract version. A change that breaks a client makes it `"2"`.
+- The canonical cases live here, in `contract/cases/`. A case holds the request, a script for the fake engine, the
+  expected status and stream from the fake, and the expected normalized result or error code. Streams are compared
+  only for the fake. Real model output is never compared byte for byte.
 - simple-story-chat keeps a pinned copy with the contract version, the source commit and a checksum, so that
-  `npm test` needs no network. The copy is updated on purpose, never edited in place.
-- The same cases run in two places: TypeScript tests of the adapter in simple-story-chat, Python tests of the gateway
-  here. Cancellation, a dropped connection and a drain racing a new request are scenario tests in each implementation,
-  because a static case cannot describe them.
-- Before the first rental: one run of the real adapter against the real gateway over the fake engine. Two green test
-  suites alone do not show that the two sides fit.
+  `npm test` needs no network. The copy is updated on purpose and never edited in place.
+- The same cases run in two places: TypeScript tests of the adapter there, Python tests of the gateway here.
+- Cancellation, a dropped connection, a drain racing a new request and a late open are scenario tests in each
+  implementation. A static case cannot describe them.
+- Before the first rental there is one run of the real adapter against the real gateway, in a real ASGI server, over
+  the fake engine.
 
-## 13. The first rental
+## 15. The first rental
 
-Everything below is written and dry-run before the card is rented, and the rental rules of simple-story-chat
-(`docs/gpu.md`, "While the cards are paid for") apply.
+Everything below is written and dry-run before the card is rented. The rental rules of simple-story-chat apply
+(`docs/gpu.md`, "While the cards are paid for").
 
-1. Smoke: vLLM loads the same GGUF Q6_K the bot uses with llama.cpp. The time for this is fixed in advance. If it does
-   not load or is too slow, it is not fixed on the paid card.
-2. The same weights on llama.cpp and on vLLM, with the tokenizer, chat template, thinking off, sampling, context and
-   cache mode pinned. Cold and warm are measured apart. This compares two engines on one set of weights. It does not
-   promise the same tokens.
+1. Smoke: vLLM loads the GGUF Q6_K that the bot uses with llama.cpp. The time for this is fixed in advance. If the
+   file does not load or is too slow, nobody fixes that on the paid card, and other weights are measured later as a
+   separate configuration.
+2. The same weights on llama.cpp and on vLLM. The tokenizer, chat template, thinking, sampling, context and cache
+   mode are pinned. Cold and warm runs are measured apart. This compares two engines on one set of weights. It does
+   not promise the same tokens.
 3. Synthetic load: the readers' time to first token and speed while `internal` and `external` load runs, including a
-   long outside prompt.
+   long outside prompt. The measured limits replace the provisional ones of section 7.
 4. `npm run eval` in simple-story-chat.
 5. Readers move to the service.
 6. Outside keys, as a separate step.
 
-Other quantizations, AWQ or GPTQ, are separate configurations measured later. They free memory for more requests, but
-the gain in requests served at once still has to be measured.
+AWQ and GPTQ are separate configurations, measured later. They free memory, but whether more requests then run at
+once has to be measured.
 
 ## Open questions for the owner
 
-1. Does our own `internal` work keep the card awake? Proposal: yes, until the rental's deadline.
-2. Outside access in version 1: keys given by hand only? Proposal: yes.
+1. Does our `internal` work keep the card awake? Proposal: yes, until the rental's deadline.
+2. Are outside keys in version 1 given by hand only? Proposal: yes.
