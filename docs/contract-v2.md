@@ -363,8 +363,9 @@ owner's restricted Vast key (section 12) and never the card's.
 - The container's onstart runs the card's launcher at every start of the instance. The launcher runs one pair, vLLM
   and the gateway, under a lock and with no restarts. Each start is a new boot.
 - A load that is not `ready` by the load deadline of the card's manifest, or a process of the pair that exits, ends
-  the pair. The launcher then stops the instance with the same call as the gateway and leaves a marker, and the card
-  does not start the service again until the owner retries by hand. A load never stays `starting` without end.
+  the pair. The launcher then stops the instance with the same call as the gateway. When the pair never became
+  `ready`, it first leaves a marker, and the card does not load the model again until the owner retries by hand. A
+  load never stays `starting` without end.
 - The guard on the card deletes the instance at the rental's deadline, whatever the service and the command do. Every
   start of the container arms it before the service and apart from it, and never moves its deadline.
 
