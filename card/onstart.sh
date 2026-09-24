@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs at every start of the container, from the line bootstrap.sh adds to /root/onstart.sh. It keeps the instance's
-# id and key for SSH sessions, starts the service's launcher and returns at once. It downloads and installs nothing,
-# and it arms no guard: a trial rental arms its own (README, "The card").
+# Runs at every start of the container, from the last line of the rental's own onstart, and at the end of
+# bootstrap.sh for the first start (README, "The card"). It keeps the instance's id and key for SSH sessions, starts
+# the service's launcher and returns at once. It downloads and installs nothing, and it arms no guard.
 # SIMPLE_SERVING_CARD_DIR and SIMPLE_SERVING_CARD_ROOT move the state and /root, for tests.
 set -uo pipefail
 umask 077

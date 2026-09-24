@@ -410,10 +410,22 @@ def recorder(path: Path, calls: Path) -> None:
     path.chmod(0o700)
 
 
-def test_bootstrap_and_onstart_change_nothing_when_they_run_again(tmp_path: Path) -> None:
+def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_starts_the_card(tmp_path: Path) -> None:
     code, state, root, calls = tmp_path / "code", tmp_path / "state", tmp_path / "root", tmp_path / "calls"
     (code / "card").mkdir(parents=True)
     root.mkdir()
+    environ = {"PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "SIMPLE_SERVING_CARD_DIR": str(state),
+               "SIMPLE_SERVING_CARD_ROOT": str(root), **CREDENTIAL}
+    # The rental's own onstart, which ends with the README's line. The platform may write it anew at every start.
+    line = next(line for line in (card.CODE / "README.md").read_text().splitlines() if line.startswith("if [[ -f /"))
+    rental = f"#!/usr/bin/env bash\n{line.replace('/workspace/simple-serving', str(code))}\n"
+
+    def start_container() -> int:
+        (root / "onstart.sh").write_text(rental)
+        return subprocess.run(["bash", str(root / "onstart.sh")], env=environ, capture_output=True, timeout=60,
+                              check=False).returncode
+
+    assert start_container() == 0 and not calls.exists()  # the first start, before the checkout is on the disk
     for name in ("bootstrap.sh", "onstart.sh"):
         shutil.copy(card.CODE / "card" / name, code / "card" / name)
     manifest = (card.CODE / "card/manifest.env").read_text()
@@ -429,8 +441,6 @@ def test_bootstrap_and_onstart_change_nothing_when_they_run_again(tmp_path: Path
     for path in (state / "gateway/bin/pip", state / "vllm/bin/pip", state / GATEWAY, tmp_path / "bin/curl",
                  tmp_path / "bin/flock"):
         recorder(path, calls)
-    environ = {"PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "SIMPLE_SERVING_CARD_DIR": str(state),
-               "SIMPLE_SERVING_CARD_ROOT": str(root), **CREDENTIAL}
 
     def bootstrap(stdin: str) -> int:
         done = subprocess.run(["bash", str(code / "card/bootstrap.sh")], input=stdin, env=environ, capture_output=True,
@@ -446,7 +456,7 @@ def test_bootstrap_and_onstart_change_nothing_when_they_run_again(tmp_path: Path
             "TOKENIZER_FILES": f"tokenizer.json:{hashlib.sha256(tokenizer).hexdigest()}"}
     (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in pins.items()))
     assert bootstrap(keys) == 0
-    written = [state / "keys.json", state / "prepared", root / "onstart.sh", *root.glob(".simple-chat-*")]
+    written = [state / "keys.json", state / "prepared", *root.glob(".simple-chat-*")]
     first = {path: (path.read_bytes(), path.stat().st_mode & 0o777) for path in written}
     assert bootstrap(keys) == 0
     assert bootstrap("") == 0  # the card holds the keys
@@ -456,10 +466,11 @@ def test_bootstrap_and_onstart_change_nothing_when_they_run_again(tmp_path: Path
     assert {path: (path.read_bytes(), path.stat().st_mode & 0o777) for path in written} == first
     assert {mode for _, mode in first.values()} == {0o600}
     assert json.loads((state / "keys.json").read_text()) == {"client": CLIENT, "control": CONTROL}
-    assert (root / "onstart.sh").read_text() == f"bash {code}/card/onstart.sh\n"
+    assert (root / "onstart.sh").read_text() == rental  # the preparation changes no onstart
     assert (root / ".simple-chat-instance-id").read_text() == CREDENTIAL["CONTAINER_ID"]
+    assert start_container() == 0  # a resume: the rental's own onstart, as it was, starts the card
     noted = calls.read_text().splitlines()
-    assert noted.count("python -m simple_serving.card") == 3
+    assert noted.count("python -m simple_serving.card") == 4  # the three preparations, then the resume
     assert not any(line.startswith(("curl", "flock")) for line in noted)  # nothing to fetch, and no guard
     assert not list(root.glob(".simple-chat-trial-*"))
     assert all("--require-hashes" in line for line in noted if line.startswith("pip"))

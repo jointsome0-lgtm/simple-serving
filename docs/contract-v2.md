@@ -363,8 +363,9 @@ owner's restricted Vast key (section 12) and never the card's.
 
 ### Starting the card
 
-- The container's onstart runs the card's launcher at every start of the instance. The launcher runs one pair, vLLM
-  and the gateway, under a lock and with no restarts. Each start is a new boot.
+- At every start of the instance the last line of the rental's own onstart runs the card's `onstart.sh` from the
+  persistent disk, and that starts the card's launcher. The preparation changes no onstart, since a start may restore
+  it. The launcher runs one pair, vLLM and the gateway, under a lock and with no restarts. Each start is a new boot.
 - A load that is not `ready` by the load deadline of the card's manifest, or a process of the pair that exits, ends
   the pair. The launcher then stops the instance with the same call as the gateway. When the pair never became
   `ready`, it first leaves a marker, and the card does not load the model again until the owner retries by hand. A
@@ -551,9 +552,9 @@ Everything below is written and dry-run before the card is rented. The rental ru
 
 The first rental is a disposable trial. Its own onstart, simple-story-chat's `gpu/trial-onstart.sh`, arms a guard
 that deletes the instance three hours after the first start, whatever the service and the command do, and writes the
-instance's id and key, which the first preparation needs. The service never deletes its card, and its `onstart.sh`
-arms no guard. An onstart for a permanent rental, which writes the two files and no guard, is decided before
-permanent use.
+instance's id and key, which the first preparation needs; its last line runs the card's `onstart.sh` (section 8). The
+service never deletes its card, and its `onstart.sh` arms no guard. An onstart for a permanent rental, which writes
+the two files and ends with the same line but arms no guard, is decided before permanent use.
 
 Before the rental, without a card:
 
@@ -594,9 +595,10 @@ On the card:
    long the engine keeps computing a request after the gateway closed it, measured apart while the prompt is read and
    while the answer streams, through the proxy.
 5. The card's own lifecycle, with no bot running: the gateway stops the instance with the container's key, and the
-   command reads `stopped` back from Vast; the command resumes it; onstart starts exactly one pair with a new boot,
-   the pins, keys and weights still in place, and the trial guard's deadline unchanged. eval requests hold the service,
-   and once they end the service falls asleep on its own. The listeners stay on loopback, and no raw output is kept.
+   command reads `stopped` back from Vast; the command resumes it; the rental's own onstart, with no start over SSH,
+   starts exactly one pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline
+   unchanged. eval requests hold the service, and once they end the service falls asleep on its own. The listeners
+   stay on loopback, and no raw output is kept.
 6. `npm run eval` in simple-story-chat.
 7. Readers move to the service.
 8. Outside keys, as a separate step.

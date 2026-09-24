@@ -150,7 +150,7 @@ the served model name equal to `alias`, priority scheduling (`--scheduling-polic
 ## The card
 
 `card/` holds what runs on a rented card: `manifest.env` with the pins and parameters, `bootstrap.sh` for the
-preparation, and `onstart.sh`, which runs at every start of the container. The checkout goes to
+preparation, and `onstart.sh`, which the rental's own onstart runs at every start. The checkout goes to
 `/workspace/simple-serving`, and the card keeps its state in `/workspace/simple-serving-card`: the key hashes, the
 weights, the two venvs and the logs.
 
@@ -164,14 +164,22 @@ The preparation, once per rental and never at a resume:
    makes the client key and the control key once, and prints only the SHA-256 of each, one per line.
 
 bootstrap.sh installs each lock into a venv of its own with every hash checked, fetches the weights and the tokenizer
-files at their pinned revisions and checks their hashes, keeps the key hashes in `keys.json`, adds `onstart.sh` to the
-container's `/root/onstart.sh`, and starts the service. It refuses while a pin is empty, as `VLLM_VERSION` is until
-the pin is chosen, and it never replaces the keys the card holds.
+files at their pinned revisions and checks their hashes, keeps the key hashes in `keys.json`, and starts the
+service. It refuses while a pin is empty, as `VLLM_VERSION` is until the pin is chosen, and it never replaces the keys
+the card holds.
 
-At every start of the container `onstart.sh` keeps the instance's id and key for SSH sessions and starts the
-launcher, `python -m simple_serving.card`. The launcher runs vLLM and the gateway once, with no restarts, and when the
-pair fails it stops the instance; its options and exit codes are in `simple_serving/card.py`. The tunnel's remote
-command waits while the pair runs:
+At every later start of the container the rental's own onstart starts the service. Its last line runs the service's
+`onstart.sh` from the persistent disk, once the preparation has put it there:
+
+```
+if [[ -f /workspace/simple-serving/card/onstart.sh ]]; then bash /workspace/simple-serving/card/onstart.sh; fi
+```
+
+The preparation changes no onstart, since the platform may restore `/root/onstart.sh` from the rental's own at a
+start. `onstart.sh` keeps the instance's id and key for SSH sessions and starts the launcher,
+`python -m simple_serving.card`. The launcher runs vLLM and the gateway once, with no restarts, and when the pair
+fails it stops the instance; its options and exit codes are in `simple_serving/card.py`. The tunnel's remote command
+waits while the pair runs:
 
 ```
 cd /workspace/simple-serving && /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --hold
@@ -187,10 +195,11 @@ ssh <card> 'cd /workspace/simple-serving &&
   /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --retry'
 ```
 
-The service stops its card and never deletes it. A disposable trial rental arms a guard through its own onstart,
-simple-story-chat's `gpu/trial-onstart.sh`: it deletes the instance three hours after the first start, and it also
-writes the instance's id and key, which the first preparation needs. An onstart for a permanent rental, which writes
-the two files and arms no guard, is decided before permanent use.
+The service stops its card and never deletes it. A disposable trial rental's onstart is simple-story-chat's
+`gpu/trial-onstart.sh` with the line above at its end: it adds the owner's SSH key when one is given, writes the
+instance's id and key, which the first preparation needs, and arms a guard that deletes the instance three hours after
+the first start. An onstart for a permanent rental, which writes the two files, arms no guard and ends with the same
+line, is decided before permanent use.
 
 ## The command
 

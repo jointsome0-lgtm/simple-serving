@@ -2,12 +2,13 @@
 # The card's preparation, once per rental and never at a resume (contract section 12). Run it over SSH with the
 # SHA-256 of the client key and of the control key on stdin, one per line, or with nothing once the card holds them:
 #
-#   ssh <card> bash /workspace/simple-serving/card/bootstrap.sh < key-hashes
+#   uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh
 #
 # It installs each lock into a venv of its own with every hash checked, fetches the weights and the tokenizer files
-# at their pinned revisions and checks their hashes, keeps the key hashes in keys.json, adds card/onstart.sh to the
-# container's onstart, and then runs it for the first start. A second run changes nothing that is in place, and no run
-# prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed; 3 a pin or a lock is missing;
+# at their pinned revisions and checks their hashes, keeps the key hashes in keys.json, and then runs card/onstart.sh
+# for the first start. At every later start the rental's own onstart runs it (README, "The card"): the preparation
+# changes no onstart, which the platform may restore at a start. A second run changes nothing that is in place, and no
+# run prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed; 3 a pin or a lock is missing;
 # 4 no keys, or not two different SHA-256 digests; 5 the card holds other keys, which stay. The last step is the
 # launcher's start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
 # SIMPLE_SERVING_CARD_DIR and SIMPLE_SERVING_CARD_ROOT move the state and /root, for tests.
@@ -15,7 +16,6 @@ set -euo pipefail
 umask 077
 code=$(cd "$(dirname "$0")/.." && pwd)
 state=${SIMPLE_SERVING_CARD_DIR:-/workspace/simple-serving-card}
-root=${SIMPLE_SERVING_CARD_ROOT:-/root}
 source "$code/card/manifest.env"
 stamped=("$code/card/manifest.env" "$code/card/gateway-requirements.txt" "$code/card/vllm-requirements.txt")
 
@@ -54,8 +54,5 @@ for entry in "${files[@]}"; do
   fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "${entry%%:*}" "${entry#*:}" "$state/tokenizer/${entry%%:*}"
 done
 
-printf -v hook 'bash %q' "$code/card/onstart.sh"
-touch "$root/onstart.sh"
-grep -Fqx -- "$hook" "$root/onstart.sh" || printf '%s\n' "$hook" >> "$root/onstart.sh"
 cat "${stamped[@]}" | sha256sum | cut -d ' ' -f 1 > "$state/prepared"
 exec bash "$code/card/onstart.sh"
