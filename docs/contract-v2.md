@@ -369,8 +369,6 @@ owner's restricted Vast key (section 12) and never the card's.
   the pair. The launcher then stops the instance with the same call as the gateway. When the pair never became
   `ready`, it first leaves a marker, and the card does not load the model again until the owner retries by hand. A
   load never stays `starting` without end.
-- The guard on the card deletes the instance at the rental's deadline, whatever the service and the command do. Every
-  start of the container arms it before the service and apart from it, and never moves its deadline.
 
 ### Drain and open
 
@@ -548,6 +546,12 @@ Also in simple-story-chat:
 Everything below is written and dry-run before the card is rented. The rental rules of simple-story-chat apply
 (`docs/gpu.md`, "While the cards are paid for").
 
+The first rental is a disposable trial. Its own onstart, simple-story-chat's `gpu/trial-onstart.sh`, arms a guard
+that deletes the instance three hours after the first start, whatever the service and the command do, and writes the
+instance's id and key, which the first preparation needs. The service never deletes its card, and its `onstart.sh`
+arms no guard. An onstart for a permanent rental, which writes the two files and no guard, is decided before
+permanent use.
+
 Before the rental, without a card:
 
 - Pin vLLM (a version or an image), the weights, the tokenizer and the chat template. Check the API and the CLI of
@@ -588,7 +592,7 @@ On the card:
    while the answer streams, through the proxy.
 5. The card's own lifecycle, with no bot running: the gateway stops the instance with the container's key, and the
    command reads `stopped` back from Vast; the command resumes it; onstart starts exactly one pair with a new boot,
-   the pins, keys and weights still in place, and the guard's deadline unchanged. eval requests hold the service,
+   the pins, keys and weights still in place, and the trial guard's deadline unchanged. eval requests hold the service,
    and once they end the service falls asleep on its own. The listeners stay on loopback, and no raw output is kept.
 6. `npm run eval` in simple-story-chat.
 7. Readers move to the service.

@@ -377,7 +377,7 @@ def test_bootstrap_and_onstart_change_nothing_when_they_run_again(tmp_path: Path
     (state / "tokenizer").mkdir()
     (state / "tokenizer/tokenizer.json").write_bytes(tokenizer)
     for path in (state / "gateway/bin/pip", state / "vllm/bin/pip", state / GATEWAY, tmp_path / "bin/curl",
-                 tmp_path / "bin/flock"):  # flock would run the guard, which waits three hours
+                 tmp_path / "bin/flock"):
         recorder(path, calls)
     environ = {"PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "SIMPLE_SERVING_CARD_DIR": str(state),
                "SIMPLE_SERVING_CARD_ROOT": str(root), **CREDENTIAL}
@@ -408,9 +408,9 @@ def test_bootstrap_and_onstart_change_nothing_when_they_run_again(tmp_path: Path
     assert json.loads((state / "keys.json").read_text()) == {"client": CLIENT, "control": CONTROL}
     assert (root / "onstart.sh").read_text() == f"bash {code}/card/onstart.sh\n"
     assert (root / ".simple-chat-instance-id").read_text() == CREDENTIAL["CONTAINER_ID"]
-    eventually(lambda: calls.read_text().count("flock -n ") == 3)  # each start arms the guard under its lock
     noted = calls.read_text().splitlines()
     assert noted.count("python -m simple_serving.card") == 3
-    assert not any(line.startswith("curl") for line in noted)
+    assert not any(line.startswith(("curl", "flock")) for line in noted)  # nothing to fetch, and no guard
+    assert not list(root.glob(".simple-chat-trial-*"))
     assert all("--require-hashes" in line for line in noted if line.startswith("pip"))
     assert Card.load(code=code, state=state, environ=environ, root=root).prepared()
