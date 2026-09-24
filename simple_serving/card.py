@@ -68,8 +68,8 @@ GATEWAY_GRACE_S, ENGINE_GRACE_S = 10, 30  # from SIGTERM to SIGKILL
 POLL_S, HOLD_START_S, STOP_WAIT_S = 2, 60, 60
 ENGINE_ENV = {"VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
 
-# vLLM's wording of the numbers kept, provisional until the pin: the first rental checks each against the pinned
-# version's output. A field's last word names its unit, and SCALE turns vLLM's GiB, seconds and factors into it.
+# vLLM's wording of the numbers kept, as in the source of vLLM 0.30.0, and provisional until the first rental checks
+# each against its output. A field's last word names its unit, and SCALE turns vLLM's GiB, seconds and factors into it.
 MEASUREMENTS = tuple(re.compile(pattern) for pattern in (
     r"Model loading took (?P<weights_mib>\d+(?:\.\d+)?) GiB(?: memory)? and (?P<weights_load_ms>\d+(?:\.\d+)?) s",
     r"Available KV cache memory: (?P<kv_cache_mib>-?\d+(?:\.\d+)?) GiB",  # below 0 when the weights leave no room
