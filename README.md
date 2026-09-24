@@ -41,6 +41,8 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
   a fake clock and a fake Vast;
 - `tests/test_card.py`: the card's launcher, what it keeps of vLLM's output, and the preparation and onstart scripts,
   with stand-ins for vLLM, the gateway, pip, curl and flock;
+- `tests/test_cli.py`: the command on the owner's machine, against a fake Vast and a fake SSH that forwards to the
+  gateway;
 - `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher.
 
 Three kinds of test stay apart (contract section 14). A client's adapter runs the public steps of the cases in its own
@@ -158,8 +160,8 @@ The preparation, once per rental and never at a resume:
    `uv export --frozen --no-dev --no-emit-project -o card/gateway-requirements.txt`. vLLM's lock,
    `card/vllm-requirements.txt`, is made with the pin.
 2. Copy the checkout to `/workspace/simple-serving`.
-3. `ssh <card> bash /workspace/simple-serving/card/bootstrap.sh < key-hashes`, where `key-hashes` holds the SHA-256 of
-   the client key and of the control key, one per line.
+3. `uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh`. `keys`
+   makes the client key and the control key once, and prints only the SHA-256 of each, one per line.
 
 bootstrap.sh installs each lock into a venv of its own with every hash checked, fetches the weights and the tokenizer
 files at their pinned revisions and checks their hashes, keeps the key hashes in `keys.json`, adds `onstart.sh` to the
@@ -174,3 +176,30 @@ codes are in `simple_serving/card.py`. The tunnel's remote command waits while t
 ```
 cd /workspace/simple-serving && /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --hold
 ```
+
+## The command
+
+On the owner's machine, `python -m simple_serving.cli` starts the card, holds the tunnel and asks for sleep:
+
+```
+uv run python -m simple_serving.cli up | sleep | status | keys
+```
+
+- `up` resumes the instance if it is stopped, waits for the gateway to be ready, and holds the tunnel in the
+  foreground: `http://127.0.0.1:8080` for the clients, `http://127.0.0.1:8081` for control. Ctrl+C closes it and sends
+  nothing. The card falls asleep by itself 13 minutes after the last request of ours, and `up` then ends.
+- `sleep` makes the card fall asleep now, through the tunnel or a short forward of its own, and waits until Vast
+  reports the instance stopped.
+- `status` shows the instance's state in Vast and what the gateway answers.
+- `keys` makes the two gateway keys once, for the preparation above.
+
+The configuration is `~/.config/simple-serving/config.json`, readable by its owner alone, or the file that `--config`
+names:
+
+```json
+{"instance_id": "...", "vast_api_key": "...", "ssh_host": "...", "client_key": "...", "control_key": "..."}
+```
+
+`keys` writes the last two. `vast_api_key` is a Vast key allowed GET and PUT on that instance alone, never the account
+key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. The bot's model profile takes the address
+`http://127.0.0.1:8080` and the client key; it holds neither the control key nor a Vast key.
