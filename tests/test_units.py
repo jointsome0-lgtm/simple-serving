@@ -21,7 +21,7 @@ from simple_serving.engine import EngineError, refusal
 from simple_serving.errors import STATUS, ServiceError
 from simple_serving.policy import cache_salt, find_key, resolve
 from simple_serving.stream import Translator, Usage
-from simple_serving.validation import check_chat, check_drain, check_open, parse_json
+from simple_serving.validation import check_boot, check_chat, check_open, parse_json
 
 from .support import (
     ALIAS,
@@ -115,10 +115,10 @@ def test_json_nested_as_deep_as_allowed() -> None:
 
 
 def test_control_bodies() -> None:
-    assert check_drain({"boot_id": "b"}) == "b"
+    assert check_boot({"boot_id": "b"}) == "b"
     assert check_open({"boot_id": "b", "drain_generation": 0}) == ("b", 0)
-    assert code_of(lambda: check_drain({"boot_id": "b", "force": True})) == "unsupported_field"
-    assert code_of(lambda: check_drain({"boot_id": 1})) == "invalid_request"
+    assert code_of(lambda: check_boot({"boot_id": "b", "force": True})) == "unsupported_field"
+    assert code_of(lambda: check_boot({"boot_id": 1})) == "invalid_request"
     assert code_of(lambda: check_open({"boot_id": "b", "drain_generation": True})) == "invalid_request"
     assert code_of(lambda: check_open({"boot_id": "b", "drain_generation": -1})) == "invalid_request"
     assert code_of(lambda: check_open({"boot_id": "b"})) == "invalid_request"

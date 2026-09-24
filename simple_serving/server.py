@@ -15,7 +15,7 @@ from typing import Self
 import uvicorn
 from starlette.types import ASGIApp
 
-from . import log
+from . import log, vast
 from .app import control_app, public_app
 from .config import ENV_VAR, Config, ConfigError, Listener, load
 from .engine import EngineClient
@@ -76,11 +76,12 @@ class Servers:
 
 
 class Gateway:
-    """The service and its two listeners. `async with Gateway(config)` starts them; leaving the block stops them."""
+    """The service and its two listeners. `async with Gateway(config, stop=...)` starts them; leaving the block stops
+    them. `stop` is how the service stops its instance when it falls asleep."""
 
-    def __init__(self, config: Config, *, graceful_s: int = GRACEFUL_SHUTDOWN_S) -> None:
+    def __init__(self, config: Config, *, stop: vast.Stop, graceful_s: int = GRACEFUL_SHUTDOWN_S) -> None:
         self.config = config
-        self.service = Service(config, EngineClient(config.engine_url))
+        self.service = Service(config, EngineClient(config.engine_url), stop)
         self.ports: dict[str, int] = {}
         self._graceful_s = graceful_s
         self._servers: Servers | None = None
@@ -129,5 +130,5 @@ async def serve(config: Config) -> None:
     stop = asyncio.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, stop.set)
-    async with Gateway(config):
+    async with Gateway(config, stop=vast.from_environment()):
         await stop.wait()

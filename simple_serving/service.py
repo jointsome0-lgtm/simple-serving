@@ -1,5 +1,5 @@
-"""The service's own state: its boot, status and drain (contract sections 6 and 8), the engine's health, the checks
-that every inference request passes (sections 4, 5 and 7), and the work it has accepted."""
+"""The service's own state: its boot, status, drain and sleep (contract sections 6 and 8), the engine's health, the
+checks that every inference request passes (sections 4, 5 and 7), and the work it has accepted."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from importlib import metadata
 from typing import TYPE_CHECKING, Any
 
-from . import CONTRACT, log
+from . import CONTRACT, log, vast
 from .admission import Admission, CountPlaces
 from .asgi import Exchange
 from .config import Config, Key
@@ -24,17 +24,20 @@ if TYPE_CHECKING:
     from .inference import Work
 
 STARTING_RETRY_S = 1.0
+FORCED_STOP_S = 120  # from the start of a sleep; the one place where the instance stops under unfinished work
 PINNED_PACKAGES = ("fastapi", "starlette", "uvicorn", "httpx")
 
 
 class Service:
-    def __init__(self, config: Config, engine: EngineClient) -> None:
+    def __init__(self, config: Config, engine: EngineClient, stop: vast.Stop) -> None:
         self.config = config
         self.engine = engine
+        self._stop = stop
         self.boot_id = secrets.token_hex(16)
         self._salt_secret = secrets.token_bytes(32)  # made at every start, never shown
         self.drain_generation = 0
         self.draining = False
+        self.sleep_requested = False  # once set it stays: the instance is being stopped
         self.engine_status = "starting"  # then "ready", and "failed" while checks fail or once the engine has changed
         self.context_tokens: int | None = None
         self._engine_length: int | None = None  # the engine's own context length, as this boot verified it
@@ -43,19 +46,25 @@ class Service:
         self.count_places = CountPlaces(config)
         self.work: set[Work] = set()  # accepted generations and counts that have not answered yet
         self.ours_inflight = 0  # requests of ours between their authorization and their end, accepted or not
-        self.idle_since = 0.0  # the event loop's time when the last of them ended
+        self.idle_since = 0.0  # the event loop's time when the last of them ended, or of the first ready
+        self._no_work = asyncio.Event()  # set while `work` is empty
+        self._no_work.set()
         self._deadline: asyncio.TimerHandle | None = None
+        self._idle: asyncio.TimerHandle | None = None
         self._watch: asyncio.Task[None] | None = None
+        self._sleep: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         self._watch = asyncio.create_task(self._watch_engine())
 
     async def close(self) -> None:
-        if self._deadline is not None:
-            self._deadline.cancel()
-        if self._watch is not None:
-            self._watch.cancel()
-            await asyncio.wait({self._watch})
+        for timer in (self._deadline, self._idle):
+            if timer is not None:
+                timer.cancel()
+        for task in (self._watch, self._sleep):
+            if task is not None:
+                task.cancel()
+                await asyncio.wait({task})
         await self.engine.aclose()
 
     @property
@@ -108,10 +117,13 @@ class Service:
         """Take on a checked request, if the service still serves."""
         self.check_serving()
         self.work.add(work)
+        self._no_work.clear()
 
     def release(self, work: Work) -> None:
         """The work has answered."""
         self.work.discard(work)
+        if not self.work:
+            self._no_work.set()
 
     def check_input(self, caller: Caller, input_tokens: int, max_tokens: int) -> None:
         limit = self.config.limits[caller.cls].input_tokens
@@ -138,27 +150,28 @@ class Service:
                                  "model": self.config.alias, "context_tokens": self.context_tokens,
                                  "drain_generation": self.drain_generation}
         if control:
-            state.update(active=self.admission.active_counts(), waiting=self.admission.waiting_counts(),
-                         versions=self._versions())
+            state.update(sleep_requested=self.sleep_requested, active=self.admission.active_counts(),
+                         waiting=self.admission.waiting_counts(), versions=self._versions())
         return state
 
     def drain(self, boot_id: str) -> dict[str, Any]:
         """Refuse new work, stop waiting work and outside work, and let the rest of our work finish until the
-        deadline. With no work at all the drain is complete before it answers."""
+        deadline. With no work at all the drain is complete before it answers. A repeated drain answers the current
+        state."""
         self._check_boot(boot_id)
-        if self.draining:  # a repeated drain answers the current state
-            return self._control_answer()
-        self.draining = True
-        self.drain_generation += 1
-        log.row("drain", drain_generation=self.drain_generation)
-        for work in list(self.work):
-            if work.waiting or work.caller.key.outside:
-                work.stop("draining")
-        self._deadline = asyncio.get_running_loop().call_later(self.config.drain_deadline_s, self._drain_deadline)
+        self._close()
+        return self._control_answer()
+
+    def sleep(self, boot_id: str) -> dict[str, Any]:
+        """Fall asleep now, as at the end of the idle interval. A repeated sleep answers the current state."""
+        self._check_boot(boot_id)
+        self._fall_asleep("control")
         return self._control_answer()
 
     def open(self, boot_id: str, drain_generation: int) -> dict[str, Any]:
         self._check_boot(boot_id)
+        if self.sleep_requested:
+            raise ServiceError("sleep_pending")  # the stop may be on its way: an open cannot call it back
         if drain_generation != self.drain_generation:
             raise ServiceError("stale_generation")  # a late open cannot undo a newer drain
         if self.draining:
@@ -168,6 +181,52 @@ class Service:
                 self._deadline = None
             log.row("open", drain_generation=self.drain_generation)
         return self._control_answer()
+
+    def _close(self) -> None:
+        if self.draining:  # a drain that is on goes on as it is
+            return
+        self.draining = True
+        self.drain_generation += 1
+        log.row("drain", drain_generation=self.drain_generation)
+        for work in list(self.work):
+            if work.waiting or work.caller.key.outside:
+                work.stop("draining")
+        self._deadline = asyncio.get_running_loop().call_later(self.config.drain_deadline_s, self._drain_deadline)
+
+    def _idle_check(self) -> None:
+        """The idle timer has come due. With no request of ours in flight and `idle_timeout_s` since the last one
+        ended, the service falls asleep in this same step, so no request can come between the check and the drain.
+        Otherwise the timer is set again for the earliest moment the service could fall asleep."""
+        loop = asyncio.get_running_loop()
+        deadline = self.idle_since + self.config.idle_timeout_s
+        if self.ours_inflight or loop.time() < deadline:
+            later = loop.time() + self.config.idle_timeout_s if self.ours_inflight else deadline
+            self._idle = loop.call_at(later, self._idle_check)
+        else:
+            self._fall_asleep("idle")
+
+    def _fall_asleep(self, reason: str) -> None:
+        """New work is refused before anything else runs. Then one task lets the drain end and stops the instance.
+        Nothing undoes a sleep."""
+        if self.sleep_requested:
+            return
+        self.sleep_requested = True
+        if self._idle is not None:
+            self._idle.cancel()
+            self._idle = None
+        log.row("sleep", reason=reason)
+        self._close()
+        self._sleep = asyncio.create_task(self._sleep_then_stop())
+
+    async def _sleep_then_stop(self) -> None:
+        """Wait until the drain has ended, then stop the instance. A drain that has not ended FORCED_STOP_S after the
+        sleep began is not waited for (section 8)."""
+        try:
+            async with asyncio.timeout(FORCED_STOP_S):
+                await self._no_work.wait()
+        except TimeoutError:
+            log.row("sleep_forced", drain_generation=self.drain_generation)
+        await vast.stop_until_accepted(self._stop)
 
     def _drain_deadline(self) -> None:
         self._deadline = None
@@ -215,6 +274,8 @@ class Service:
             self._engine_length = length
             limit = self.config.context_tokens
             self.context_tokens = min(length, limit) if limit is not None else length
+            self.idle_since = asyncio.get_running_loop().time()  # the first ready starts the idle interval
+            self._idle_check()
         elif length != self._engine_length:
             self._engine_changes()
             return

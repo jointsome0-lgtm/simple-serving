@@ -20,7 +20,7 @@ LOGGER = logging.getLogger("simple_serving")
 FIELDS = frozenset({
     "event", "listener", "route", "method", "key", "class", "scope", "status", "code", "cancelled", "finish",
     "input_tokens", "output_tokens", "cached_tokens", "count_matches", "wait_ms", "first_token_ms", "total_ms",
-    "exception", "boot_id", "service_status", "drain_generation", "context_tokens", "port",
+    "exception", "boot_id", "service_status", "drain_generation", "context_tokens", "port", "reason",
 })
 
 

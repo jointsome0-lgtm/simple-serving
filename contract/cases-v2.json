@@ -194,7 +194,7 @@
     },
     {
       "name": "state",
-      "about": "Any key reads the state; the control key also sees counts and versions.",
+      "about": "Any key reads the state; the control key also sees whether a sleep was asked for, counts and versions.",
       "steps": [
         {
           "request": { "base": "public", "method": "GET", "path": "/v1/state", "key": "test-key-bot" },
@@ -206,7 +206,7 @@
           "request": { "base": "control", "method": "GET", "path": "/v1/state", "key": "test-key-control" },
           "engine": null,
           "response": { "status": 200, "json": { "contract": "2", "boot_id": "present", "status": "ready", "model": "test-model", "context_tokens": 4096, "drain_generation": 0,
-            "active": { "reader": 0, "agent": 0, "internal": 0, "external": 0 }, "waiting": { "reader": 0, "agent": 0, "internal": 0, "external": 0 }, "versions": "present" } },
+            "sleep_requested": false, "active": { "reader": 0, "agent": 0, "internal": 0, "external": 0 }, "waiting": { "reader": 0, "agent": 0, "internal": 0, "external": 0 }, "versions": "present" } },
           "result": { "status": "ready" }
         }
       ]
@@ -459,15 +459,19 @@
           "engine": null, "response": { "status": 404, "error": "not_found" }, "result": { "error": "not_found" } },
         { "request": { "base": "public", "method": "POST", "path": "/v1/control/drain", "key": "test-key-control", "body": { "boot_id": "x" } },
           "engine": null, "response": { "status": 404, "error": "not_found" }, "result": { "error": "not_found" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/control/sleep", "key": "test-key-control", "body": { "boot_id": "x" } },
+          "engine": null, "response": { "status": 404, "error": "not_found" }, "result": { "error": "not_found" } },
         { "request": { "base": "control", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": {} },
           "engine": null, "response": { "status": 404, "error": "not_found" }, "result": { "error": "not_found" } }
       ]
     },
     {
       "name": "control-needs-control-key",
-      "about": "Only the control key may drain or open.",
+      "about": "Only the control key may drain, sleep or open.",
       "steps": [
         { "request": { "base": "control", "method": "POST", "path": "/v1/control/drain", "key": "test-key-bot", "body": { "boot_id": "x" } },
+          "engine": null, "response": { "status": 403, "error": "forbidden" }, "result": { "error": "forbidden" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/sleep", "key": "test-key-bot", "body": { "boot_id": "x" } },
           "engine": null, "response": { "status": 403, "error": "forbidden" }, "result": { "error": "forbidden" } }
       ]
     },
@@ -661,6 +665,51 @@
         { "only": "gateway", "request": { "base": "public", "method": "GET", "path": "/v1/state", "key": "test-key-bot" },
           "engine": null, "response": { "status": 200, "json": { "status": "ready", "drain_generation": 0 }, "json_subset": true } }
       ]
+    },
+    {
+      "name": "sleep",
+      "about": "A sleep of an idle service drains it before it answers, and the instance is then stopped. New work is refused, a repeated sleep answers the same state, an open is refused and a drain changes nothing.",
+      "steps": [
+        { "request": { "base": "control", "method": "GET", "path": "/v1/state", "key": "test-key-control" },
+          "engine": null, "response": { "status": 200, "json": { "status": "ready", "drain_generation": 0, "sleep_requested": false }, "json_subset": true }, "capture": { "boot": "boot_id" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/sleep", "key": "test-key-control", "body": { "boot_id": "$boot" } },
+          "engine": null, "response": { "status": 202, "json": { "status": "drained", "boot_id": "$boot", "drain_generation": 1 } } },
+        { "request": { "base": "control", "method": "GET", "path": "/v1/state", "key": "test-key-control" },
+          "engine": null, "response": { "status": 200, "json": { "status": "drained", "drain_generation": 1, "sleep_requested": true }, "json_subset": true } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": null, "response": { "status": 503, "error": "drained" }, "result": { "error": "drained" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/sleep", "key": "test-key-control", "body": { "boot_id": "$boot" } },
+          "engine": null, "response": { "status": 202, "json": { "status": "drained", "boot_id": "$boot", "drain_generation": 1 } } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/open", "key": "test-key-control", "body": { "boot_id": "$boot", "drain_generation": 1 } },
+          "engine": null, "response": { "status": 409, "error": "sleep_pending" }, "result": { "error": "sleep_pending" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/drain", "key": "test-key-control", "body": { "boot_id": "$boot" } },
+          "engine": null, "response": { "status": 202, "json": { "status": "drained", "boot_id": "$boot", "drain_generation": 1 } } }
+      ]
+    },
+    {
+      "name": "sleep-during-drain",
+      "about": "A sleep during a drain goes on with that drain, and an open of it is then refused.",
+      "steps": [
+        { "request": { "base": "control", "method": "GET", "path": "/v1/state", "key": "test-key-control" },
+          "engine": null, "response": { "status": 200, "json": { "status": "ready", "drain_generation": 0 }, "json_subset": true }, "capture": { "boot": "boot_id" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/drain", "key": "test-key-control", "body": { "boot_id": "$boot" } },
+          "engine": null, "response": { "status": 202, "json": { "status": "drained", "boot_id": "$boot", "drain_generation": 1 } } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/sleep", "key": "test-key-control", "body": { "boot_id": "$boot" } },
+          "engine": null, "response": { "status": 202, "json": { "status": "drained", "boot_id": "$boot", "drain_generation": 1 } } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/open", "key": "test-key-control", "body": { "boot_id": "$boot", "drain_generation": 1 } },
+          "engine": null, "response": { "status": 409, "error": "sleep_pending" }, "result": { "error": "sleep_pending" } }
+      ]
+    },
+    {
+      "name": "sleep-with-wrong-boot",
+      "about": "A sleep for another boot is refused and changes nothing.",
+      "steps": [
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/sleep", "key": "test-key-control", "body": { "boot_id": "another-boot" } },
+          "engine": null, "response": { "status": 409, "error": "stale_boot" }, "result": { "error": "stale_boot" } },
+        { "request": { "base": "control", "method": "GET", "path": "/v1/state", "key": "test-key-control" },
+          "engine": null, "response": { "status": 200, "json": { "status": "ready", "drain_generation": 0, "sleep_requested": false }, "json_subset": true } }
+      ]
     }
   ],
   "scenarios": [
@@ -676,6 +725,12 @@
     "drain-races-request: requests of each class accepted before a drain, and requests arriving during it. Waiting ones of every class get 503 draining. An active outside one is cancelled at once: 503 draining if its stream has not started (the engine is still reading its prompt), else the error event draining. Our active ones finish, or at the drain deadline end the same two ways. A request arriving after the drain began gets 503 with the current status, draining or drained. None is left without an answer.",
     "drain-cancels-outside: an active outside stream is cancelled at the drain and ends without [DONE]; our active requests finish; after the drain deadline they are cancelled too, and the state turns drained.",
     "late-open-after-restart: an open carrying the previous boot_id after a restart is refused with stale_boot.",
+    "idle-sleep: idle_timeout_s after the first ready, or after the end of the last request of ours, the service falls asleep: it drains, and once the drain has ended it stops its instance. Outside requests, health checks, models, state, control and requests refused before their authorization never hold it.",
+    "idle-race: a request of ours authorized before the idle decision holds the service, also while its body is still arriving, and a full interval runs from its end. A request that arrives after the decision gets 503 and the sleep goes on.",
+    "prepare-bound: a request of ours whose body has not arrived 30 s after the request did gets 504 timeout, and one whose refusal its client does not read is given up; either way it holds the service no longer.",
+    "sleep-drains: our work in flight at a sleep finishes and new work gets 503; the instance stops once the drain has ended, or 120 s after the sleep began if it has not.",
+    "stop-retries: a stop that hangs, fails with a 5xx or a 401, or answers late is tried again about every 30 s, one attempt at a time, until Vast accepts one. Meanwhile admission never reopens and the state never reads ready.",
+    "client-leaves-in-sleep: a client that leaves in the middle of a count or a stream changes neither boot_id nor the sleep state.",
     "error-bodies-are-safe: no error answer and no log row contains any part of the request body, on every error path."
   ]
 }

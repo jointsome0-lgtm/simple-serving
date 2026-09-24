@@ -14,6 +14,7 @@ STATUS = {
     "not_found": 404,
     "stale_boot": 409,
     "stale_generation": 409,
+    "sleep_pending": 409,
     "body_too_large": 413,
     "queue_full": 429,
     "internal_error": 500,

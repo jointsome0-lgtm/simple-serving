@@ -1,9 +1,10 @@
 """The two listeners' applications (contract section 3).
 
-The public listener serves inference, models and state. The control listener, on loopback, serves state, drain and
-open. They are two applications on two sockets, so the gateway tells them apart by the listener that received a
-request, never by the client's address. Every route is a raw ASGI endpoint (`routes.py`); FastAPI routes the requests
-and answers the rest with the gateway's own handlers, so its default answers, which may echo input, never go out.
+The public listener serves inference, models and state. The control listener, on loopback, serves state, drain,
+sleep and open. They are two applications on two sockets, so the gateway tells them apart by the listener that
+received a request, never by the client's address. Every route is a raw ASGI endpoint (`routes.py`); FastAPI routes
+the requests and answers the rest with the gateway's own handlers, so its default answers, which may echo input, never
+go out.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ PUBLIC_ROUTES: list[tuple[str, str, Handler]] = [
 CONTROL_ROUTES: list[tuple[str, str, Handler]] = [
     ("/v1/state", "GET", routes.state),
     ("/v1/control/drain", "POST", routes.drain),
+    ("/v1/control/sleep", "POST", routes.sleep),
     ("/v1/control/open", "POST", routes.open_),
 ]
 

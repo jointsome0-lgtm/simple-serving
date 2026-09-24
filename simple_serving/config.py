@@ -24,7 +24,7 @@ CLASSES = ("reader", "agent", "internal", "external")
 SHARED = ("agent", "internal", "external")  # the classes that share places; readers have their own
 
 FIELDS = {"alias", "engine_url", "listen", "context_tokens", "body_limit_bytes", "max_connections", "keys", "limits",
-          "count_limits", "engine_priority", "drain_deadline_s", "health_interval_s", "versions"}
+          "count_limits", "engine_priority", "drain_deadline_s", "idle_timeout_s", "health_interval_s", "versions"}
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 LOOPBACK_V4, LOOPBACK_V6 = ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_address("::1")
 
@@ -77,6 +77,7 @@ class Config:
     count_per_outside_key: int
     engine_priority: Mapping[str, int]
     drain_deadline_s: float
+    idle_timeout_s: float
     public: Listener
     control: Listener
     max_connections: int
@@ -151,6 +152,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
         engine_priority=MappingProxyType({name: _integer(priority.get(name), f"engine_priority.{name}", None)
                                           for name in CLASSES}),
         drain_deadline_s=_seconds(data.get("drain_deadline_s"), "drain_deadline_s"),
+        idle_timeout_s=_seconds(data.get("idle_timeout_s", 780), "idle_timeout_s"),
         public=_listener(listen.get("public"), "listen.public"),
         control=_listener(listen.get("control"), "listen.control", loopback=True),
         max_connections=_integer(data.get("max_connections", 64), "max_connections", 1),

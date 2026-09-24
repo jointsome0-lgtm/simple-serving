@@ -8,14 +8,16 @@ parsed as JSON. From the arrival to the acceptance, a refusal's send included, t
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from typing import Any
 
 from .asgi import ClientGone, Exchange
 from .errors import ServiceError
 from .inference import Count, Generation
 from .service import Service
-from .validation import check_chat, check_drain, check_open, parse_json
+from .validation import check_boot, check_chat, check_open, parse_json
 
-CONTROL_BODY_LIMIT = 4096  # a drain or an open is a few dozen bytes
+CONTROL_BODY_LIMIT = 4096  # a drain, a sleep or an open is a few dozen bytes
 PREPARE_S = 30  # a fixed bound, not a setting (contract section 4)
 
 
@@ -83,27 +85,26 @@ async def state(service: Service, exchange: Exchange) -> None:
 
 
 async def drain(service: Service, exchange: Exchange) -> None:
-    try:
-        _authorize_control(service, exchange)
-        boot_id = check_drain(parse_json(await exchange.read_body(CONTROL_BODY_LIMIT)))
-        await exchange.send_json(202, service.drain(boot_id))
-    except ServiceError as error:
-        await exchange.send_error(error.code)
-    except ClientGone:
-        exchange.record.cancelled = True
+    await _control(service, exchange, lambda body: (202, service.drain(check_boot(body))))
+
+
+async def sleep(service: Service, exchange: Exchange) -> None:
+    await _control(service, exchange, lambda body: (202, service.sleep(check_boot(body))))
 
 
 async def open_(service: Service, exchange: Exchange) -> None:
+    await _control(service, exchange, lambda body: (200, service.open(*check_open(body))))
+
+
+async def _control(service: Service, exchange: Exchange, act: Callable[[Any], tuple[int, dict[str, Any]]]) -> None:
+    """A control route: the control key, the body, then the action. The action takes effect before its answer is
+    sent, so a client that loses the answer finds the action done when it asks again."""
     try:
-        _authorize_control(service, exchange)
-        boot_id, drain_generation = check_open(parse_json(await exchange.read_body(CONTROL_BODY_LIMIT)))
-        await exchange.send_json(200, service.open(boot_id, drain_generation))
+        if not service.authenticate(exchange).control:
+            raise ServiceError("forbidden")
+        status, answer = act(parse_json(await exchange.read_body(CONTROL_BODY_LIMIT)))
+        await exchange.send_json(status, answer)
     except ServiceError as error:
         await exchange.send_error(error.code)
     except ClientGone:
         exchange.record.cancelled = True
-
-
-def _authorize_control(service: Service, exchange: Exchange) -> None:
-    if not service.authenticate(exchange).control:
-        raise ServiceError("forbidden")

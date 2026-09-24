@@ -7,16 +7,14 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import logging
 import secrets
 import time
-from collections.abc import Iterator
 from typing import Any
 
 import httpx
 import pytest
 
-from simple_serving import app, log
+from simple_serving import app
 from simple_serving.config import CLASSES
 from simple_serving.fake_engine import FakeEngine, Script
 from simple_serving.service import Service
@@ -292,7 +290,7 @@ async def test_the_control_key_sees_places_by_class_and_the_pinned_versions() ->
         for base in (stack.public, stack.control):
             state = (await call(client, "GET", base + "/v1/state", key=CONTROL)).json()
             assert (state["active"], state["waiting"]) == (expected, expected)
-            assert state["versions"]["vllm"] == "0.0.0-synthetic"
+            assert state["versions"]["vllm"] == "0.0.0-synthetic" and state["sleep_requested"] is False
             assert {"fastapi", "starlette", "uvicorn", "httpx", "python"} <= set(state["versions"])
         for base in (stack.public, stack.control):
             state = (await call(client, "GET", base + "/v1/state")).json()
@@ -324,23 +322,6 @@ async def test_an_engine_event_that_is_not_a_text_chunk_of_the_served_model_is_e
                                            {"finish_reason": "stop"}])
         later = await generate(client, stack, chat_body())
     assert (later.status, later.error_event, later.done) == (200, "engine_unavailable", False)
-
-
-@pytest.fixture
-def logged() -> Iterator[io.StringIO]:
-    """Everything logged during the test, formatted as the gateway writes its log."""
-    stream = io.StringIO()
-    handler = logging.StreamHandler(stream)
-    handler.setFormatter(log.JsonFormatter())
-    root = logging.getLogger()
-    level = root.level
-    root.addHandler(handler)
-    root.setLevel(logging.INFO)
-    try:
-        yield stream
-    finally:
-        root.removeHandler(handler)
-        root.setLevel(level)
 
 
 def fail(*args: Any, **kwargs: Any) -> Any:

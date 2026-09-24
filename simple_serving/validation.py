@@ -80,8 +80,8 @@ def check_chat(body: Any, alias: str) -> ChatRequest:
     )
 
 
-def check_drain(body: Any) -> str:
-    """The `boot_id` of a drain."""
+def check_boot(body: Any) -> str:
+    """The `boot_id` of a drain or a sleep."""
     return _control(body, ("boot_id",))[0]
 
 

@@ -74,7 +74,9 @@ class Process:
         self.ports: dict[str, int] = {}
 
     async def start(self) -> None:
-        env = {**os.environ, "SIMPLE_SERVING_CONFIG": str(self.config)}
+        # Without Vast's two values, a sleep of this process could never stop a real instance.
+        env = {name: value for name, value in os.environ.items() if not name.startswith("CONTAINER_")}
+        env["SIMPLE_SERVING_CONFIG"] = str(self.config)
         self.process = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "simple_serving", cwd=ROOT, env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)

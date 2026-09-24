@@ -25,6 +25,7 @@ from simple_serving.config import Listener, from_service_block
 from simple_serving.engine import EngineStream
 from simple_serving.fake_engine import Call, FakeEngine, Script
 from simple_serving.server import Gateway, Servers, bind
+from simple_serving.vast import VastError
 
 ROOT = Path(__file__).resolve().parent.parent
 CASES: dict[str, Any] = json.loads((ROOT / "contract" / "cases-v2.json").read_text(encoding="utf-8"))
@@ -46,12 +47,45 @@ def service_with(**changes: Any) -> dict[str, Any]:
     return block
 
 
+HANG = "hang"
+
+
+class FakeVast:
+    """The stop of the instance, as the service calls it. Each attempt takes the next of `outcomes`: None succeeds, a
+    number of seconds succeeds that much later, a VastError fails, HANG never answers. Once they run out, every attempt
+    succeeds."""
+
+    def __init__(self, *outcomes: VastError | float | str | None) -> None:
+        self.outcomes = list(outcomes)
+        self.attempts: list[float] = []  # the event loop's time of each attempt
+        self.stopped = False
+        self.running = 0
+        self.most = 0  # the most attempts that ran at once
+
+    async def __call__(self) -> None:
+        self.attempts.append(asyncio.get_running_loop().time())
+        self.running += 1
+        self.most = max(self.most, self.running)
+        try:
+            outcome = self.outcomes.pop(0) if self.outcomes else None
+            if outcome == HANG:
+                await asyncio.Event().wait()
+            if isinstance(outcome, VastError):
+                raise outcome
+            if isinstance(outcome, float):
+                await asyncio.sleep(outcome)
+            self.stopped = True
+        finally:
+            self.running -= 1
+
+
 @dataclass
 class Stack:
     fake: FakeEngine
     gateway: Gateway
     public: str
     control: str
+    vast: FakeVast
 
     @property
     def service(self) -> Any:
@@ -60,20 +94,22 @@ class Stack:
 
 @asynccontextmanager
 async def running(service: dict[str, Any] | None = None, *, fake: FakeEngine | None = None,
-                  wait_ready: bool = True, **extra: Any) -> AsyncIterator[Stack]:
-    """A fake engine and a gateway in front of it, both served by uvicorn on free loopback ports. `extra` holds
-    configuration fields that the service block leaves out, such as `health_interval_s`."""
+                  vast: FakeVast | None = None, wait_ready: bool = True, **extra: Any) -> AsyncIterator[Stack]:
+    """A fake engine and a gateway in front of it, both served by uvicorn on free loopback ports, with a fake stop of
+    the instance. `extra` holds configuration fields that the service block leaves out, such as
+    `health_interval_s`."""
     block = service or SERVICE
     fake = fake or FakeEngine(block["alias"], block["context_tokens"])
+    vast = vast or FakeVast()
     sock = bind(Listener("127.0.0.1", 0))
     engine_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
     engine = Servers([(fake, sock)], graceful_s=1)
     await engine.start()
     try:
         config = from_service_block(block, engine_url=engine_url, **extra)
-        async with Gateway(config, graceful_s=1) as gateway:
+        async with Gateway(config, stop=vast, graceful_s=1) as gateway:
             stack = Stack(fake, gateway, f"http://127.0.0.1:{gateway.ports['public']}",
-                          f"http://127.0.0.1:{gateway.ports['control']}")
+                          f"http://127.0.0.1:{gateway.ports['control']}", vast)
             if wait_ready:
                 await until(lambda: gateway.service.status == "ready")
             yield stack

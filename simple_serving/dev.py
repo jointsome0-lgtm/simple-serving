@@ -8,7 +8,9 @@ or a file that holds one under "service", such as the cases file itself. Fields 
 values of contract section 7. The fake engine answers every request: the count is ceil(characters of all message
 contents / 4), and a generation streams a fixed synthetic sentence and ends with stop. It answers in milliseconds,
 unless --first-event-delay-ms stands in for a long prompt and --event-delay-ms slows the stream, so that requests
-overlap and wait for places.
+overlap and wait for places. As on the card, the gateway falls asleep after an idle interval without our work, 780
+seconds unless the file sets another. It has no instance to stop: every attempt fails as `unconfigured`, and the
+gateway stays drained until the launcher starts again.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-from . import log
+from . import log, vast
 from .config import CLASSES, Config, ConfigError, Listener, from_service_block
 from .fake_engine import FakeEngine, Script
 from .server import Gateway, Servers, bind
@@ -110,7 +112,7 @@ async def run(config: Config, engine_port: int, delays: Delays) -> None:
     engine = Servers([(fake, bind(Listener(HOST, engine_port)))])
     await engine.start()
     try:
-        async with Gateway(config) as gateway:
+        async with Gateway(config, stop=vast.unconfigured) as gateway:
             while gateway.service.status != "ready":
                 await asyncio.sleep(0.01)
             print(summary(config, engine_port, delays), flush=True)
