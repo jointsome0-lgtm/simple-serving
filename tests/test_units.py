@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -451,18 +452,20 @@ def test_the_service_block_of_the_cases_is_a_valid_configuration() -> None:
 # The stop of the instance (section 8)
 
 @pytest.mark.anyio
-async def test_a_stop_puts_stopped_to_the_fixed_endpoint_with_the_key_in_a_header() -> None:
+@pytest.mark.parametrize(("put", "state"), [(vast.stop, "stopped"), (vast.resume, "running")])
+async def test_a_stop_or_a_resume_puts_its_state_to_the_fixed_endpoint_with_the_key_in_a_header(
+        put: Callable[..., Awaitable[None]], state: str) -> None:
     requests: list[httpx.Request] = []
 
     def accept(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         return httpx.Response(200, json={"success": True})
 
-    await vast.stop("123", MARKER, transport=httpx.MockTransport(accept))
+    await put("123", MARKER, transport=httpx.MockTransport(accept))
     (request,) = requests
     assert (request.method, str(request.url)) == ("PUT", "https://console.vast.ai/api/v0/instances/123/")
     assert request.headers["authorization"] == f"Bearer {MARKER}"
-    assert json.loads(request.content) == {"state": "stopped"}
+    assert json.loads(request.content) == {"state": state}
 
 
 @pytest.mark.anyio
@@ -498,30 +501,21 @@ def test_a_stop_needs_the_containers_instance_and_its_key() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("actual", "intended", "state"), [
-    ("running", "running", "running"), ("loading", "running", "starting"), ("exited", "running", "starting"),
-    ("running", "stopped", "stopping"), ("stopped", "stopped", "stopped"), ("exited", "stopped", "stopped"),
+@pytest.mark.parametrize(("instance", "actual", "intended", "state"), [
+    (123, "running", "running", "running"), (123, "loading", "running", "starting"),
+    (123, "exited", "running", "starting"), (123, "running", "stopped", "stopping"),
+    (123, "stopped", "stopped", "stopped"), (123, "exited", "stopped", "stopped"),
+    (124, "running", "running", "answer"),  # another instance's state is no answer
 ])
-async def test_the_owner_reads_the_instances_state_as_the_bot_does(actual: str, intended: str, state: str) -> None:
+async def test_the_owner_reads_the_instances_state_as_the_bot_does(instance: int, actual: str, intended: str,
+                                                                   state: str) -> None:
     def answer(request: httpx.Request) -> httpx.Response:
         assert (request.method, request.headers["authorization"]) == ("GET", f"Bearer {MARKER}")
-        return httpx.Response(200, json={"instances": {"id": 123, "actual_status": actual,
+        return httpx.Response(200, json={"instances": {"id": instance, "actual_status": actual,
                                                        "intended_status": intended}})
 
-    assert await vast.show("123", MARKER, transport=httpx.MockTransport(answer)) == state
-
-
-@pytest.mark.anyio
-async def test_the_owner_resumes_with_running_and_never_reads_another_instance() -> None:
-    requests: list[httpx.Request] = []
-
-    def answer(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if request.method == "PUT":
-            return httpx.Response(200, json={"success": True})
-        return httpx.Response(200, json={"instances": {"id": 124, "actual_status": "running"}})
-
-    await vast.resume("123", MARKER, transport=httpx.MockTransport(answer))
-    assert json.loads(requests[0].content) == {"state": "running"}
-    with pytest.raises(vast.VastError, match="answer"):
-        await vast.show("123", MARKER, transport=httpx.MockTransport(answer))
+    try:
+        read = await vast.show("123", MARKER, transport=httpx.MockTransport(answer))
+    except vast.VastError as error:
+        read = error.code
+    assert read == state

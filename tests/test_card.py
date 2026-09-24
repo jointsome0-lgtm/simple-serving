@@ -127,35 +127,42 @@ async def test_a_signal_ends_the_pair_and_leaves_the_instance_running(state: Pat
     assert {"CONTAINER_ID", "CONTAINER_API_KEY", "SIMPLE_SERVING_CONFIG"} <= set(gateway["env"])
 
 
-@pytest.mark.anyio
-async def test_a_load_that_fails_gives_up_and_stops_the_instance(state: Path, logged: io.StringIO) -> None:
-    stand_in(state / ENGINE, "Traceback (most recent call last):", f'  File "{SECRET}.py", line 1, in load',
-             "x" * 3 * card.LINE_BYTES + SECRET, f"torch.OutOfMemoryError: CUDA out of memory. {SECRET}", exit_code=1)
-    stand_in(state / GATEWAY)
-    vast = FakeVast()
-    assert await card.launch(card_at(state), asyncio.Event(), vast) == "engine_exit"
-    assert (state / "given-up").read_text() == "engine_exit\n"
-    assert vast.stopped
-    assert [row["code"] for row in rows(logged, "engine_failure")] == ["traceback", "out_of_memory"]
-    assert exits(logged) == {"gateway": -signal.SIGTERM, "engine": 1}
-    assert SECRET not in logged.getvalue()
+FAILED_LOAD = ("Traceback (most recent call last):", f'  File "{SECRET}.py", line 1, in load',
+               "x" * 3 * card.LINE_BYTES + SECRET, f"torch.OutOfMemoryError: CUDA out of memory. {SECRET}")
+WAITS = ((), None)  # a stand-in that prints nothing and waits to be ended
 
 
 @pytest.mark.anyio
-async def test_a_load_that_is_not_ready_by_the_deadline_gives_up(state: Path, logged: io.StringIO,
-                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("engine", "gateway", "outcome", "exit_codes"), [
+    ((FAILED_LOAD, 1), WAITS, "engine_exit", {"gateway": -signal.SIGTERM, "engine": 1}),
+    (WAITS, WAITS, "load_deadline", {"gateway": -signal.SIGTERM, "engine": -signal.SIGTERM}),
+    (WAITS, None, "spawn_failed", {"engine": -signal.SIGTERM}),  # a gateway that cannot start
+    (WAITS, ((READY, SLEEP), 0), "asleep", {"gateway": 0, "engine": -signal.SIGTERM}),  # the gateway's own stop began
+    (WAITS, ((READY,), 1), "gateway_exit", {"gateway": 1, "engine": -signal.SIGTERM}),
+])
+async def test_a_pair_that_ends_stops_the_instance_and_gives_up_only_before_ready(
+        state: Path, logged: io.StringIO, monkeypatch: pytest.MonkeyPatch, engine: tuple[tuple[str, ...], int | None],
+        gateway: tuple[tuple[str, ...], int | None] | None, outcome: str, exit_codes: dict[str, int]) -> None:
     clock = FakeClock(monkeypatch)
-    stand_in(state / ENGINE)
-    stand_in(state / GATEWAY)
+    stand_in(state / ENGINE, *engine[0], exit_code=engine[1])
+    if gateway is not None:
+        stand_in(state / GATEWAY, *gateway[0], exit_code=gateway[1])
     vast = FakeVast()
     launch = asyncio.create_task(card.launch(card_at(state, LOAD_DEADLINE_S="900"), asyncio.Event(), vast))
-    await until(lambda: Path(f"{state / GATEWAY}.ran").exists())
-    await clock.advance(899)
-    assert not launch.done()
-    await clock.advance(1)
-    assert await launch == "load_deadline"
-    assert (state / "given-up").read_text() == "load_deadline\n"
-    assert vast.stopped
+    if outcome == "load_deadline":
+        await until(lambda: Path(f"{state / GATEWAY}.ran").exists())
+        await clock.advance(899)
+        assert not launch.done()
+        await clock.advance(1)
+    assert await launch == outcome
+    if outcome in ("asleep", "gateway_exit"):  # an end after ready gives nothing up
+        assert not (state / "given-up").exists()
+    else:
+        assert (state / "given-up").read_text() == f"{outcome}\n"
+    assert vast.stopped and exits(logged) == exit_codes
+    failures = [row["code"] for row in rows(logged, "engine_failure")]
+    assert failures == (["traceback", "out_of_memory"] if outcome == "engine_exit" else [])
+    assert SECRET not in logged.getvalue()
 
 
 @pytest.mark.anyio
@@ -203,36 +210,10 @@ async def test_a_retry_within_the_interval_runs_the_pair_and_stops_nothing(state
     assert vast.attempts == []
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize(("lines", "exit_code", "outcome"), [
-    ((READY, SLEEP), 0, "asleep"),  # the gateway had begun to stop the instance
-    ((READY,), 1, "gateway_exit"),
-])
-async def test_an_end_after_ready_stops_the_instance_without_giving_up(state: Path, logged: io.StringIO,
-                                                                       lines: tuple[str, ...], exit_code: int,
-                                                                       outcome: str) -> None:
-    stand_in(state / ENGINE)
-    stand_in(state / GATEWAY, *lines, exit_code=exit_code)
-    vast = FakeVast()
-    assert await card.launch(card_at(state), asyncio.Event(), vast) == outcome
-    assert vast.stopped
-    assert not (state / "given-up").exists()
-    assert exits(logged) == {"gateway": exit_code, "engine": -signal.SIGTERM}
-
-
-@pytest.mark.anyio
-async def test_a_gateway_that_cannot_start_ends_the_engine(state: Path, logged: io.StringIO) -> None:
-    stand_in(state / ENGINE)
-    vast = FakeVast()
-    assert await card.launch(card_at(state), asyncio.Event(), vast) == "spawn_failed"
-    assert exits(logged) == {"engine": -signal.SIGTERM}
-    assert (state / "given-up").read_text() == "spawn_failed\n"
-    assert vast.stopped
-
-
-def test_the_engine_output_leaves_a_few_numbers_and_categories(state: Path, logged: io.StringIO) -> None:
+def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways_own_rows(state: Path,
+                                                                                          logged: io.StringIO) -> None:
     pair = card.Pair(state)
-    for line in (
+    for text in (
         "INFO 09-24 12:00:00 [gpu_model_runner.py:2007] Model loading took 23.5000 GiB memory and 41.250000 seconds",
         "INFO 09-24 12:00:10 [gpu_worker.py:298] Available KV cache memory: 4.25 GiB",
         "INFO 09-24 12:00:10 [kv_cache_utils.py:1087] GPU KV cache size: 123,456 tokens",
@@ -243,7 +224,7 @@ def test_the_engine_output_leaves_a_few_numbers_and_categories(state: Path, logg
         ("ValueError: To serve at least one request with the models's max seq len (65536), (8.00 GiB KV cache is "
          "needed, which is larger than the available KV cache memory (4.25 GiB)."),
     ):
-        pair.engine_line(line.encode() + b"\n")
+        pair.engine_line(text.encode() + b"\n")
     assert rows(logged, "engine_measure") == [
         {"event": "engine_measure", "weights_mib": 24064, "weights_load_ms": 41250},
         {"event": "engine_measure", "kv_cache_mib": 4352},
@@ -251,11 +232,6 @@ def test_the_engine_output_leaves_a_few_numbers_and_categories(state: Path, logg
         {"event": "engine_measure", "concurrency_x100": 345},
     ]
     assert [row["code"] for row in rows(logged, "engine_failure")] == ["cuda_error", "kv_cache_too_small"]
-    assert SECRET not in logged.getvalue()
-
-
-def test_the_gateway_output_keeps_the_gateways_own_rows_only(state: Path, logged: io.StringIO) -> None:
-    pair = card.Pair(state)
     refused = json.dumps({"event": "stop_failed", "code": "forbidden", "status": 403})  # the gateway's own stop
     lines = [
         READY.encode(),
