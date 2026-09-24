@@ -53,7 +53,7 @@ fetch() {
     path=$4/${entry%%:*}
     [[ $(sha256sum 2>/dev/null < "$path") == "${entry#*:}  -" ]] && continue
     curl --fail --location --silent --show-error --retry 5 --retry-all-errors --continue-at - --output "$path" \
-      "https://huggingface.co/$1/resolve/$2/${entry%%:*}"
+      "https://huggingface.co/$1/resolve/$2/${entry%%:*}" || exit 1
     [[ $(sha256sum < "$path") == "${entry#*:}  -" ]] || { rm -f "$path"; exit 1; }
   done
 }
