@@ -224,6 +224,10 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
         f"ERROR 09-24 12:02:00 [core.py:710] RuntimeError: CUDA error: {SECRET}",
         ("ValueError: To serve at least one request with the models's max seq len (65536), (8.00 GiB KV cache is "
          "needed, which is larger than the available KV cache memory (4.25 GiB)."),
+        ("ValueError: Free memory on device cuda:0 (28.1/31.84 GiB) on startup is less than desired GPU memory "
+         "utilization (0.92, 29.3 GiB)."),
+        "AssertionError: Error in memory profiling. Initial free memory 29.1 GiB, current free memory 29.6 GiB.",
+        "RuntimeError: Frontend process failed during engine core initialization. See root cause above.",
     ):
         pair.engine_line(text.encode() + b"\n")
     assert rows(logged, "engine_measure") == [
@@ -232,7 +236,8 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
         {"event": "engine_measure", "kv_cache_tokens": 123456, "concurrency_x100": 345},
         {"event": "engine_measure", "kv_cache_mib": -1280},
     ]
-    assert [row["code"] for row in rows(logged, "engine_failure")] == ["cuda_error", "kv_cache_too_small"]
+    assert [row["code"] for row in rows(logged, "engine_failure")] == [
+        "cuda_error", "kv_cache_too_small", "memory_taken", "memory_profiling_failed", "engine_dead"]
     refused = json.dumps({"event": "stop_failed", "code": "forbidden", "status": 403})  # the gateway's own stop
     lines = [
         READY.encode(),

@@ -80,10 +80,12 @@ SCALE = {"mib": 1024, "ms": 1000, "tokens": 1, "x100": 100}
 FAILURES = (
     ("out_of_memory", ("out of memory", "outofmemoryerror")),
     ("kv_cache_too_small", ("larger than the available kv cache memory", "no available memory for the cache blocks")),
+    ("memory_taken", ("free memory on device",)),  # another process holds a part of the card's memory at the start
+    ("memory_profiling_failed", ("error in memory profiling",)),  # another process freed memory while vLLM profiled
     ("cuda_error", ("cuda error", "cudaerror", "cublas_status", "nccl error")),
     ("bind_failed", ("address already in use",)),
     ("argument_error", ("unrecognized arguments", "error: argument")),
-    ("engine_dead", ("enginedeaderror", "engine core initialization failed")),
+    ("engine_dead", ("enginedeaderror", "engine core initialization failed", "frontend process failed")),
     ("traceback", ("traceback (most recent call last)",)),
 )
 GATEWAY_KEYS = log.FIELDS | {"time", "logger", "level"}
