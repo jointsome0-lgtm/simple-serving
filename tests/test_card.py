@@ -216,8 +216,9 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
     for text in (
         "INFO 09-24 12:00:00 [gpu_model_runner.py:2007] Model loading took 23.5000 GiB memory and 41.250000 seconds",
         "INFO 09-24 12:00:10 [gpu_worker.py:298] Available KV cache memory: 4.25 GiB",
-        "INFO 09-24 12:00:10 [kv_cache_utils.py:1087] GPU KV cache size: 123,456 tokens",
-        "INFO 09-24 12:00:10 [kv_cache_utils.py:1091] Maximum concurrency for 65,536 tokens per request: 3.45x",
+        ("(EngineCore pid=7) INFO 09-24 12:00:10 [kv_cache_utils.py:2395] GPU KV cache size: 123,456 tokens, Maximum "
+         "concurrency for 65,536 tokens per request: 3.45x"),
+        "INFO 09-24 12:00:10 [gpu_worker.py:298] Available KV cache memory: -1.25 GiB",
         f"INFO 09-24 12:01:00 [logger.py:43] Received request chatcmpl-1: prompt: '{SECRET}'",
         f"ERROR 09-24 12:02:00 [core.py:710] RuntimeError: CUDA error: an illegal memory access, {SECRET}",
         f"ERROR 09-24 12:02:00 [core.py:710] RuntimeError: CUDA error: {SECRET}",
@@ -228,8 +229,8 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
     assert rows(logged, "engine_measure") == [
         {"event": "engine_measure", "weights_mib": 24064, "weights_load_ms": 41250},
         {"event": "engine_measure", "kv_cache_mib": 4352},
-        {"event": "engine_measure", "kv_cache_tokens": 123456},
-        {"event": "engine_measure", "concurrency_x100": 345},
+        {"event": "engine_measure", "kv_cache_tokens": 123456, "concurrency_x100": 345},
+        {"event": "engine_measure", "kv_cache_mib": -1280},
     ]
     assert [row["code"] for row in rows(logged, "engine_failure")] == ["cuda_error", "kv_cache_too_small"]
     refused = json.dumps({"event": "stop_failed", "code": "forbidden", "status": 403})  # the gateway's own stop

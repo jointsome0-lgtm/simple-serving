@@ -71,7 +71,7 @@ ENGINE_ENV = {"VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1", "HF_HUB_OFFLINE":
 # version's output. A field's last word names its unit, and SCALE turns vLLM's GiB, seconds and factors into it.
 MEASUREMENTS = tuple(re.compile(pattern) for pattern in (
     r"Model loading took (?P<weights_mib>\d+(?:\.\d+)?) GiB(?: memory)? and (?P<weights_load_ms>\d+(?:\.\d+)?) s",
-    r"Available KV cache memory: (?P<kv_cache_mib>\d+(?:\.\d+)?) GiB",
+    r"Available KV cache memory: (?P<kv_cache_mib>-?\d+(?:\.\d+)?) GiB",  # below 0 when the weights leave no room
     r"GPU KV cache size: (?P<kv_cache_tokens>\d[\d,]*) tokens",
     r"Maximum concurrency for [\d,]+ tokens per request: (?P<concurrency_x100>\d+(?:\.\d+)?)x",
 ))
@@ -377,11 +377,12 @@ class Pair:
     def engine_line(self, line: bytes) -> None:
         """A line of vLLM's output gives a few numbers, a category of failure, or nothing."""
         text = line.decode(errors="replace")
-        for pattern in MEASUREMENTS:
-            if found := pattern.search(text):
-                log.row("engine_measure", **{name: round(float(value.replace(",", "")) * SCALE[name.split("_")[-1]])
-                                             for name, value in found.groupdict().items()})
-                return
+        fields = {name: value for pattern in MEASUREMENTS if (found := pattern.search(text))
+                  for name, value in found.groupdict().items()}  # vLLM prints some of them on one line
+        if fields:
+            log.row("engine_measure", **{name: round(float(value.replace(",", "")) * SCALE[name.split("_")[-1]])
+                                         for name, value in fields.items()})
+            return
         lowered = text.lower()
         category = next((name for name, words in FAILURES if any(word in lowered for word in words)), None)
         if category is not None and category not in self.failures:
