@@ -325,10 +325,11 @@ The drain of a sleep is the drain below. When a drain is already on, the sleep g
 stays. Once the drain has ended, status `drained`, the gateway stops its instance. Nothing undoes a sleep: an open
 answers 409 `sleep_pending`, because a stop already on its way would take down a service that had opened again.
 
-If the drain has not ended 120 seconds after the sleep began, the gateway stops the instance all the same. This is
-the one case where the card stops under unfinished work of ours, an exception to the rule that our work finishes. It
-happens only with a drain deadline above 120 seconds, or with a request that fails to end when the drain cancels it.
-An idle sleep has no work of ours when it begins.
+If the drain has not ended 120 seconds after the sleep began, the gateway begins to stop the instance all the same.
+The 120 seconds bound the wait for the drain, not the time to a confirmed stop: attempts that fail, by a 401 or 403 or
+a network error, go on without end (below). This is the one case where the card stops under unfinished work of ours,
+an exception to the rule that our work finishes. It happens only with a drain deadline above 120 seconds, or with a
+request that fails to end when the drain cancels it. An idle sleep has no work of ours when it begins.
 
 ### The stop
 
@@ -340,8 +341,9 @@ An idle sleep has no work of ours when it begins.
   which the log tells apart by a fixed category and the HTTP status, never by Vast's text. Stopping an instance that
   already stops changes nothing, so a repeated attempt does no harm.
 - Stop, not delete: the disk with the weights stays, and Vast bills for it while the card is stopped.
-- The gateway cannot see its own stop complete, since the stop ends it. Until then its status stays `drained`,
-  admission stays closed, and it never reports `ready`. The command reads the stopped state back from Vast.
+- The gateway cannot see its own stop complete, since the stop ends it. Until then admission stays closed and it
+  never reports `ready`. Its status is `drained`, or, after a stop that did not wait for the drain, `draining` until
+  the work that held it ends. The command reads the stopped state back from Vast.
 
 ### The command
 
