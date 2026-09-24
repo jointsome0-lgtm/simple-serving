@@ -72,6 +72,9 @@ STATUSES = ("starting", "ready", "draining", "drained", "failed")  # contract se
 NOT_PREPARED = "the card is not prepared: run its preparation first (README, 'The card')"
 GIVEN_UP = ("the card has given up loading the model and stops itself: to load it again, run the launcher's --retry "
             f"on the card within {IDLE_TIMEOUT_S // 60} minutes of its start (README, 'The card')")
+UNCONFIRMED = ("the card's stop is not confirmed: Vast has not taken it, and costs may go on. Stop or delete the "
+               "instance in Vast's console (README, 'The first rental')")
+REFUSALS = {card.NOT_PREPARED: NOT_PREPARED, card.GAVE_UP: GIVEN_UP, card.STOP_UNCONFIRMED: UNCONFIRMED}  # of --hold
 
 now = time.monotonic  # the command's own clock, which the tests replace
 pause = asyncio.sleep
@@ -253,8 +256,8 @@ async def hold(setup: Setup) -> None:
             code = await tunnel.wait()
         finally:
             await tunnel.close()
-        if code == card.GAVE_UP:
-            raise Refusal(GIVEN_UP)
+        if code in (card.GAVE_UP, card.STOP_UNCONFIRMED):
+            raise Refusal(REFUSALS[code])
         ended += 1
         if ended > RECONNECTS:
             raise Refusal("the tunnel keeps ending before the gateway is ready")
@@ -274,7 +277,7 @@ async def connect(setup: Setup) -> Tunnel | None:
                 return await setup.connect(forwards)
             except NoTunnel as error:
                 if error.code != SSH_FAILED:
-                    raise Refusal(GIVEN_UP if error.code == card.GAVE_UP else NOT_PREPARED) from None
+                    raise Refusal(REFUSALS.get(error.code, NOT_PREPARED)) from None
         if now() >= deadline:
             raise Refusal(f"the card does not take SSH; Vast says {state}")
         await pause(POLL_S)
@@ -429,7 +432,7 @@ def describe(error: Exception) -> str:
     if isinstance(error, vast.VastError):
         return error.code if error.status is None else f"{error.code} {error.status}"
     if isinstance(error, NoTunnel):
-        return {card.NOT_PREPARED: NOT_PREPARED, card.GAVE_UP: GIVEN_UP}.get(error.code, f"ssh ended with {error.code}")
+        return REFUSALS.get(error.code, f"ssh ended with {error.code}")
     return str(error) or "timeout"
 
 

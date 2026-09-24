@@ -8,15 +8,18 @@ already runs. Otherwise it returns 3 when the card is not prepared (bootstrap.sh
 these locks, or the keys or the instance's credential are missing), 6 when the card has given up, and the file
 `given-up` says why, and 7 when a port is taken. `--retry` removes `given-up` and starts. `--stop` ends the pair and
 leaves the instance running. `--hold` prints one line, then waits while the pair runs and returns 0 once it has
-ended, or 6 once the card has given up; on a card that has given up, or is not prepared, it returns 6 or 3 at once
-and prints nothing. It is the remote command of the tunnel, and it never owns the pair. `--dry-run` prints the two
-commands and checks, and starts nothing.
+ended, 6 once the card has given up, or 8 once its stop is not confirmed; on such a card, or one that is not
+prepared, it returns 8, 6 or 3 at once and prints nothing. It is the remote command of the tunnel, and it never owns
+the pair. `--dry-run` prints the two commands and checks, and starts nothing.
 
 The pair runs once, with no restarts. It ends on SIGTERM, when a process exits, or when the gateway is not ready by
 the manifest's load deadline. Unless a signal ended it, the launcher then stops the instance as the gateway does when
 it falls asleep (`vast.py`). When the pair never became ready, it first leaves `given-up`, and the card has given up:
 a later start, a resume included, loads nothing. Its launcher waits the idle interval for the owner's `--retry`, which
 runs the pair, and without one stops the instance again, so that no card stays up with nothing to stop it.
+
+An attempt to stop the instance that fails, the launcher's or the gateway's, leaves `stop-unconfirmed` until the
+launcher's next start: costs may go on. The attempts go on too, but they bound nothing while Vast refuses the key.
 
 The logs are in `logs/` of the state directory, each file 0600 with one older file beside it. `card.jsonl` holds the
 launcher's rows and, of vLLM's output, only a few numbers and fixed categories of failure. `gateway.jsonl` holds the
@@ -42,6 +45,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +56,8 @@ CODE = Path(__file__).resolve().parent.parent  # the checkout
 STATE = Path(os.environ.get("SIMPLE_SERVING_CARD_DIR", "/workspace/simple-serving-card"))
 ROOT = Path(os.environ.get("SIMPLE_SERVING_CARD_ROOT", "/root"))  # where onstart.sh keeps the instance's id and key
 STAMPED = ("manifest.env", "gateway-requirements.txt", "vllm-requirements.txt")  # the files in card/ that were prepared
-NOT_PREPARED, GAVE_UP, PORT_TAKEN = 3, 6, 7
-GIVEN_UP = "given-up"
+NOT_PREPARED, GAVE_UP, PORT_TAKEN, STOP_UNCONFIRMED = 3, 6, 7, 8
+GIVEN_UP, UNCONFIRMED = "given-up", "stop-unconfirmed"  # the card's markers
 HOLDING = "simple-serving card: holding"  # the first line of --hold
 LINE_BYTES = 8192  # a longer line of output is read in pieces and never kept
 CARD_LOG_BYTES, GATEWAY_LOG_BYTES = 1 << 20, 8 << 20
@@ -216,21 +220,26 @@ def start(card: Card, *, dry_run: bool = False) -> int:
 def hold(card: Card, pause: Callable[[float], object] = time.sleep) -> int:
     """Wait while the launcher runs. One that onstart has not started yet is waited for HOLD_START_S. The first line
     out tells the command that its forwards are up, since ssh runs its remote command only once it has bound them. A
-    card with nothing to hold gets no line: one that has given up, or one that is not prepared and runs no launcher."""
-    if (card.state / GIVEN_UP).exists():
-        return GAVE_UP
+    card with nothing to hold gets no line: one that a marker ends, or one that is not prepared and runs no launcher."""
+    if code := marked(card.state):
+        return code
     if launcher(card.state) is None and not card.prepared():
         return NOT_PREPARED
     print(HOLDING, flush=True)
     waited, seen = 0, False
-    while not (card.state / GIVEN_UP).exists():
+    while not (code := marked(card.state)):
         if launcher(card.state) is not None:
             seen = True
         elif seen or waited >= HOLD_START_S:
             return 0
         pause(POLL_S)
         waited += POLL_S
-    return GAVE_UP
+    return code
+
+
+def marked(state: Path) -> int:
+    """What the card's markers say, the stop first: STOP_UNCONFIRMED, GAVE_UP, or 0."""
+    return STOP_UNCONFIRMED if (state / UNCONFIRMED).exists() else GAVE_UP if (state / GIVEN_UP).exists() else 0
 
 
 def stop_pair(state: Path, pause: Callable[[float], object] = time.sleep) -> int:
@@ -254,6 +263,7 @@ def run(card: Card) -> int:
         os.close(lock)
         return 0  # another launcher runs the pair
     os.umask(0o077)
+    (card.state / UNCONFIRMED).unlink(missing_ok=True)  # a new start, whose stop has not failed yet
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))  # a core dump of either process could hold prompts
     (card.state / "logs").mkdir(exist_ok=True)
     log.setup(JsonLines(card.state / "logs/card.jsonl", CARD_LOG_BYTES))
@@ -279,7 +289,7 @@ async def serve(card: Card) -> None:
 async def launch(card: Card, ended: asyncio.Event, stop: vast.Stop) -> str:
     """Run the pair once, then stop the instance unless a signal ended it. Returns how the pair ended, or `given_up`
     when the card had given up and no retry came."""
-    pair = Pair(card.state / "logs")
+    pair = Pair(card.state)
     outcome = await retried(card.state / GIVEN_UP, ended)
     if outcome is None:
         try:
@@ -292,7 +302,7 @@ async def launch(card: Card, ended: asyncio.Event, stop: vast.Stop) -> str:
     if outcome != "signal":
         if outcome not in ("asleep", "given_up") and not pair.ready.is_set():
             (card.state / GIVEN_UP).write_text(f"{outcome}\n")
-        await first(vast.stop_until_accepted(stop), ended.wait())
+        await first(vast.stop_until_accepted(stop, partial(unconfirmed, card.state)), ended.wait())
     return outcome
 
 
@@ -310,11 +320,21 @@ async def removed(path: Path) -> None:
         await asyncio.sleep(POLL_S)
 
 
+def unconfirmed(state: Path, failure: Mapping[str, Any]) -> None:
+    """Note a failed attempt to stop the instance, the launcher's or the gateway's: until the launcher's next start,
+    the card's stop is not confirmed and costs may go on."""
+    if not (state / UNCONFIRMED).exists():
+        (state / UNCONFIRMED).write_text(f"{failure.get('code', 'exception')}\n")
+        kept = ("code", "status", "exception")  # vast.py's fields of a failure
+        log.row("stop_unconfirmed", **{name: failure[name] for name in kept if name in failure})
+
+
 class Pair:
     """vLLM and the gateway, each in a process group of its own, their output read to the end."""
 
-    def __init__(self, logs: Path) -> None:
-        self.gateway_log = JsonLines(logs / "gateway.jsonl", GATEWAY_LOG_BYTES)
+    def __init__(self, state: Path) -> None:
+        self.state = state
+        self.gateway_log = JsonLines(state / "logs/gateway.jsonl", GATEWAY_LOG_BYTES)
         self.ready = asyncio.Event()
         self.asleep = False
         self.failures: set[str] = set()  # the categories logged so far, each once
@@ -375,6 +395,8 @@ class Pair:
             self.gateway_log.write(line.decode().rstrip("\n") + "\n")
         if row.get("event") == "engine" and row.get("service_status") == "ready":
             self.ready.set()
+        if row.get("event") == "stop_failed":  # the gateway's own stop, once it has fallen asleep
+            unconfirmed(self.state, row)
         self.asleep = self.asleep or row.get("event") == "sleep"
 
 

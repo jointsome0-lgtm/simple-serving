@@ -195,11 +195,17 @@ ssh <card> 'cd /workspace/simple-serving &&
   /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --retry'
 ```
 
+An attempt to stop the instance that fails, the launcher's or the gateway's, leaves the file `stop-unconfirmed` and
+the log row `stop_unconfirmed` until the launcher's next start, and `up`, `sleep` and `status` say that the card's stop
+is not confirmed: costs may go on. The attempts go on every 30 seconds, but while Vast refuses the container's key,
+401 or 403, none succeeds.
+
 The service stops its card and never deletes it. A disposable trial rental's onstart is simple-story-chat's
 `gpu/trial-onstart.sh` with the line above at its end: it adds the owner's SSH key when one is given, writes the
 instance's id and key, which the first preparation needs, and arms a guard that deletes the instance three hours after
-the first start. An onstart for a permanent rental, which writes the two files, arms no guard and ends with the same
-line, is decided before permanent use.
+the first start. The guard deletes with the container's key, as the card stops, so a key that Vast refuses defeats
+both. An onstart for a permanent rental, which writes the two files, arms no guard and ends with the same line, is
+decided before permanent use.
 
 ## The command
 
@@ -229,3 +235,20 @@ names:
 `keys` writes the last two. `vast_api_key` is a Vast key allowed GET and PUT on that instance alone, never the account
 key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. The bot's model profile takes the address
 `http://127.0.0.1:8080` and the client key; it holds neither the control key nor a Vast key.
+
+## The first rental
+
+The card stops itself with the container's key, and the trial's guard deletes with the same key, so a key that Vast
+refuses leaves nothing on the card that bounds the costs. On the first rental the owner is that bound:
+
+1. Before anything long, once the prepared card is ready: `sleep`, which must end with `vast: stopped`. Then `up`,
+   a resume with no start over SSH: the card boots anew and runs one pair, which `up` reports ready.
+2. Every stop is confirmed from outside, with the owner's own key: `status` prints `vast: stopped`, and Vast's console
+   shows the instance stopped. `sleep` waits 10 minutes for that. After the last request of an idle card, `stopped`
+   must come within 25 minutes: 13 to fall asleep, 2 for the drain, 10 for the stop.
+3. Approved in advance, and done at once: when a command says that the card's stop is not confirmed, when `sleep`
+   ends without `vast: stopped`, when that deadline passes, or when Vast refuses a key with 401 or 403, the owner
+   stops the instance in Vast's console, or deletes a trial instance.
+
+Open, and not built: unattended or permanent use needs an independent budget path, one that bounds the costs without
+the container's key and without the owner at the console.

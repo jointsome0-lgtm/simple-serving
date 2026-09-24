@@ -25,6 +25,7 @@ import pytest
 
 from simple_serving import card
 from simple_serving.card import Card
+from simple_serving.vast import RETRY_S, VastError
 
 from .support import FakeClock, FakeVast, until
 
@@ -166,14 +167,18 @@ async def test_a_card_that_gave_up_loads_nothing_at_a_resume_and_stops_again(sta
     failed = FakeVast()
     assert await card.launch(card_at(state), asyncio.Event(), failed) == "engine_exit"
     assert failed.stopped
-    resumed = FakeVast()  # the owner resumes the instance, and onstart starts the launcher again
+    resumed = FakeVast(VastError("forbidden", 403))  # the owner resumes the instance, and onstart starts the launcher
     launch = asyncio.create_task(card.launch(card_at(state), asyncio.Event(), resumed))
     await until(lambda: bool(rows(logged, "wait_for_retry")))
     await clock.advance(card.IDLE_TIMEOUT_S - 1)
     assert not launch.done() and resumed.attempts == []
     await clock.advance(1)
+    await until(lambda: bool(rows(logged, "stop_unconfirmed")))  # Vast refuses the first stop
+    assert (state / "stop-unconfirmed").read_text() == "forbidden\n"
+    await clock.advance(RETRY_S)
     assert await launch == "given_up"
     assert resumed.stopped and (state / "given-up").read_text() == "engine_exit\n"
+    assert rows(logged, "stop_unconfirmed") == [{"event": "stop_unconfirmed", "code": "forbidden", "status": 403}]
     assert [row["reason"] for row in rows(logged, "pair_end")] == ["engine_exit", "given_up"]
     assert len(rows(logged, "exit")) == 2  # the processes of the failed load, and none since
 
@@ -225,8 +230,8 @@ async def test_a_gateway_that_cannot_start_ends_the_engine(state: Path, logged: 
     assert vast.stopped
 
 
-def test_the_engine_output_leaves_a_few_numbers_and_categories(tmp_path: Path, logged: io.StringIO) -> None:
-    pair = card.Pair(tmp_path)
+def test_the_engine_output_leaves_a_few_numbers_and_categories(state: Path, logged: io.StringIO) -> None:
+    pair = card.Pair(state)
     for line in (
         "INFO 09-24 12:00:00 [gpu_model_runner.py:2007] Model loading took 23.5000 GiB memory and 41.250000 seconds",
         "INFO 09-24 12:00:10 [gpu_worker.py:298] Available KV cache memory: 4.25 GiB",
@@ -249,10 +254,12 @@ def test_the_engine_output_leaves_a_few_numbers_and_categories(tmp_path: Path, l
     assert SECRET not in logged.getvalue()
 
 
-def test_the_gateway_output_keeps_the_gateways_own_rows_only(tmp_path: Path, logged: io.StringIO) -> None:
-    pair = card.Pair(tmp_path)
+def test_the_gateway_output_keeps_the_gateways_own_rows_only(state: Path, logged: io.StringIO) -> None:
+    pair = card.Pair(state)
+    refused = json.dumps({"event": "stop_failed", "code": "forbidden", "status": 403})  # the gateway's own stop
     lines = [
         READY.encode(),
+        refused.encode(),
         f"Traceback (most recent call last): {SECRET}".encode(),
         json.dumps({"event": "request", "prompt": SECRET}).encode(),  # a field outside log.FIELDS
         json.dumps({"event": "request", "code": [SECRET]}).encode(),  # a value that is not a scalar
@@ -262,9 +269,9 @@ def test_the_gateway_output_keeps_the_gateways_own_rows_only(tmp_path: Path, log
     ]
     for line in lines:
         pair.gateway_line(line + b"\n")
-    assert (tmp_path / "gateway.jsonl").read_text() == READY + "\n"
-    assert len(rows(logged, "gateway_output")) == len(lines) - 1
-    assert pair.ready.is_set() and not pair.asleep
+    assert (state / "logs/gateway.jsonl").read_text() == f"{READY}\n{refused}\n"
+    assert len(rows(logged, "gateway_output")) == len(lines) - 2
+    assert pair.ready.is_set() and not pair.asleep and card.marked(state) == card.STOP_UNCONFIRMED
     assert SECRET not in logged.getvalue()
 
 
@@ -288,6 +295,7 @@ def test_the_launcher_runs_one_pair_until_sigterm(tmp_path: Path) -> None:
         older.parent.mkdir(exist_ok=True)
         older.write_text('{"event": "synthetic"}\n')
         older.chmod(0o644)
+    (state / "stop-unconfirmed").write_text("forbidden\n")  # of the start before
     environ = {name: value for name, value in os.environ.items() if not name.startswith("CONTAINER_")}
     environ |= {"SIMPLE_SERVING_CARD_DIR": str(state), "SIMPLE_SERVING_CARD_ROOT": str(tmp_path)}
     command = [sys.executable, "-m", "simple_serving.card", "--run"]
@@ -301,7 +309,7 @@ def test_the_launcher_runs_one_pair_until_sigterm(tmp_path: Path) -> None:
         launcher.terminate()  # a launcher that is killed leaves its pair running
         assert launcher.wait(timeout=30) == 0
     assert card.launcher(state) is None
-    assert not (state / "given-up").exists()
+    assert not (state / "given-up").exists() and not (state / "stop-unconfirmed").exists()
     text = card_log.read_text()
     assert rows(text, "engine_measure") == [{"event": "engine_measure", "kv_cache_tokens": 123456}]
     assert exits(text) == {"gateway": -signal.SIGTERM, "engine": -signal.SIGTERM}
@@ -395,6 +403,8 @@ def test_hold_lasts_as_long_as_the_launcher(tmp_path: Path, capsys: pytest.Captu
         assert card.hold(ready, lambda _: (state / "given-up").write_text("engine_exit\n")) == card.GAVE_UP
         capsys.readouterr()
         assert card.hold(ready, pauses.append) == card.GAVE_UP
+        (state / "stop-unconfirmed").write_text("forbidden\n")
+        assert card.hold(ready, pauses.append) == card.STOP_UNCONFIRMED  # the stop first
         assert capsys.readouterr().out == ""
     finally:
         process.kill()

@@ -112,16 +112,18 @@ async def _call(method: str, instance: str, key: str, body: dict[str, str] | Non
     return answer
 
 
-async def stop_until_accepted(stop: Stop) -> None:
+async def stop_until_accepted(stop: Stop, failed: Callable[[dict[str, Any]], None] = lambda failure: None) -> None:
     """Stop the instance: one attempt at a time, each within ATTEMPT_S, RETRY_S apart, until Vast accepts one. Every
-    failure is tried again, 401 and 403 included, which the log tells apart. Stopping an instance that already stops
-    changes nothing, so an attempt repeated after a lost answer does no harm."""
+    failure is tried again, 401 and 403 included, which the log tells apart, and `failed` hears of each. The attempts
+    bound nothing: while Vast refuses the key they fail without end, and the instance runs on. Stopping an instance
+    that already stops changes nothing, so an attempt repeated after a lost answer does no harm."""
     while True:
         try:
             async with asyncio.timeout(ATTEMPT_S):
                 await stop()
         except Exception as error:  # noqa: BLE001 - whatever failed, the next attempt comes
-            log.row("stop_failed", **_failure(error))
+            log.row("stop_failed", **(failure := _failure(error)))
+            failed(failure)
         else:
             log.row("stop_accepted")
             return

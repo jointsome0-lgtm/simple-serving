@@ -263,6 +263,8 @@ async def test_up_refuses_a_busy_local_port_and_leaves_its_listener_alone(tmp_pa
     ((card.NOT_PREPARED,), (), "not prepared"),
     ((card.GAVE_UP,), (), "given up"),  # as at a resume after a failed load
     ((), (card.GAVE_UP,), "given up"),  # a load that fails while up waits
+    ((card.STOP_UNCONFIRMED,), (), "stop is not confirmed"),
+    ((), (card.STOP_UNCONFIRMED,), "stop is not confirmed"),  # a stop that Vast refuses while up holds
     ((), (0,) * (cli.RECONNECTS + 1), "keeps ending"),  # --hold finds no pair to hold, and up never resumes
 ])
 async def test_up_says_why_the_card_does_not_serve(tmp_path: Path, clock: Clock, refuse: tuple[int, ...],
@@ -311,6 +313,7 @@ async def test_sleep_stops_nothing_when_the_gateway_cannot_be_reached(tmp_path: 
     ("running", (), {"drip_s": 0.01}, "no answer"),  # a byte every 10 ms: only the bound of the whole call ends it
     ("running", (cli.SSH_FAILED,), {}, "ssh ended with 255"),
     ("running", (card.GAVE_UP,), {}, cli.GIVEN_UP),
+    ("running", (card.STOP_UNCONFIRMED,), {}, cli.UNCONFIRMED),
     ("stopped", (), {}, None),
 ])
 async def test_status_tells_vast_apart_from_the_gateway_and_prints_nothing_as_it_came(

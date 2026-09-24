@@ -340,6 +340,10 @@ request that fails to end when the drain cancels it. An idle sleep has no work o
   Vast accepts one. A timeout, a network error, a 5xx, a 401 or 403 and an answer without success are all failures,
   which the log tells apart by a fixed category and the HTTP status, never by Vast's text. Stopping an instance that
   already stops changes nothing, so a repeated attempt does no harm.
+- A failed attempt, the gateway's or the launcher's, leaves the card's marker `stop-unconfirmed` and the log row
+  `stop_unconfirmed` with the failure's category and status, until the launcher's next start: the stop is not
+  confirmed, and costs may go on. `up`, `sleep` and `status` say so. The attempts go on, but while Vast refuses the
+  container's key they bound nothing, and the owner stops the instance in Vast's console (section 15).
 - Stop, not delete: the disk with the weights stays, and Vast bills for it while the card is stopped.
 - The gateway cannot see its own stop complete, since the stop ends it. Until then admission stays closed and it
   never reports `ready`. Its status is `drained`, or, after a stop that did not wait for the drain, `draining` until
@@ -555,10 +559,13 @@ Everything below is written and dry-run before the card is rented. The rental ru
 (`docs/gpu.md`, "While the cards are paid for").
 
 The first rental is a disposable trial. Its own onstart, simple-story-chat's `gpu/trial-onstart.sh`, arms a guard
-that deletes the instance three hours after the first start, whatever the service and the command do, and writes the
-instance's id and key, which the first preparation needs; its last line runs the card's `onstart.sh` (section 8). The
-service never deletes its card, and its `onstart.sh` arms no guard. An onstart for a permanent rental, which writes
-the two files and ends with the same line but arms no guard, is decided before permanent use.
+that deletes the instance three hours after the first start, and writes the instance's id and key, which the first
+preparation needs; its last line runs the card's `onstart.sh` (section 8). The guard deletes with the container's key,
+the key of the card's stop, so a key that Vast refuses or has revoked defeats both: nothing on the card then bounds
+the costs. The owner is that bound, with the readback, the deadline and the console action of the README's "The first
+rental", approved in advance. The service never deletes its card, and its `onstart.sh` arms no guard. An onstart for
+a permanent rental, which writes the two files and ends with the same line but arms no guard, is decided before
+permanent use. Unattended or permanent use also needs an independent budget path, which is open and not built.
 
 Before the rental, without a card:
 
@@ -588,7 +595,10 @@ On the card:
 
 1. Smoke: vLLM loads the GGUF Q6_K that the bot uses with llama.cpp. The time for this is fixed in advance. If the
    file does not load or is too slow, nobody fixes that on the paid card, and other weights are measured later as a
-   separate configuration. Then the smoke probes and the count matrix run, with the real template.
+   separate configuration. Once it is `ready`, before anything long, the stop: `sleep`, and the command reads
+   `stopped` back from Vast; then `up` resumes the instance, and the rental's own onstart, with no start over SSH,
+   starts exactly one pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline
+   unchanged. Then the smoke probes and the count matrix run, with the real template.
 2. Isolation and privacy, before any real story or outside key: a synthetic series checks that cache scopes stay
    apart, and that the privacy marker shows up in no log of the engine, the proxy or the gateway.
 3. The same weights on llama.cpp and on vLLM. The tokenizer, chat template, thinking, sampling, context and cache
@@ -598,11 +608,9 @@ On the card:
    long outside prompt. The measured limits replace the provisional ones of section 7. Also the tail of an abort: how
    long the engine keeps computing a request after the gateway closed it, measured apart while the prompt is read and
    while the answer streams, through the proxy.
-5. The card's own lifecycle, with no bot running: the gateway stops the instance with the container's key, and the
-   command reads `stopped` back from Vast; the command resumes it; the rental's own onstart, with no start over SSH,
-   starts exactly one pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline
-   unchanged. eval requests hold the service, and once they end the service falls asleep on its own. The listeners
-   stay on loopback, and no raw output is kept.
+5. The card's own lifecycle, with no bot running: eval requests hold the service, and once they end the service falls
+   asleep on its own, and the command reads `stopped` back from Vast. The listeners stay on loopback, and no raw
+   output is kept.
 6. `npm run eval` in simple-story-chat.
 7. Readers move to the service.
 8. Outside keys, as a separate step.
