@@ -35,6 +35,7 @@ if [[ -n $client$control ]]; then
   [[ $(< "$state/keys.json") == "$keys" ]] || exit 5
 fi
 [[ -s $state/keys.json ]] || exit 4
+chmod 600 "$state/keys.json"  # umask leaves the mode of an older file as it was
 
 for venv in gateway vllm; do
   [[ -x $state/$venv/bin/pip ]] || python3 -m venv "$state/$venv"

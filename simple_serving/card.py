@@ -260,7 +260,9 @@ def run(card: Card) -> int:
     pid = card.state / "launcher.pid"
     pid.write_text(f"{os.getpid()}\n")
     try:
-        (card.state / "gateway.json").write_text(json.dumps(card.config()))
+        config = json.dumps(card.config())
+        with os.fdopen(private(card.state / "gateway.json", os.O_WRONLY | os.O_TRUNC), "w") as file:
+            file.write(config)
         asyncio.run(serve(card))
     finally:
         pid.unlink(missing_ok=True)
@@ -443,7 +445,7 @@ class JsonLines:
         with contextlib.suppress(FileNotFoundError):
             if self.path.stat().st_size + len(data) > self.max_bytes:
                 self.path.replace(self.path.with_name(self.path.name + ".1"))
-        descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        descriptor = private(self.path, os.O_WRONLY | os.O_APPEND)
         try:
             os.write(descriptor, data)
         finally:
@@ -451,6 +453,13 @@ class JsonLines:
 
     def flush(self) -> None:
         pass
+
+
+def private(path: Path, flags: int) -> int:
+    """Open a file that its owner alone may read. The mode is set on an older file too, which umask leaves as it was."""
+    descriptor = os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    os.fchmod(descriptor, 0o600)
+    return descriptor
 
 
 def main(argv: list[str] | None = None) -> int:

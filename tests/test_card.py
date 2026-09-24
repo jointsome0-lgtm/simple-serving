@@ -284,6 +284,10 @@ def test_the_launcher_runs_one_pair_until_sigterm(tmp_path: Path) -> None:
     (state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL}))
     stand_in(state / ENGINE, "INFO 09-24 12:00:10 [kv_cache_utils.py:1087] GPU KV cache size: 123,456 tokens")
     stand_in(state / GATEWAY, READY)
+    for older in (state / "gateway.json", state / "logs/card.jsonl"):  # left wide, as by another hand
+        older.parent.mkdir(exist_ok=True)
+        older.write_text('{"event": "synthetic"}\n')
+        older.chmod(0o644)
     environ = {name: value for name, value in os.environ.items() if not name.startswith("CONTAINER_")}
     environ |= {"SIMPLE_SERVING_CARD_DIR": str(state), "SIMPLE_SERVING_CARD_ROOT": str(tmp_path)}
     command = [sys.executable, "-m", "simple_serving.card", "--run"]
@@ -451,6 +455,10 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     keys = f"{CLIENT}\n{CONTROL}\n"
     assert bootstrap(keys) == 3  # the pins are empty
     assert not (state / "keys.json").exists()
+    for older, text in ((state / "keys.json", json.dumps({"client": CLIENT, "control": CONTROL})),
+                        (root / ".simple-chat-instance-api-key", "synthetic-older-key")):
+        older.write_text(text + "\n")  # left wide, as by another hand
+        older.chmod(0o644)
     pins = {"VLLM_VERSION": "0.0.1", "MODEL_SHA256": hashlib.sha256(weights).hexdigest(),
             "TOKENIZER_REPO": "synthetic/tokenizer", "TOKENIZER_REVISION": "0" * 40,
             "TOKENIZER_FILES": f"tokenizer.json:{hashlib.sha256(tokenizer).hexdigest()}"}
@@ -467,7 +475,8 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     assert {mode for _, mode in first.values()} == {0o600}
     assert json.loads((state / "keys.json").read_text()) == {"client": CLIENT, "control": CONTROL}
     assert (root / "onstart.sh").read_text() == rental  # the preparation changes no onstart
-    assert (root / ".simple-chat-instance-id").read_text() == CREDENTIAL["CONTAINER_ID"]
+    kept = [(root / f".simple-chat-instance-{name}").read_text() for name in ("id", "api-key")]
+    assert kept == list(CREDENTIAL.values())
     assert start_container() == 0  # a resume: the rental's own onstart, as it was, starts the card
     noted = calls.read_text().splitlines()
     assert noted.count("python -m simple_serving.card") == 4  # the three preparations, then the resume
