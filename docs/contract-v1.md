@@ -24,14 +24,16 @@ Every request carries `Authorization: Bearer <key>`, on loopback too. The gatewa
 - the classes it may use and its default class;
 - whether it may name cache scopes.
 
+Outside keys are issued by hand in version 1. There is no sign-up.
+
 ### Classes
 
-| Class      | Who                                  | Order |
-|------------|--------------------------------------|-------|
-| `reader`   | a person's turn in the bot           | 1     |
-| `agent`    | a turn of the bot's agent interface  | 2     |
-| `internal` | our eval and probes                  | 3     |
-| `external` | outside keys                         | 4     |
+| Class      | Who                                  | Order | Keeps the card awake |
+|------------|--------------------------------------|-------|----------------------|
+| `reader`   | a person's turn in the bot           | 1     | yes                  |
+| `agent`    | a turn of the bot's agent interface  | 2     | yes                  |
+| `internal` | our eval and probes                  | 3     | yes                  |
+| `external` | outside keys                         | 4     | no                   |
 
 - A request names its class in `X-Simple-Serving-Class`, otherwise the key's default applies. A class the key may not
   use is refused with 403 `class_not_allowed`. Outside keys may use `external` only.
@@ -202,8 +204,9 @@ Provisional values, used until the first measurement on the card:
 One controller stops the card: the bot's GPU control, `local/gpu.ts` in simple-story-chat. A paused card runs nothing,
 so the service cannot wake itself.
 
-1. The bot stops starting new turns and waits until its running turns end. Its existing rule stays: it does not pause
-   while a turn of its own or of an agent is running.
+1. The bot stops starting new turns and waits until its running turns end. It does not pause while work of `reader`,
+   `agent` or `internal` runs or waits. Outside requests never keep the card awake. Only the guard's deadline stops
+   the card while our work goes on.
 2. The bot calls `POST /v1/control/drain` with `{"boot_id": "<from /v1/state>"}`. The gateway increments
    `drain_generation` and answers 202 with `{"status": "draining", "boot_id": ..., "drain_generation": n}`. From then
    on every new generation or count gets 503 `draining`. `/v1/state` and the control routes stay available.
@@ -322,6 +325,8 @@ Also in simple-story-chat:
 - `usage.simple_serving` goes into new log fields, added to the whitelist in `local/model-error.ts` as non-negative
   integers. The adapter does not write these numbers into `promptMs` or `predictedMs`.
 - `generateMany` stays on llama.cpp (section 1).
+- The idle pause in `local/gpu.ts` counts our eval and probes as work that keeps the card awake. Today only readers'
+  jobs and agent turns do.
 
 ## 14. Shared cases
 
@@ -357,7 +362,7 @@ Everything below is written and dry-run before the card is rented. The rental ru
 AWQ and GPTQ are separate configurations, measured later. They free memory, but whether more requests then run at
 once has to be measured.
 
-## Open questions for the owner
+## Decided
 
-1. Does our `internal` work keep the card awake? Proposal: yes, until the rental's deadline.
-2. Are outside keys in version 1 given by hand only? Proposal: yes.
+- 2026-09-24, the owner: our `internal` work keeps the card awake until the rental's deadline, and outside keys
+  are issued by hand only.
