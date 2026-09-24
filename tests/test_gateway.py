@@ -253,6 +253,14 @@ async def test_a_route_or_method_outside_section_3_is_not_found() -> None:
                 assert_refused(await call(client, method, base + path, key=CONTROL), 404, "not_found")
 
 
+async def test_a_control_body_is_at_most_4096_bytes() -> None:
+    async with running() as stack, httpx.AsyncClient(timeout=10) as client:
+        drain = json.dumps({"boot_id": stack.service.boot_id}).encode()
+        url = stack.control + "/v1/control/drain"
+        assert_refused(await call(client, "POST", url, key=CONTROL, content=drain.ljust(4097)), 413, "body_too_large")
+        assert (await call(client, "POST", url, key=CONTROL, content=drain.ljust(4096))).status == 202
+
+
 async def test_the_control_key_sees_places_by_class_and_the_pinned_versions() -> None:
     gate = asyncio.Event()
     async with running(versions={"vllm": "0.0.0-synthetic"}) as stack, httpx.AsyncClient(timeout=10) as client:

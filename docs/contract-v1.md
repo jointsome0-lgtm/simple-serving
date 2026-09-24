@@ -36,7 +36,8 @@ Outside keys are issued by hand in version 1. There is no sign-up.
 | `external` | outside keys                         | 4     | no                   |
 
 - A request names its class in `X-Simple-Serving-Class`, otherwise the key's default applies. A class the key may not
-  use is refused with 403 `class_not_allowed`. Outside keys may use `external` only.
+  use is refused with 403 `class_not_allowed`, and so is a class that does not exist. Outside keys may use `external`
+  only.
 - The class sets three things: its limits (section 7), the order in which waiting requests take a shared place
   (section 7), and the engine priority the gateway attaches. An engine priority in the body is refused as an unknown
   field. The gateway builds the engine's request itself, so no client header reaches the engine.
@@ -55,11 +56,11 @@ The engine does not hand out other people's prompts; the channel is timing only.
 The gateway sets `cache_salt` on every request from a scope:
 - each outside key is one scope;
 - a key allowed to name scopes sends one in `X-Simple-Serving-Scope`: `reader.<opaque>` for each reader, `agent` or
-  `internal`. `<opaque>` is 8 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`. Without the header the scope is
-  the class name. A request of class `reader` must name a reader scope, otherwise it is refused with 400
-  `invalid_request`, so that readers never share a cache by accident. The bot derives the opaque part from the
-  reader's identity with a secret of its own. It is never a Telegram ID. A scope from a key without that right is
-  refused with 403 `scope_not_allowed`;
+  `internal`. `<opaque>` is 8 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`. A scope of any other form is
+  refused with 400 `invalid_request`. Without the header the scope is the class name. A request of class `reader`
+  must name a reader scope, otherwise it is refused with 400 `invalid_request`, so that readers never share a cache
+  by accident. The bot derives the opaque part from the reader's identity with a secret of its own. It is never a
+  Telegram ID. A scope from a key without that right is refused with 403 `scope_not_allowed`, whatever its form;
 - the salt is an HMAC, under a secret that the gateway generates at every start and never shows, of the scope's kind
   and name: `scope:reader.<opaque>`, `scope:agent`, `scope:internal` or `key:<key id>`. So an outside key never shares
   a salt with one of our scopes, whatever its label. A salt in the request body is refused as an unknown field.
@@ -86,9 +87,16 @@ bot's socket (`local/background.ts`) and do not call the service directly.
 
 The gateway has two listeners. The public one is reached over HTTPS. The control one listens on loopback and is
 reached over the SSH tunnel. The gateway tells them apart by the listener, never by the client's address, because a
-TLS proxy on the card also connects from loopback. On each listener any other path is 404 `not_found`. A key without
-the control right gets 403 `forbidden` on a control route. The gateway holds at most 64 open connections
-(provisional, see section 7).
+TLS proxy on the card also connects from loopback. The gateway starts only when the control listener and the engine
+are on loopback IP addresses, 127.0.0.0/8 or ::1; a name, even `localhost`, is refused. On each listener any other
+path or method is 404 `not_found`, and so is a path with a trailing slash: the gateway does not redirect. A key
+without the control right gets 403 `forbidden` on a control route. A control body is at most 4096 bytes; a longer
+one is refused with 413 `body_too_large`.
+
+When the public listener handles a request, the gateway counts the connections open on it. Past 64 (provisional, see
+section 7) it answers 429 `queue_full` and closes the connection. That is a check on each request, not a cap on TCP
+connections: a connection whose headers have not all arrived never reaches it. So the TLS proxy in front of the
+public listener limits the connections, the time to read headers and bodies, and the size of a body.
 
 ## 4. Generation: `POST /v1/chat/completions`
 
@@ -120,8 +128,16 @@ a body whose objects and arrays nest more than 64 deep, counting the body itself
 ### Before the stream starts
 
 The gateway checks, in this order: the route, the key, the service status, the class, the scope, the body (its size,
-then JSON, then the fields), `max_tokens` against the class limit. Then it counts the input and checks it against the
-class limit and, together with `max_tokens`, against the context. Then the request waits for its place (section 7).
+then JSON, then the fields), `max_tokens` against the class limit. Then it accepts the request, checking the service
+status once more, since a drain may have begun while the body was read. From acceptance on, the wall time and the
+measurements of section 11 run, and a drain sees the request as work (section 8). The body is read before
+acceptance, so the wall time does not bound that read: the TLS proxy's own timeout and body limit do (section 3).
+
+An accepted generation passes two stages:
+1. The count stage: the request waits for a count place and the engine counts the input, under the count limits of
+   section 5. The gateway checks the count against the class limit and, together with `max_tokens`, against the
+   context.
+2. Generation admission: the request waits for its place under the limits of section 7.
 
 The gateway hands the request to the engine and waits for the engine's first valid stream event that is not an error.
 Only then does it send 200, the stream headers and that event. Every refusal up to that point is a plain HTTP error
@@ -129,6 +145,11 @@ from section 9. When the engine refuses the request with 400 or 422, the answer 
 found the request itself wrong, for example a schema it cannot compile. Any other status from the engine, a failed
 connection, an error event, an invalid event, or a stream that ends before its first event give 503
 `engine_unavailable`. An engine that answers 401, 403 or 404 is misconfigured, and that is not the client's error.
+
+An engine event is valid when it is a chunk of the served model: `object` is `chat.completion.chunk`, `model` is the
+alias, and `choices` holds at most one choice, with `index` 0 and a delta that holds nothing but the role
+`assistant`, text and reasoning. Version 1 is text only, so a tool call or a function call is invalid. Where a field
+may be absent, such as `usage`, `finish_reason` or a field of the delta, null counts as absent.
 
 ### Stream
 
@@ -154,9 +175,9 @@ with a code from section 9. Then it ends the stream without a usage chunk or `[D
 a finish included, do not make the answer a success. A client treats every stream without `[DONE]` as failed and never
 keeps its text as an answer.
 
-The engine's own stream may break the rules after its first event: a second finish, an unknown finish reason, a
-choice other than index 0, no usage chunk, bytes that are not UTF-8, a line that is not an event. The gateway then
-ends its stream with the error event `engine_unavailable`.
+The engine's own stream may break the rules after its first event: an invalid event, such as another model or a tool
+call, a second finish, an unknown finish reason, no usage chunk, bytes that are not UTF-8, a line that is not an
+event. The gateway then ends its stream with the error event `engine_unavailable`.
 
 ## 5. Counting: `POST /v1/chat/completions/input_tokens`
 
@@ -164,9 +185,10 @@ ends its stream with the error event `engine_unavailable`.
 - Counting and generation render the prompt through one code path, with the same chat template, template arguments
   and special tokens, and nothing is cut silently. For the same body, `n` equals `usage.prompt_tokens`. A test on the
   card checks the equality.
-- The body limit of section 4 applies, and the headers are checked as for generation. At most 8 counts run at once
-  (provisional). A count past that waits for a count place, in the class order of section 2 and within its wall
-  time. An outside key has at most 2 counts at once; a third is refused with 429 `queue_full`. The count inside a
+- The body limit of section 4 applies, and the headers are checked as for generation. A count is accepted as a
+  generation is (section 4), and its class's wall time applies. At most 8 counts run at once (provisional). A count
+  past that waits for a count place, in the class order of section 2 and within its wall time. An outside key has at
+  most 2 counts at once, waiting ones included; a third is refused with 429 `queue_full`. The count stage of a
   generation shares these limits.
 - The gateway sends the engine only what renders the prompt: the model alias, the messages and the template arguments,
   never the rest of the body.
@@ -208,15 +230,21 @@ sets one. `/v1/state` shows the same number.
 - In any status except `ready`, the inference routes answer 503. The code is the status itself, except `failed`,
   which answers `engine_unavailable`.
 - For the control key the answer also holds `active` and `waiting`, counted by class, and the pinned versions of
-  section 12.
+  section 12. Both cover generation admission only (section 7): a count, and a generation still in its count stage,
+  are in neither. A controller that stops the card waits for the status `drained` (section 8), not for zero
+  counters.
 - `/v1/state` and the control routes answer in every status.
 
 ## 7. Limits
 
-- **Waiting**: the gateway accepted the request and has not handed it to the engine yet.
+These limits govern generation admission, the second stage of section 4. Counts, and the count stage of a
+generation, have the limits of section 5.
+
+- **Waiting**: the generation has passed its count stage and waits for its place. This is the admission queue only.
 - **Active**: the gateway handed the request to the engine and it has not finished. That includes the engine's own
   queue and its preemption. A request the engine paused still counts as active.
-- **Wall time**: from acceptance to the gateway's terminal event, waiting and preemption included.
+- **Wall time**: from acceptance (section 4) to the gateway's terminal event. For a generation it includes the wait
+  for a count place, the count, the wait for a place and preemption. A count has its class's wall time as well.
 
 Provisional values, used until the first measurement on the card:
 
@@ -255,16 +283,18 @@ so the service cannot wake itself.
    requests only the idle interval keeps the card up.
 2. The bot calls `POST /v1/control/drain` with `{"boot_id": "<from /v1/state>"}`. The gateway increments
    `drain_generation` and answers 202 with `{"status": ..., "boot_id": ..., "drain_generation": n}`. The status is
-   `drained` when nothing was active or waiting, because the drain then completes before the answer, and `draining`
-   otherwise. From then on every new generation or count gets 503 with the current status as its code, `draining`
-   or `drained`. `/v1/state` and the control routes stay available.
-3. The gateway removes waiting requests of every class and answers them 503 `draining`. It cancels active outside
-   requests at once. Active requests of our classes finish. Any of them still running after 60 seconds is cancelled.
-   A cancelled request that has not started its stream yet, because the engine is still reading its prompt, gets
-   503 `draining`. One whose stream has started ends with the error event `draining`.
-4. The bot polls `/v1/state` until it reads `drained`, with nothing active and nothing waiting. `drained` means the
-   gateway has no work left. It does not confirm that the GPU is idle: an aborted request may compute a moment longer
-   inside the engine (section 9), and stopping the instance ends that too.
+   `drained` when the gateway had no accepted work, counts included, because the drain then completes before the
+   answer, and `draining` otherwise. From then on every new generation or count gets 503 with the current status as
+   its code, `draining` or `drained`. `/v1/state` and the control routes stay available.
+3. The gateway removes waiting requests of every class and answers them 503 `draining`. That includes a generation
+   still in its count stage and a count that waits for a count place. It cancels active outside requests at once.
+   Active requests of our classes finish, a count the engine is computing included. Any of them still running after
+   60 seconds is cancelled. A cancelled request that has not started its stream yet, because the engine is still
+   reading its prompt, gets 503 `draining`. One whose stream has started ends with the error event `draining`.
+4. The bot polls `/v1/state` until it reads `drained`. `drained` means the gateway has no accepted work left, counts
+   included; the counters `active` and `waiting` do not show counts (section 6). It does not confirm that the GPU is
+   idle: an aborted request may compute a moment longer inside the engine (section 9), and stopping the instance
+   ends that too.
 5. The bot stops the instance through the Vast API and reads the status back.
 
 - A second drain with the same `boot_id` answers the current state and does not increment the generation.
@@ -287,16 +317,16 @@ body. FastAPI's default validation answer echoes the input, so it is replaced.
 
 | Status | Code                                              | When                                         |
 |--------|---------------------------------------------------|----------------------------------------------|
-| 400    | `invalid_request`, `unsupported_field`            | the body breaks section 4                    |
+| 400    | `invalid_request`, `unsupported_field`            | the body breaks section 4 or 8, or the scope breaks section 2 |
 | 400    | `limit_exceeded`                                  | input or `max_tokens` over the class limit   |
 | 400    | `context_limit`                                   | input plus `max_tokens` over the context     |
 | 401    | `unauthorized`                                    | no key or an unknown key                     |
 | 403    | `class_not_allowed`, `scope_not_allowed`          | the key may not use the class or the scope   |
 | 403    | `forbidden`                                       | a key without the control right on a control route |
-| 404    | `not_found`                                       | a route outside section 3                    |
+| 404    | `not_found`                                       | a path or method outside section 3           |
 | 409    | `stale_boot`, `stale_generation`                  | control calls, section 8                     |
-| 413    | `body_too_large`                                  | the body is over 2 000 000 bytes             |
-| 429    | `queue_full`                                      | a cap of section 7                           |
+| 413    | `body_too_large`                                  | a body over 2 000 000 bytes, a control body over 4096 bytes |
+| 429    | `queue_full`                                      | a cap of section 3, 5 or 7                   |
 | 500    | `internal_error`                                  | an error in the gateway itself               |
 | 503    | `starting`, `draining`, `drained`, `engine_unavailable` | the service is not serving             |
 | 504    | `timeout`                                         | the wall time ran out before the stream started |
@@ -305,14 +335,19 @@ After the stream has started, the same codes arrive as the error event of sectio
 
 Cancellation:
 - A client cancels by closing the connection.
-- The gateway watches for the disconnect in every phase: while the request waits, while the engine reads the prompt,
-  and while it streams. It sends nothing while the prompt is read, so it listens for the disconnect itself instead of
-  waiting for a failed send.
-- On a disconnect, a timeout or a drain, the gateway aborts the engine request in a `finally` block. It frees the
-  quota only after its own engine request has ended: the task that talks to the engine has finished and its
-  connection is closed. That is a local end, not a confirmation from the engine. vLLM learns of the abort from the
-  closed connection and may compute a little longer; that tail is measured on the card (section 15). A stronger
-  guarantee would need the engine to report the end of that very request, and a closed socket is not such a report.
+- The gateway watches for the disconnect in every phase: while the request is counted or waits, while the engine
+  reads the prompt, and while it streams. It sends nothing while the prompt is read, so it listens for the disconnect
+  itself instead of waiting for a failed send.
+- On a disconnect, a timeout, a drain or an engine change, the gateway aborts the engine request in a `finally`
+  block. It frees the quota only after its own engine request has ended: the task that talks to the engine has
+  finished and its connection is closed. That is a local end, not a confirmation from the engine. vLLM learns of the
+  abort from the closed connection and may compute a little longer; that tail is measured on the card (section 15). A
+  stronger guarantee would need the engine to report the end of that very request, and a closed socket is not such a
+  report.
+- The terminal message goes out after the engine request has ended and the place is free: the usage chunk and
+  `[DONE]`, the count, or an error. So a client that stops reading holds no place. If the request is stopped while
+  that message waits for the client, by its wall time, a drain or an engine change, the gateway gives the message up
+  and closes the connection.
 - Tests run the gateway in a real ASGI server over HTTP, not only through a test client. They measure how long the
   engine keeps generating after the client left.
 - The gateway does not retry and sends no `Retry-After`.
@@ -333,7 +368,7 @@ Cancellation:
 ## 11. Measurements
 
 The gateway measures in whole milliseconds, counting from the moment it accepted the request:
-- `wait_ms`: until it handed the request to the engine;
+- `wait_ms`: until it handed the request to the engine to generate, its count stage included;
 - `first_token_ms`: until it received the first generated token of any kind from the engine, reasoning included;
 - `total_ms`: until it wrote its terminal event.
 
