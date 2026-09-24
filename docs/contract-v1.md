@@ -1,7 +1,9 @@
 # Contract v1 (draft)
 
-The HTTP API of simple-serving, version 1. Status: draft, nothing is implemented. The bot's side is in
-simple-story-chat; section 13 is written from its `local/llama.ts` and `local/scheduler.ts` at commit 80fd241.
+The HTTP API of simple-serving, version 1. Status: draft. The gateway in this repository implements it and passes
+the shared cases in front of a fake engine; nothing has run in front of vLLM yet (section 15). The bot's side is
+`local/serving.ts` in simple-story-chat; section 13 is written from its `local/llama.ts` and `local/scheduler.ts` at
+commit 80fd241.
 
 ## 1. Scope
 
@@ -71,9 +73,12 @@ agents, eval or outside keys. The price is that each reader's first turn reads t
 ### Turns
 
 The service knows single HTTP requests. A turn of the bot is several requests, such as compaction, repair and the
-scene, and between them nothing runs. In version 1 every multi-step turn goes through the bot's scheduler, which is the
-only controller of the card (section 8). Eval, probes and the agent interface keep reaching the model through the
-bot's socket (`local/background.ts`) and do not call the service directly.
+scene, and between them nothing else of the bot runs on its lane. Readers' turns go through the bot's scheduler, which
+is the only controller of the card (section 8). Agent turns and `npm run memory:probe` reach the model through the
+bot's socket (`local/background.ts`) and the same scheduler when the bot serves that socket, which it does with its GPU
+control; otherwise they call the service directly. `npm run eval` and every probe run with `--direct` always call the
+service directly. A direct call carries no class of the scheduler, so it is `internal`, and the bot does not see it
+(section 8).
 
 ## 3. Routes
 
@@ -278,9 +283,12 @@ so the service cannot wake itself.
 1. The bot stops starting new turns and waits until its running turns end. It does not pause while work of `reader`,
    `agent` or `internal` runs or waits. Outside requests never keep the card awake. Only the guard's deadline stops
    the card while our work goes on. What counts as running work differs by class. A reader's job and an agent's turn
-   hold the card from start to end, gaps between their requests included. Eval and probes hold it per request, from
-   the moment the bot's scheduler accepts the request to its end. A whole eval run is not a turn: between two of its
-   requests only the idle interval keeps the card up.
+   hold the card from start to end, gaps between their requests included. A probe through the bot's socket holds it
+   per request, from the moment the bot's scheduler accepts the request to its end, at most 10 minutes of waiting
+   plus its run. A whole probe run is not a turn: between two of its requests only the idle interval keeps the card
+   up. The bot does not see work that calls the service directly (section 2), such as `npm run eval`, so in version 1
+   that work holds nothing, and the auto-pause can stop the card under it. The plan to close that gap is at the end
+   of this section.
 2. The bot calls `POST /v1/control/drain` with `{"boot_id": "<from /v1/state>"}`. The gateway increments
    `drain_generation` and answers 202 with `{"status": ..., "boot_id": ..., "drain_generation": n}`. The status is
    `drained` when the gateway had no accepted work, counts included, because the drain then completes before the
@@ -308,6 +316,22 @@ so the service cannot wake itself.
   closes that gap.
 - The guard on the card deletes the instance at the rental's deadline, whatever the bot and the service do. Clients
   then see connection errors.
+
+Not in version 1 yet, the plan for work the bot does not see:
+
+- Polling `active` and `waiting` is not enough. They leave out counts, so the card could sleep under a long count.
+  A short request can start and end between two reads, so a sequential eval could look idle every time. And zero
+  counters between an agent's calls do not mean its turn has ended.
+- For the control key, `/v1/state` would report our accepted, unfinished work per class, counts included. It would
+  also report a counter that grows at every change in our activity within the boot. Outside work counts in neither.
+- The controller holds the card while that work is above zero. It starts the idle interval again when the counter
+  has moved between two reads, and forgets both after a boot change. The bot's own holds for readers' jobs and agent
+  turns stay.
+- An idle drain carries the counter the controller last read. The gateway refuses it with 409 if our activity has
+  changed since. Without that, work that arrives between the check and the drain would wait and be cancelled by
+  step 3. A manual drain has no such condition.
+- Tests, none of which needs a card: a long count, short calls between two reads, an agent turn between its calls,
+  an outside stream with none of our work, and work that arrives between the idle check and the drain.
 
 ## 9. Errors and cancellation
 
@@ -419,8 +443,10 @@ Also in simple-story-chat:
 - `usage.simple_serving` goes into new log fields, added to the whitelist in `local/model-error.ts` as non-negative
   integers. The adapter does not write these numbers into `promptMs` or `predictedMs`.
 - `generateMany` stays on llama.cpp (section 1).
-- The idle pause in `local/gpu.ts` counts our eval and probes as work that keeps the card awake. Today only readers'
-  jobs and agent turns do.
+- The idle pause in `local/gpu.ts` counts readers' jobs, agent turns and probe requests through its queue as work that
+  keeps the card awake. Before, only readers' jobs held the countdown, and an agent turn delayed the pause while the
+  countdown ran on. Work that calls the service directly, such as `npm run eval`, waits for the plan at the end of
+  section 8.
 
 ## 14. Shared cases
 
@@ -442,18 +468,47 @@ Also in simple-story-chat:
 Everything below is written and dry-run before the card is rented. The rental rules of simple-story-chat apply
 (`docs/gpu.md`, "While the cards are paid for").
 
+Before the rental, without a card:
+
+- Pin vLLM (a version or an image), the weights, the tokenizer and the chat template. Check the API and the CLI of
+  that pin, not the latest docs:
+  - `--scheduling-policy priority`: without it vLLM refuses a non-zero priority, and every `agent`, `internal` and
+    `external` request fails;
+  - prefix caching with `cache_salt`, and `--enable-prompt-tokens-details` for `cached_tokens`;
+  - request and output logging off;
+  - the name of the reasoning field, the finish reasons, and the shape of an error in the middle of a stream;
+  - the model name in every chunk, the usage chunk included: the gateway refuses a chunk that does not name the alias;
+  - the fields the gateway sends: `add_special_tokens`, `chat_template_kwargs`, `top_k`, `min_p`,
+    `repetition_penalty`, `cache_salt`, `priority`, and `max_tokens`, which upstream calls deprecated;
+  - `max_model_len` and the served name in `/v1/models`.
+- Write the launch script with those flags.
+- Write the smoke probes. They cover every field section 4 accepts, reasoning, an engine error, an abort, the model
+  name, and the bot's own JSON schemas, which use `minLength`, `maxLength`, `minItems`, `maxItems` and `pattern` in
+  strict mode.
+- Write the count matrix: the count against `usage.prompt_tokens` for plain text, for system, user and assistant
+  turns, with a schema, with thinking on and off, and near the context. One `count_matches` in a log is an
+  observation, not a passed check.
+- Configure the TLS proxy: no SSE buffering, the upstream connection closed when the client leaves, timeouts for
+  headers and bodies, a connection limit. Check it in front of the fake engine with a slow client.
+- Write the load scenarios and what counts as a pass. Only their numbers are measured on the card.
+
+On the card:
+
 1. Smoke: vLLM loads the GGUF Q6_K that the bot uses with llama.cpp. The time for this is fixed in advance. If the
    file does not load or is too slow, nobody fixes that on the paid card, and other weights are measured later as a
-   separate configuration.
-2. The same weights on llama.cpp and on vLLM. The tokenizer, chat template, thinking, sampling, context and cache
+   separate configuration. Then the smoke probes and the count matrix run, with the real template.
+2. Isolation and privacy, before any real story or outside key: a synthetic series checks that cache scopes stay
+   apart, and that the privacy marker shows up in no log of the engine, the proxy or the gateway.
+3. The same weights on llama.cpp and on vLLM. The tokenizer, chat template, thinking, sampling, context and cache
    mode are pinned. Cold and warm runs are measured apart. This compares two engines on one set of weights. It does
    not promise the same tokens.
-3. Synthetic load: the readers' time to first token and speed while `internal` and `external` load runs, including a
+4. Synthetic load: the readers' time to first token and speed while `internal` and `external` load runs, including a
    long outside prompt. The measured limits replace the provisional ones of section 7. Also the tail of an abort: how
-   long the engine keeps computing a request after the gateway closed it.
-4. `npm run eval` in simple-story-chat.
-5. Readers move to the service.
-6. Outside keys, as a separate step.
+   long the engine keeps computing a request after the gateway closed it, measured apart while the prompt is read and
+   while the answer streams, through the proxy.
+5. `npm run eval` in simple-story-chat.
+6. Readers move to the service.
+7. Outside keys, as a separate step.
 
 AWQ and GPTQ are separate configurations, measured later. They free memory, but whether more requests then run at
 once has to be measured.
