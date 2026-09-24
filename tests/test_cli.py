@@ -1,6 +1,6 @@
-"""The command on the owner's machine (contract section 8), against a fake Vast and a fake SSH that forwards to the
-gateway in front of the fake engine. The command's clock moves only when the command waits, so no test waits its
-minutes. Keys and hosts are synthetic."""
+"""The command on the owner's machine (contract section 8), against a fake Vast, a fake SSH and a stand-in for the
+gateway's control listener; `sleep` once against the gateway in front of the fake engine. The command's clock moves
+only when the command waits, so no test waits its minutes. Keys and hosts are synthetic."""
 
 from __future__ import annotations
 
@@ -10,14 +10,18 @@ import hashlib
 import json
 import signal
 import stat
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from simple_serving import card, cli
-from tests.support import ALIAS, CONTROL, FakeVast, Stack, running, until
+from tests.support import ALIAS, CONTROL, FakeVast, running, until
+
+VIEW = {"contract": "2", "boot_id": "synthetic-boot", "status": "ready", "model": ALIAS, "context_tokens": 4096,
+        "drain_generation": 0, "sleep_requested": False, "active": {"reader": 1, "agent": 0}, "waiting": {}}
 
 
 class Clock:
@@ -87,12 +91,12 @@ class FakeTunnel(cli.Tunnel):
 
 
 class Ssh:
-    """ssh as the command starts it. A tunnel forwards its local ports to the gateway's listeners, standing for the
-    card's, until the test ends it or the command closes it. `refuse` holds exit codes of the next connections that
+    """ssh as the command starts it. A tunnel forwards its local ports to `port`, which stands for the card's
+    listeners, until the test ends it or the command closes it. `refuse` holds exit codes of the next connections that
     end before the remote command's first line, `end` those that end right after it."""
 
-    def __init__(self, stack: Stack | None = None, *, refuse: tuple[int, ...] = (), end: tuple[int, ...] = ()) -> None:
-        self.targets = {} if stack is None else {8090: port_of(stack.public), 8091: port_of(stack.control)}
+    def __init__(self, port: int = 0, *, refuse: tuple[int, ...] = (), end: tuple[int, ...] = ()) -> None:
+        self.port = port
         self.refuse, self.end = list(refuse), list(end)
         self.opened: list[dict[int, int]] = []
         self.tunnels: list[FakeTunnel] = []
@@ -105,8 +109,8 @@ class Ssh:
             tunnel = FakeTunnel([])
             tunnel.end.set_result(self.end.pop(0))
         else:
-            tunnel = FakeTunnel([await asyncio.start_server(partial(forward, self.targets[remote]), "127.0.0.1", local)
-                                 for local, remote in forwards.items()])
+            tunnel = FakeTunnel([await asyncio.start_server(partial(forward, self.port), "127.0.0.1", local)
+                                 for local in forwards])
         self.tunnels.append(tunnel)
         return tunnel
 
@@ -127,6 +131,31 @@ async def forward(port: int, reader: asyncio.StreamReader, writer: asyncio.Strea
         sink.close()
 
     await asyncio.gather(copy(reader, upstream_writer), copy(upstream_reader, writer))
+
+
+@contextlib.asynccontextmanager
+async def gateway(status: int = 200, body: Any = VIEW, drip_s: float = 0,
+                  port: int = 0) -> AsyncIterator[tuple[int, list[bytes]]]:
+    """A stand-in for the gateway's control listener, on `port` or a free one. It notes the head of each request and
+    answers every one with `status` and `body`, a byte at a time every `drip_s` if that is set."""
+    heads: list[bytes] = []
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        heads.append(await reader.readuntil(b"\r\n\r\n"))
+        data = json.dumps(body).encode()
+        message = b"HTTP/1.1 %d Synthetic\r\nContent-Length: %d\r\n\r\n%b" % (status, len(data), data)
+        with contextlib.suppress(ConnectionError):
+            for part in [message[i:i + 1] for i in range(len(message))] if drip_s else [message]:
+                writer.write(part)
+                await writer.drain()
+                await asyncio.sleep(drip_s)
+        writer.close()
+
+    server = await asyncio.start_server(answer, "127.0.0.1", port)
+    try:
+        yield server.sockets[0].getsockname()[1], heads
+    finally:
+        server.close()
 
 
 def port_of(url: str) -> int:
@@ -163,9 +192,9 @@ def test_keys_keep_what_the_file_holds_and_it_stays_the_owners(tmp_path: Path,
     assert cli.main(["--config", str(path), "keys"]) == 0
     config = json.loads(path.read_text())
     assert (config["instance_id"], config["client_key"]) == ("123", "synthetic-client-key") and config["control_key"]
-    path.chmod(0o644)
+    path.chmod(0o640)
     assert cli.main(["--config", str(path), "keys"]) == 1
-    assert "chmod 600" in capsys.readouterr().err
+    assert "open to its owner only" in capsys.readouterr().err
 
 
 def test_the_configuration_names_the_instance_its_key_and_the_host(tmp_path: Path) -> None:
@@ -188,15 +217,25 @@ def test_the_configuration_names_the_instance_its_key_and_the_host(tmp_path: Pat
 # up
 
 @pytest.mark.anyio
-async def test_up_waits_out_a_stop_in_flight_and_resumes_once(tmp_path: Path, clock: Clock) -> None:
-    async with running() as stack:
-        instance, ssh = Instance("stopping", "stopping", "stopping", "stopped"), Ssh(stack)
-        task = asyncio.create_task(cli.up(setup_for(tmp_path, instance, ssh)))
+async def test_up_resumes_once_runs_alone_opens_a_lost_tunnel_again_and_ctrl_c_sends_nothing(tmp_path: Path,
+                                                                                             clock: Clock) -> None:
+    async with gateway() as (port, heads):
+        instance, ssh = Instance("stopping", "stopping", "stopping", "stopped"), Ssh(port)
+        setup = setup_for(tmp_path, instance, ssh)
+        task = asyncio.create_task(cli.up(setup))
         await until(ssh.holding)
         assert instance.resumes == 1 and clock.time >= 3 * cli.POLL_S
-        task.cancel()
+        with pytest.raises(cli.Refusal, match="another up runs"):
+            await cli.up(setup)
+        ssh.tunnels[0].end.set_result(cli.SSH_FAILED)  # the connection drops
+        await until(lambda: ssh.holding(2))
+        task.cancel()  # as asyncio.run does on Ctrl+C
         with pytest.raises(asyncio.CancelledError):
             await task
+    assert instance.resumes == 1 and len(ssh.opened) == 2 and all(tunnel.closed for tunnel in ssh.tunnels)
+    assert all(head.startswith(b"GET /v1/state ") for head in heads)  # it read the state, and sent nothing
+    with cli.up_lock(setup.path):  # which up let go of
+        pass
 
 
 @pytest.mark.anyio
@@ -211,53 +250,11 @@ async def test_up_never_resumes_against_a_stop_that_does_not_end(tmp_path: Path,
 async def test_up_refuses_a_busy_local_port_and_leaves_its_listener_alone(tmp_path: Path, clock: Clock) -> None:
     instance, ssh = Instance("running"), Ssh()
     setup = setup_for(tmp_path, instance, ssh)
-    other = await asyncio.start_server(lambda reader, writer: writer.close(), "127.0.0.1", setup.local["control"])
-    try:
+    async with gateway(port=setup.local["control"]) as (_, heads):
         with pytest.raises(cli.Refusal, match=f"local port {setup.local['control']} is taken"):
             await cli.up(setup)
-        assert other.is_serving() and (instance.reads, ssh.opened) == (0, [])
-        _, writer = await asyncio.open_connection("127.0.0.1", setup.local["control"])
-        writer.close()
-    finally:
-        other.close()
-
-
-@pytest.mark.anyio
-async def test_ctrl_c_closes_the_tunnel_and_sends_nothing(tmp_path: Path, clock: Clock) -> None:
-    async with running() as stack:
-        instance, ssh = Instance("running"), Ssh(stack)
-        task = asyncio.create_task(cli.up(setup_for(tmp_path, instance, ssh)))
-        await until(ssh.holding)
-        task.cancel()  # as asyncio.run does on Ctrl+C
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert ssh.tunnels[0].closed and len(ssh.opened) == 1 and instance.resumes == 0
-        assert (stack.service.status, stack.service.sleep_requested, stack.service.drain_generation) == ("ready",
-                                                                                                        False, 0)
-        assert stack.vast.attempts == [] and not cli.up_runs(tmp_path / "config.json")
-
-
-@pytest.mark.anyio
-async def test_a_lost_tunnel_is_opened_again_without_a_resume_until_the_card_stops(tmp_path: Path,
-                                                                                   clock: Clock) -> None:
-    async with running() as stack:
-        instance, ssh = Instance("running"), Ssh(stack)
-        task = asyncio.create_task(cli.up(setup_for(tmp_path, instance, ssh)))
-        await until(ssh.holding)
-        ssh.tunnels[0].end.set_result(cli.SSH_FAILED)  # the connection drops
-        await until(lambda: ssh.holding(2))
-        instance.states = ["stopped"]  # the card fell asleep, and its stop dropped the connection
-        ssh.tunnels[1].end.set_result(cli.SSH_FAILED)
-        assert await task == 0
-        assert instance.resumes == 0 and len(ssh.opened) == 2 and all(tunnel.closed for tunnel in ssh.tunnels)
-
-
-@pytest.mark.anyio
-async def test_tunnels_that_keep_ending_before_ready_are_given_up(tmp_path: Path, clock: Clock) -> None:
-    instance, ssh = Instance("running"), Ssh(end=(0,) * 10)  # --hold finds no pair to hold
-    with pytest.raises(cli.Refusal, match="keeps ending"):
-        await cli.up(setup_for(tmp_path, instance, ssh))
-    assert len(ssh.opened) == cli.RECONNECTS + 1 and instance.resumes == 0
+        assert (heads, instance.reads, ssh.opened) == ([], 0, [])
+        assert await cli.call(setup.control_url(), CONTROL, "GET", "/v1/state") == VIEW  # it still answers
 
 
 @pytest.mark.anyio
@@ -266,38 +263,31 @@ async def test_tunnels_that_keep_ending_before_ready_are_given_up(tmp_path: Path
     ((card.NOT_PREPARED,), (), "not prepared"),
     ((card.GAVE_UP,), (), "given up"),  # as at a resume after a failed load
     ((), (card.GAVE_UP,), "given up"),  # a load that fails while up waits
+    ((), (0,) * (cli.RECONNECTS + 1), "keeps ending"),  # --hold finds no pair to hold, and up never resumes
 ])
 async def test_up_says_why_the_card_does_not_serve(tmp_path: Path, clock: Clock, refuse: tuple[int, ...],
                                                    end: tuple[int, ...], words: str) -> None:
     instance, ssh = Instance("running"), Ssh(refuse=refuse, end=end)
     with pytest.raises(cli.Refusal, match=words):
         await cli.up(setup_for(tmp_path, instance, ssh))
-    assert len(ssh.opened) == 1
+    assert len(ssh.opened) == len(refuse + end)  # a refusal comes at once, and tunnels that end only so often
 
 
 # sleep and status
 
 @pytest.mark.anyio
-async def test_sleep_without_a_tunnel_drains_through_a_forward_of_its_own(tmp_path: Path, clock: Clock) -> None:
+async def test_sleep_during_up_drains_through_a_forward_of_its_own_and_up_ends_with_the_stop(tmp_path: Path,
+                                                                                            clock: Clock) -> None:
     async with running() as stack:
-        instance, ssh = Instance("running", card_stop=stack.vast), Ssh(stack)
-        setup = setup_for(tmp_path, instance, ssh)
-        assert await cli.sleep(setup) == 0
-        ((local, remote),) = ssh.opened[0].items()  # the control listener alone, on a port of its own
-        assert remote == 8091 and local not in setup.local.values() and ssh.tunnels[0].closed
-        assert stack.service.sleep_requested and stack.vast.stopped and instance.last == "stopped"
-
-
-@pytest.mark.anyio
-async def test_sleep_uses_the_tunnel_that_up_holds(tmp_path: Path, clock: Clock) -> None:
-    async with running() as stack:
-        instance, ssh = Instance("running", card_stop=stack.vast), Ssh(stack)
+        instance, ssh = Instance("running", card_stop=stack.vast), Ssh(port_of(stack.control))
         setup = setup_for(tmp_path, instance, ssh)
         holding = asyncio.create_task(cli.up(setup))
         await until(ssh.holding)
         assert await cli.sleep(setup) == 0
-        assert len(ssh.opened) == 1 and stack.vast.stopped
-        ssh.tunnels[0].end.set_result(cli.SSH_FAILED)  # the stop takes the connection down
+        ((local, remote),) = ssh.opened[1].items()  # the control listener alone, on a port of its own
+        assert remote == 8091 and local not in setup.local.values() and ssh.tunnels[1].closed
+        assert stack.service.sleep_requested and stack.vast.stopped and instance.last == "stopped"
+        ssh.tunnels[0].end.set_result(cli.SSH_FAILED)  # the stop takes up's connection down
         assert await holding == 0 and instance.resumes == 0
 
 
@@ -310,60 +300,73 @@ async def test_sleep_stops_nothing_when_the_gateway_cannot_be_reached(tmp_path: 
 
 
 @pytest.mark.anyio
-async def test_status_tells_vast_apart_from_the_gateway(tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch,
-                                                        capsys: pytest.CaptureFixture[str]) -> None:
-    proxied: list[bool] = []
-
-    def trap(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        proxied.append(True)
-        writer.close()
-
-    proxy = await asyncio.start_server(trap, "127.0.0.1", 0)
-    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}")
-    async with running() as stack:
-        assert await cli.status(setup_for(tmp_path, Instance("running"), Ssh(stack))) == 0
-        assert capsys.readouterr().out.splitlines() == [
-            "vast: running", f"gateway: ready; contract 2, model {ALIAS}; active none, waiting none"]
-    proxy.close()
-    assert proxied == []  # the control key goes to loopback only, never to a proxy
-    await cli.status(setup_for(tmp_path, Instance("running"), Ssh(refuse=(cli.SSH_FAILED,))))
-    assert capsys.readouterr().out.splitlines() == ["vast: running", "gateway: ssh ended with 255"]
-    await cli.status(setup_for(tmp_path, Instance("running"), Ssh(refuse=(card.GAVE_UP,))))
-    assert capsys.readouterr().out.splitlines() == ["vast: running", f"gateway: {cli.GIVEN_UP}"]
-    ssh = Ssh()
-    await cli.status(setup_for(tmp_path, Instance("stopped"), ssh))
-    assert capsys.readouterr().out == "vast: stopped\n" and ssh.opened == []
+@pytest.mark.parametrize(("vast", "refuse", "answer", "line"), [
+    ("running", (), {}, f"ready; contract 2, model {ALIAS}; active {{'reader': 1}}, waiting none"),
+    ("running", (), {"body": VIEW | {"model": CONTROL, "sleep_requested": True}},
+     "ready, falling asleep; another contract or model; active {'reader': 1}, waiting none"),
+    ("running", (), {"status": 401, "body": {"error": {"code": CONTROL}}}, "401 error"),  # the key, echoed
+    ("running", (), {"body": VIEW | {"status": CONTROL}}, "200 malformed"),
+    ("running", (), {"body": VIEW | {"active": [CONTROL]}}, "200 malformed"),
+    ("running", (), {"body": VIEW | {"padding": "x" * cli.ANSWER_BYTES}}, "no answer"),
+    ("running", (), {"drip_s": 0.01}, "no answer"),  # a byte every 10 ms: only the bound of the whole call ends it
+    ("running", (cli.SSH_FAILED,), {}, "ssh ended with 255"),
+    ("running", (card.GAVE_UP,), {}, cli.GIVEN_UP),
+    ("stopped", (), {}, None),
+])
+async def test_status_tells_vast_apart_from_the_gateway_and_prints_nothing_as_it_came(
+        tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], vast: str,
+        refuse: tuple[int, ...], answer: dict[str, Any], line: str | None) -> None:
+    monkeypatch.setattr(cli, "CALL_S", 0.2)
+    async with gateway(**answer) as (port, _):
+        ssh = Ssh(port, refuse=refuse)
+        setup = setup_for(tmp_path, Instance(vast), ssh)
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{setup.local['control']}")
+        # Another process owns up's control port while an up holds the lock, and it is a proxy as well.
+        async with gateway(port=setup.local["control"]) as (_, strangers):
+            with cli.up_lock(setup.path):
+                assert await cli.status(setup) == 0
+    printed = capsys.readouterr().out
+    assert printed.splitlines() == [f"vast: {vast}", *([f"gateway: {line}"] if line else [])]
+    assert CONTROL not in printed and strangers == [] and len(ssh.opened) == (vast == "running")
 
 
 # the real tunnel, with a stand-in for ssh
 
 STAND_IN = """#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, signal, sys, time
 with open(os.environ["SSH_ARGS"], "w") as file:
     json.dump(sys.argv[1:], file)
 print("a line of the remote shell's own", flush=True)
 if os.environ.get("SSH_EXIT"):
     sys.exit(int(os.environ["SSH_EXIT"]))
+if os.environ.get("SSH_IGNORE_TERM"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 print(os.environ["SSH_LINE"], flush=True)
 time.sleep(600)
 """
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(("env", "ended"), [
+    ({}, -signal.SIGTERM),
+    ({"SSH_IGNORE_TERM": "1"}, -signal.SIGKILL),  # the command's own child, killed after the grace
+])
 async def test_the_tunnel_is_ssh_with_loopback_forwards_and_the_hold_command(tmp_path: Path,
-                                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+                                                                            monkeypatch: pytest.MonkeyPatch,
+                                                                            env: dict[str, str], ended: int) -> None:
     ssh = tmp_path / "ssh"
     ssh.write_text(STAND_IN)
     ssh.chmod(0o700)
     monkeypatch.setattr(cli, "SSH", (str(ssh), *cli.SSH[1:]))
-    monkeypatch.setenv("SSH_ARGS", str(tmp_path / "args.json"))
-    monkeypatch.setenv("SSH_LINE", card.HOLDING)
+    monkeypatch.setattr(cli, "CLOSE_S", 0.1)
+    for name, value in {"SSH_ARGS": str(tmp_path / "args.json"), "SSH_LINE": card.HOLDING, **env}.items():
+        monkeypatch.setenv(name, value)
     tunnel = await cli.Tunnel.open("card", {18080: 8090, 18081: 8091})
     args = json.loads((tmp_path / "args.json").read_text())
     assert args[-2:] == ["card", cli.HOLD] and tunnel.returncode is None
     assert {"127.0.0.1:18080:127.0.0.1:8090", "127.0.0.1:18081:127.0.0.1:8091", "BatchMode=yes",
             "ExitOnForwardFailure=yes", "StrictHostKeyChecking=yes"} <= set(args)
-    assert await tunnel.close() == -signal.SIGTERM
+    assert await asyncio.wait_for(tunnel.close(), 5) == ended  # a close that never ends fails here
     monkeypatch.setenv("SSH_EXIT", "255")
     with pytest.raises(cli.NoTunnel) as caught:
         await cli.Tunnel.open("card", {18081: 8091})

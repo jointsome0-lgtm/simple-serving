@@ -211,13 +211,15 @@ uv run python -m simple_serving.cli up | sleep | status | keys
 
 - `up` resumes the instance if it is stopped, waits for the gateway to be ready, and holds the tunnel in the
   foreground: `http://127.0.0.1:8080` for the clients, `http://127.0.0.1:8081` for control. Ctrl+C closes it and sends
-  nothing. The card falls asleep by itself 13 minutes after the last request of ours, and `up` then ends.
-- `sleep` makes the card fall asleep now, through the tunnel or a short forward of its own, and waits until Vast
+  nothing. The card falls asleep by itself 13 minutes after the last request of ours, and `up` then ends. One `up`
+  runs at a time for a configuration's directory: its lock guards the fixed local ports, not a card.
+- `sleep` makes the card fall asleep now, through a short control-only forward of its own, and waits until Vast
   reports the instance stopped.
-- `status` shows the instance's state in Vast and what the gateway answers.
+- `status` shows the instance's state in Vast and, through a forward of its own, the gateway's status, whether it
+  serves the manifest's model, and its counts. Nothing of an answer is printed as it came.
 - `keys` makes the two gateway keys once, for the preparation above.
 
-The configuration is `~/.config/simple-serving/config.json`, readable by its owner alone, or the file that `--config`
+The configuration is `~/.config/simple-serving/config.json`, open to its owner only, or the file that `--config`
 names:
 
 ```json

@@ -9,15 +9,16 @@ ready, and holds the tunnel in the foreground. Ctrl+C closes it and sends nothin
 interval runs out. A lost tunnel is opened again a few times while the instance runs, never by a resume and never by
 starting a service; once the card has stopped, `up` ends.
 
-`sleep` asks the gateway to sleep, through the tunnel that `up` holds or else a short control-only forward of its own,
-and reads `stopped` back from Vast. Without the gateway it stops nothing, since a stop through Vast would skip the
-drain. `status` tells the instance's state in Vast apart from what the gateway answers. `keys` creates the client key
-and the control key, never over existing ones, and prints only the SHA-256 of each, for the card's preparation:
+`sleep` asks the gateway to sleep, through a short control-only forward of its own, and reads `stopped` back from
+Vast. Without the gateway it stops nothing, since a stop through Vast would skip the drain. `status` tells the
+instance's state in Vast apart from what the gateway answers. Nothing of an answer is printed as it came: only the
+contract's codes and statuses, numbers, and the manifest's alias. `keys` creates the client key and the control key,
+never over existing ones, and prints only the SHA-256 of each, for the card's preparation:
 
     python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh
 
 The configuration is the owner's alone: a JSON object in `~/.config/simple-serving/config.json`, or the file that
-`--config` names, readable by its owner only. `keys` writes `client_key` and `control_key` into it. The owner adds
+`--config` names, open to its owner only. `keys` writes `client_key` and `control_key` into it. The owner adds
 `instance_id`, `vast_api_key`, a Vast key allowed GET and PUT on that instance alone, and `ssh_host`, a host of
 ~/.ssh/config whose host key is known. The owner copies the client key into the bot's model profile.
 """
@@ -45,7 +46,8 @@ from typing import Any
 import httpx
 
 from . import card, vast
-from .config import IDLE_TIMEOUT_S
+from .config import CLASSES, IDLE_TIMEOUT_S
+from .errors import STATUS
 
 CONFIG = Path.home() / ".config/simple-serving/config.json"
 KEYS = ("client_key", "control_key")
@@ -62,8 +64,11 @@ START_WAIT_S = 600  # for a resumed instance to run, and then for SSH to connect
 READY_POLL_S = 5
 READY_MARGIN_S = 60  # past the card's load deadline, by when the launcher has ended a load that is not ready
 CONNECT_S = 30  # from starting ssh to the remote command's first line
-CALL_S = 10  # one call to the gateway
+CLOSE_S = 5  # from ssh's SIGTERM to its SIGKILL
+CALL_S = 10  # one call to the gateway, from connecting to the end of its answer
+ANSWER_BYTES = 16384  # the most of one answer of the gateway that the command reads
 RECONNECTS = 3  # tunnels in a row that may end before the gateway is ready again
+STATUSES = ("starting", "ready", "draining", "drained", "failed")  # contract section 6
 NOT_PREPARED = "the card is not prepared: run its preparation first (README, 'The card')"
 GIVEN_UP = ("the card has given up loading the model and stops itself: to load it again, run the launcher's --retry "
             f"on the card within {IDLE_TIMEOUT_S // 60} minutes of its start (README, 'The card')")
@@ -77,7 +82,7 @@ class Refusal(Exception):
 
 
 class GatewayError(Exception):
-    """An error that the gateway answered: its HTTP status and code."""
+    """An answer of the gateway that is an error, or of another shape: its HTTP status and a fixed code."""
 
 
 class NoAnswer(GatewayError):
@@ -132,8 +137,14 @@ class Tunnel:
         return await self.process.wait()
 
     async def close(self) -> int:
+        """End ssh, the command's own child: SIGTERM, then SIGKILL after CLOSE_S."""
         with contextlib.suppress(ProcessLookupError):
             self.process.terminate()
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(CLOSE_S):
+                return await self.process.wait()
+        with contextlib.suppress(ProcessLookupError):
+            self.process.kill()
         return await self.process.wait()
 
 
@@ -174,7 +185,7 @@ def read_config(path: Path) -> dict[str, Any]:
     """The configuration, or nothing when there is none yet. Others may not read it."""
     try:
         if path.stat().st_mode & 0o077:
-            raise Refusal(f"{path} must be readable by its owner alone: chmod 600 it")
+            raise Refusal(f"{path} must be open to its owner only: chmod 600 it")
         config = json.loads(path.read_text())
     except FileNotFoundError:
         return {}
@@ -286,10 +297,10 @@ async def ready(setup: Setup, tunnel: Tunnel) -> bool:
                 raise Refusal("the gateway on the card serves another contract or model")
             if state.get("sleep_requested"):
                 raise Refusal("the card is falling asleep: run up again once it has stopped")
-            if state.get("status") == "ready":
+            if state["status"] == "ready":
                 return True
-            if state.get("status") != shown:
-                shown = state.get("status")
+            if state["status"] != shown:
+                shown = state["status"]
                 say(f"gateway: {shown}")
         if now() >= deadline:
             raise Refusal("the gateway is not ready in time")
@@ -335,19 +346,18 @@ async def status(setup: Setup) -> int:
         print(f"gateway: {describe(error)}")
         return 0
     counts = {name: {cls: n for cls, n in view.get(name, {}).items() if n} for name in ("active", "waiting")}
-    print(f"gateway: {view.get('status')}{', falling asleep' if view.get('sleep_requested') else ''}; "
-          f"contract {view.get('contract')}, model {view.get('model')}; active {counts['active'] or 'none'}, "
-          f"waiting {counts['waiting'] or 'none'}")
+    serves = (view.get("contract"), view.get("model")) == ("2", setup.alias)
+    print(f"gateway: {view['status']}{', falling asleep' if view.get('sleep_requested') else ''}; "
+          f"{f'contract 2, model {setup.alias}' if serves else 'another contract or model'}; "
+          f"active {counts['active'] or 'none'}, waiting {counts['waiting'] or 'none'}")
     return 0
 
 
 @contextlib.asynccontextmanager
 async def control(setup: Setup) -> AsyncIterator[str]:
-    """The gateway's control listener: through the tunnel that up holds, or else through a short control-only forward
-    of this command's own, on a free loopback port."""
-    if up_runs(setup.path):
-        yield setup.control_url()
-        return
+    """The gateway's control listener, through a short control-only forward of this command's own on a free loopback
+    port. The key goes there only after the remote command's first line, once ssh has bound the port; never to up's
+    ports, since up's lock does not show that its forwards are bound."""
     port = free_port()
     tunnel = await setup.connect({port: setup.card_ports["control"]})
     try:
@@ -357,18 +367,38 @@ async def control(setup: Setup) -> AsyncIterator[str]:
 
 
 async def call(base: str, key: str, method: str, path: str, body: Any = None) -> dict[str, Any]:
-    """One call to the gateway, and its answer. Never through a proxy: the key goes to loopback only."""
+    """One call to the gateway within CALL_S, and its answer, read up to ANSWER_BYTES. Never through a proxy: the key
+    goes to loopback only. An error keeps its HTTP status and a code of contract section 9, or `error`, and an answer
+    whose fields the command reads have other shapes is `malformed`, so nothing of an answer is printed as it came."""
     try:
-        async with httpx.AsyncClient(timeout=CALL_S, trust_env=False) as client:
-            response = await client.request(method, base + path, json=body,
-                                            headers={"Authorization": f"Bearer {key}"})
-        answer = response.json()
-    except (httpx.HTTPError, ValueError):
+        async with (asyncio.timeout(CALL_S), httpx.AsyncClient(timeout=None, trust_env=False) as client,
+                    client.stream(method, base + path, json=body,
+                                  headers={"Authorization": f"Bearer {key}"}) as response):
+            data = b""
+            async for chunk in response.aiter_bytes():
+                data += chunk
+                if len(data) > ANSWER_BYTES:
+                    raise ValueError("too long")
+        answer = json.loads(data)
+    except (httpx.HTTPError, ValueError, RecursionError, TimeoutError):
         raise NoAnswer("no answer") from None
     if not response.is_success or not isinstance(answer, dict):
         error = answer.get("error") if isinstance(answer, dict) else None
-        raise GatewayError(f"{response.status_code} {error.get('code') if isinstance(error, dict) else 'error'}")
+        code = error.get("code") if isinstance(error, dict) else None
+        raise GatewayError(f"{response.status_code} {code if isinstance(code, str) and code in STATUS else 'error'}")
+    if not well_formed(answer):
+        raise GatewayError(f"{response.status_code} malformed")
     return answer
+
+
+def well_formed(answer: dict[str, Any]) -> bool:
+    """Whether the fields that the command reads have the shapes of contract sections 6 and 8: the status and the boot
+    of a control answer, and in a control view also the sleep and the counts by class."""
+    counts = [answer.get(name, {}) for name in ("active", "waiting")]
+    return (answer.get("status") in STATUSES and isinstance(answer.get("boot_id"), str)
+            and isinstance(answer.get("sleep_requested", False), bool)
+            and all(isinstance(by_class, dict) and all(name in CLASSES and type(n) is int and n >= 0
+                                                       for name, n in by_class.items()) for by_class in counts))
 
 
 async def vast_state(setup: Setup) -> str:
@@ -405,7 +435,8 @@ def describe(error: Exception) -> str:
 
 @contextlib.contextmanager
 def up_lock(path: Path) -> Iterator[None]:
-    """One up at a time. While it runs, sleep and status use its tunnel."""
+    """One up at a time for the configuration's directory: the lock guards the fixed local ports of the tunnel, not
+    a card."""
     lock = os.open(path.with_name("up.lock"), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -416,14 +447,6 @@ def up_lock(path: Path) -> Iterator[None]:
         yield
     finally:
         os.close(lock)
-
-
-def up_runs(path: Path) -> bool:
-    try:
-        with up_lock(path):
-            return False
-    except Refusal:
-        return True
 
 
 def free_port() -> int:

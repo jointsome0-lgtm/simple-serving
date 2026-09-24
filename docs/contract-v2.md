@@ -356,10 +356,12 @@ owner's restricted Vast key (section 12) and never the card's.
   over SSH; the card starts its own (below). Ctrl+C closes the tunnel and sends nothing, so the card stays up until
   its interval runs out. A lost tunnel is opened again a few times while the instance runs, never by a resume, and
   once the card has stopped `up` ends.
-- `sleep` sends `POST /v1/control/sleep` through the tunnel, or through a short control-only forward when no tunnel
-  is open, and then reads `stopped` back from Vast. Without the gateway it does not stop the instance directly, since
-  that would skip the drain.
-- `status` tells the instance's state in Vast apart from whether the gateway answers.
+- `sleep` sends `POST /v1/control/sleep` through a short control-only forward of its own, never through `up`'s ports,
+  whose lock does not show that the tunnel is bound, and then reads `stopped` back from Vast. Without the gateway it
+  does not stop the instance directly, since that would skip the drain.
+- `status` tells the instance's state in Vast apart from what the gateway answers, through the same kind of forward.
+  Of an answer it prints only the statuses and codes of this contract, counts, and whether the contract and the model
+  are the expected ones.
 - `keys` makes the client key and the control key once, and prints only the SHA-256 of each, which the card's
   preparation reads (section 12).
 
