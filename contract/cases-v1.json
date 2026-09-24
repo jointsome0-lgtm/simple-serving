@@ -1,0 +1,522 @@
+{
+  "contract": "1",
+  "about": "Shared cases of contract v1 (docs/contract-v1.md). The gateway's tests play the engine part through the fake engine and check the response; a client's tests play the response and check the result. Format: contract/README.md.",
+  "service": {
+    "alias": "test-model",
+    "context_tokens": 4096,
+    "body_limit_bytes": 2000000,
+    "keys": {
+      "test-key-bot": { "label": "bot", "classes": ["reader", "agent", "internal"], "default": "internal", "scopes": true, "control": false },
+      "test-key-control": { "label": "control", "classes": [], "default": null, "scopes": false, "control": true },
+      "test-key-outside-a": { "label": "outside-a", "classes": ["external"], "default": "external", "scopes": false, "control": false },
+      "test-key-outside-b": { "label": "outside-b", "classes": ["external"], "default": "external", "scopes": false, "control": false }
+    },
+    "limits": {
+      "reader": { "active": 4, "waiting": 8, "input_tokens": null, "max_tokens": 1024, "wall_s": 300 },
+      "agent": { "active": 1, "waiting": 2, "input_tokens": null, "max_tokens": 1024, "wall_s": 900 },
+      "internal": { "active": 2, "waiting": 8, "input_tokens": null, "max_tokens": 1024, "wall_s": 900 },
+      "external": { "active": 2, "waiting": 4, "input_tokens": 1024, "max_tokens": 256, "wall_s": 120 },
+      "external_per_key": { "active": 1, "waiting": 2 },
+      "engine": { "active": 5 }
+    },
+    "count_limits": { "active": 8, "per_outside_key": 2 },
+    "engine_priority": { "reader": 0, "agent": 1, "internal": 2, "external": 3 },
+    "drain_deadline_s": 60
+  },
+  "defaults": {
+    "chat_body": {
+      "model": "test-model",
+      "messages": [
+        { "role": "system", "content": "You narrate a short synthetic story." },
+        { "role": "user", "content": "The lighthouse keeper opens the door." }
+      ],
+      "max_tokens": 64,
+      "stream": true,
+      "stream_options": { "include_usage": true }
+    }
+  },
+  "cases": [
+    {
+      "name": "stream-basic",
+      "about": "A reader's turn streams text, ends with stop and reports usage with cached tokens.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "role": "assistant" }, { "content": "The door " }, { "content": "creaks." }, { "finish_reason": "stop" } ],
+            "usage": { "completion_tokens": 3, "cached_tokens": 640 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 0, "cache_salt": "present" },
+          "response": { "status": 200, "done": true, "chunks": [
+            { "choices": [ { "index": 0, "delta": { "role": "assistant" } } ] },
+            { "choices": [ { "index": 0, "delta": { "content": "The door " } } ] },
+            { "choices": [ { "index": 0, "delta": { "content": "creaks." } } ] },
+            { "choices": [ { "index": 0, "delta": {}, "finish_reason": "stop" } ] },
+            { "choices": [], "usage": { "prompt_tokens": 812, "completion_tokens": 3, "prompt_tokens_details": { "cached_tokens": 640 }, "simple_serving": "measurements" } }
+          ] },
+          "result": { "text": "The door creaks.", "finish_reason": "stop", "usage": { "input": 812, "output": 3, "cached": 640 } }
+        }
+      ]
+    },
+    {
+      "name": "stream-length",
+      "about": "An answer cut by max_tokens ends with length; content and finish may share a chunk.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": { "max_tokens": 2 } },
+          "engine": { "input_tokens": 812, "events": [ { "content": "The door", "finish_reason": "length" } ], "usage": { "completion_tokens": 2 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 2, "cache_salt": "present" },
+          "response": { "status": 200, "done": true, "chunks": [
+            { "choices": [ { "index": 0, "delta": { "content": "The door" }, "finish_reason": "length" } ] },
+            { "choices": [], "usage": { "prompt_tokens": 812, "completion_tokens": 2, "simple_serving": "measurements" } }
+          ] },
+          "result": { "text": "The door", "finish_reason": "length", "usage": { "input": 812, "output": 2, "cached": null } }
+        }
+      ]
+    },
+    {
+      "name": "stream-reasoning",
+      "about": "Reasoning from the engine arrives as reasoning_content and is not part of the text.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "agent", "X-Simple-Serving-Scope": "agent" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "reasoning": "The keeper is tired." }, { "content": "He sighs." }, { "finish_reason": "stop" } ],
+            "usage": { "completion_tokens": 9 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 1, "cache_salt": "present" },
+          "response": { "status": 200, "done": true, "chunks": [
+            { "choices": [ { "index": 0, "delta": { "reasoning_content": "The keeper is tired." } } ] },
+            { "choices": [ { "index": 0, "delta": { "content": "He sighs." } } ] },
+            { "choices": [ { "index": 0, "delta": {}, "finish_reason": "stop" } ] },
+            { "choices": [], "usage": { "prompt_tokens": 812, "completion_tokens": 9, "simple_serving": "measurements" } }
+          ] },
+          "result": { "text": "He sighs.", "reasoning": "The keeper is tired.", "finish_reason": "stop", "usage": { "input": 812, "output": 9, "cached": null } }
+        }
+      ]
+    },
+    {
+      "name": "stream-empty-deltas",
+      "about": "Empty and role-only deltas are allowed and add nothing to the text.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "role": "assistant" }, {}, { "content": "Wind." }, {}, { "finish_reason": "stop" } ],
+            "usage": { "completion_tokens": 2 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 0, "cache_salt": "present" },
+          "response": { "status": 200, "done": true, "chunks": [
+            { "choices": [ { "index": 0, "delta": { "role": "assistant" } } ] },
+            { "choices": [ { "index": 0, "delta": {} } ] },
+            { "choices": [ { "index": 0, "delta": { "content": "Wind." } } ] },
+            { "choices": [ { "index": 0, "delta": {} } ] },
+            { "choices": [ { "index": 0, "delta": {}, "finish_reason": "stop" } ] },
+            { "choices": [], "usage": { "prompt_tokens": 812, "completion_tokens": 2, "simple_serving": "measurements" } }
+          ] },
+          "result": { "text": "Wind.", "finish_reason": "stop", "usage": { "input": 812, "output": 2, "cached": null } }
+        }
+      ]
+    },
+    {
+      "name": "json-schema",
+      "about": "A structured answer is requested with json_schema and arrives as text.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" },
+            "body_patch": { "temperature": 0.2, "response_format": { "type": "json_schema", "json_schema": { "name": "reply", "strict": true,
+              "schema": { "type": "object", "properties": { "place": { "type": "string" } }, "required": ["place"], "additionalProperties": false } } } } },
+          "engine": { "input_tokens": 830, "events": [ { "content": "{\"place\": \"lighthouse\"}" }, { "finish_reason": "stop" } ], "usage": { "completion_tokens": 7 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 0, "cache_salt": "present", "response_format": "json_schema" },
+          "response": { "status": 200, "done": true, "chunks": [
+            { "choices": [ { "index": 0, "delta": { "content": "{\"place\": \"lighthouse\"}" } } ] },
+            { "choices": [ { "index": 0, "delta": {}, "finish_reason": "stop" } ] },
+            { "choices": [], "usage": { "prompt_tokens": 830, "completion_tokens": 7, "simple_serving": "measurements" } }
+          ] },
+          "result": { "text": "{\"place\": \"lighthouse\"}", "finish_reason": "stop", "usage": { "input": 830, "output": 7, "cached": null } }
+        }
+      ]
+    },
+    {
+      "name": "count",
+      "about": "Counting the body of stream-basic gives the prompt_tokens its generation reports.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions/input_tokens", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": { "input_tokens": 812 },
+          "engine_receives": { "calls": ["tokenize"] },
+          "response": { "status": 200, "json": { "input_tokens": 812 } },
+          "result": { "input_tokens": 812 }
+        }
+      ]
+    },
+    {
+      "name": "count-over-limits",
+      "about": "Counting applies neither the class limits nor the context: the answer is the count.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions/input_tokens", "key": "test-key-outside-a", "body_patch": { "max_tokens": 512 } },
+          "engine": { "input_tokens": 5000 },
+          "engine_receives": { "calls": ["tokenize"] },
+          "response": { "status": 200, "json": { "input_tokens": 5000 } },
+          "result": { "input_tokens": 5000 }
+        }
+      ]
+    },
+    {
+      "name": "default-class",
+      "about": "Without a class header the key's default class applies, with its engine priority and scope.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "content": "H." }, { "finish_reason": "stop" } ], "usage": { "completion_tokens": 1 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 2, "cache_salt": "present" },
+          "response": { "status": 200, "done": true, "chunks": [
+            { "choices": [ { "index": 0, "delta": { "content": "H." } } ] },
+            { "choices": [ { "index": 0, "delta": {}, "finish_reason": "stop" } ] },
+            { "choices": [], "usage": { "prompt_tokens": 812, "completion_tokens": 1, "simple_serving": "measurements" } }
+          ] },
+          "result": { "text": "H.", "finish_reason": "stop", "usage": { "input": 812, "output": 1, "cached": null } }
+        }
+      ]
+    },
+    {
+      "name": "models",
+      "about": "One model, the alias, with the effective context.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "GET", "path": "/v1/models", "key": "test-key-outside-a" },
+          "engine": null,
+          "response": { "status": 200, "json": { "object": "list", "data": [ { "id": "test-model", "object": "model", "max_model_len": 4096 } ] } },
+          "result": { "model": "test-model", "context_tokens": 4096 }
+        }
+      ]
+    },
+    {
+      "name": "state",
+      "about": "Any key reads the state; the control key also sees counts and versions.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "GET", "path": "/v1/state", "key": "test-key-bot" },
+          "engine": null,
+          "response": { "status": 200, "json": { "contract": "1", "boot_id": "present", "status": "ready", "model": "test-model", "context_tokens": 4096, "drain_generation": 0 } },
+          "result": { "status": "ready" }
+        },
+        {
+          "request": { "base": "control", "method": "GET", "path": "/v1/state", "key": "test-key-control" },
+          "engine": null,
+          "response": { "status": 200, "json": { "contract": "1", "boot_id": "present", "status": "ready", "model": "test-model", "context_tokens": 4096, "drain_generation": 0,
+            "active": { "reader": 0, "agent": 0, "internal": 0, "external": 0 }, "waiting": { "reader": 0, "agent": 0, "internal": 0, "external": 0 }, "versions": "present" } },
+          "result": { "status": "ready" }
+        }
+      ]
+    },
+    {
+      "name": "no-key",
+      "about": "A request without a key is refused.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": null, "body_patch": {} },
+          "engine": null,
+          "response": { "status": 401, "error": "unauthorized" },
+          "result": { "error": "unauthorized" }
+        }
+      ]
+    },
+    {
+      "name": "unknown-key",
+      "about": "A key the gateway does not know is refused.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "GET", "path": "/v1/state", "key": "test-key-unknown" },
+          "engine": null,
+          "response": { "status": 401, "error": "unauthorized" },
+          "result": { "error": "unauthorized" }
+        }
+      ]
+    },
+    {
+      "name": "class-not-allowed",
+      "about": "An outside key cannot ask for the reader class.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-outside-a",
+            "headers": { "X-Simple-Serving-Class": "reader" }, "body_patch": {} },
+          "engine": null,
+          "response": { "status": 403, "error": "class_not_allowed" },
+          "result": { "error": "class_not_allowed" }
+        }
+      ]
+    },
+    {
+      "name": "scope-not-allowed",
+      "about": "An outside key cannot name a cache scope.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-outside-a",
+            "headers": { "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": null,
+          "response": { "status": 403, "error": "scope_not_allowed" },
+          "result": { "error": "scope_not_allowed" }
+        }
+      ]
+    },
+    {
+      "name": "reader-needs-scope",
+      "about": "A reader request without a reader scope is refused, so readers never share a cache by accident.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader" }, "body_patch": {} },
+          "engine": null,
+          "response": { "status": 400, "error": "invalid_request" },
+          "result": { "error": "invalid_request" }
+        },
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "agent" }, "body_patch": {} },
+          "engine": null,
+          "response": { "status": 400, "error": "invalid_request" },
+          "result": { "error": "invalid_request" }
+        }
+      ]
+    },
+    {
+      "name": "cache-scopes",
+      "about": "One scope keeps one salt; different scopes and different outside keys get different salts.",
+      "steps": [
+        {
+          "name": "r1-first",
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "content": "A." }, { "finish_reason": "stop" } ], "usage": { "completion_tokens": 1 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 0, "cache_salt": "present" }
+        },
+        {
+          "name": "r1-again",
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "content": "B." }, { "finish_reason": "stop" } ], "usage": { "completion_tokens": 1 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 0, "cache_salt": { "same_as": "r1-first" } }
+        },
+        {
+          "name": "r2",
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r2bbbbbb" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "content": "C." }, { "finish_reason": "stop" } ], "usage": { "completion_tokens": 1 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 0, "cache_salt": { "differs_from": ["r1-first"] } }
+        },
+        {
+          "name": "internal",
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "content": "D." }, { "finish_reason": "stop" } ], "usage": { "completion_tokens": 1 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 2, "cache_salt": { "differs_from": ["r1-first", "r2"] } }
+        },
+        {
+          "name": "outside-a",
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-outside-a", "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "content": "E." }, { "finish_reason": "stop" } ], "usage": { "completion_tokens": 1 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 3, "cache_salt": { "differs_from": ["r1-first", "r2", "internal"] } }
+        },
+        {
+          "name": "outside-b",
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-outside-b", "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "content": "F." }, { "finish_reason": "stop" } ], "usage": { "completion_tokens": 1 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 3, "cache_salt": { "differs_from": ["r1-first", "r2", "internal", "outside-a"] } }
+        }
+      ]
+    },
+    {
+      "name": "engine-priority-from-client-is-ignored",
+      "about": "An engine priority header from a client never reaches the engine; the class decides.",
+      "steps": [
+        {
+          "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-outside-a",
+            "headers": { "X-Vllm-Priority": "0" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "content": "G." }, { "finish_reason": "stop" } ], "usage": { "completion_tokens": 1 } },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 3, "cache_salt": "present", "headers_absent": ["x-vllm-priority"] },
+          "response": { "status": 200, "done": true, "chunks": [
+            { "choices": [ { "index": 0, "delta": { "content": "G." } } ] },
+            { "choices": [ { "index": 0, "delta": {}, "finish_reason": "stop" } ] },
+            { "choices": [], "usage": { "prompt_tokens": 812, "completion_tokens": 1, "simple_serving": "measurements" } }
+          ] },
+          "result": { "text": "G.", "finish_reason": "stop", "usage": { "input": 812, "output": 1, "cached": null } }
+        }
+      ]
+    },
+    {
+      "name": "unsupported-fields",
+      "about": "Fields outside the contract are refused, at any depth, including engine priority and cache salt.",
+      "steps": [
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": { "tools": [] } },
+          "engine": null, "response": { "status": 400, "error": "unsupported_field" }, "result": { "error": "unsupported_field" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": { "priority": 0 } },
+          "engine": null, "response": { "status": 400, "error": "unsupported_field" }, "result": { "error": "unsupported_field" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": { "cache_salt": "mine" } },
+          "engine": null, "response": { "status": 400, "error": "unsupported_field" }, "result": { "error": "unsupported_field" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" },
+            "body_patch": { "messages": [ { "role": "user", "content": "Hi.", "name": "keeper" } ] } },
+          "engine": null, "response": { "status": 400, "error": "unsupported_field" }, "result": { "error": "unsupported_field" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": { "id_slot": 1, "cache_prompt": true } },
+          "engine": null, "response": { "status": 400, "error": "unsupported_field" }, "result": { "error": "unsupported_field" } }
+      ]
+    },
+    {
+      "name": "invalid-requests",
+      "about": "Wrong types, ranges and required values are refused before the engine sees anything.",
+      "steps": [
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": { "temperature": 3 } },
+          "engine": null, "response": { "status": 400, "error": "invalid_request" }, "result": { "error": "invalid_request" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": { "stream": false } },
+          "engine": null, "response": { "status": 400, "error": "invalid_request" }, "result": { "error": "invalid_request" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": { "max_tokens": null } },
+          "engine": null, "response": { "status": 400, "error": "invalid_request" }, "result": { "error": "invalid_request" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": { "model": "other-model" } },
+          "engine": null, "response": { "status": 400, "error": "invalid_request" }, "result": { "error": "invalid_request" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" },
+            "body_patch": { "messages": [ { "role": "tool", "content": "x" } ] } },
+          "engine": null, "response": { "status": 400, "error": "invalid_request" }, "result": { "error": "invalid_request" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "raw_body": "{\"model\": " },
+          "engine": null, "response": { "status": 400, "error": "invalid_request" }, "result": { "error": "invalid_request" } }
+      ]
+    },
+    {
+      "name": "limit-exceeded",
+      "about": "An outside request over its class limits is refused as our quota, apart from the context limit.",
+      "steps": [
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-outside-a", "body_patch": { "max_tokens": 512 } },
+          "engine": null, "response": { "status": 400, "error": "limit_exceeded" }, "result": { "error": "limit_exceeded" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-outside-a", "body_patch": {} },
+          "engine": { "input_tokens": 2000 }, "engine_receives": { "calls": ["tokenize"] },
+          "response": { "status": 400, "error": "limit_exceeded" }, "result": { "error": "limit_exceeded" } }
+      ]
+    },
+    {
+      "name": "context-limit",
+      "about": "Input plus max_tokens over the context is refused after counting, and nothing is generated.",
+      "steps": [
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": { "max_tokens": 200 } },
+          "engine": { "input_tokens": 4000 }, "engine_receives": { "calls": ["tokenize"] },
+          "response": { "status": 400, "error": "context_limit" }, "result": { "error": "context_limit" } }
+      ]
+    },
+    {
+      "name": "body-too-large",
+      "about": "A body over the limit is refused while it is read, before JSON parsing.",
+      "steps": [
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" },
+            "raw_body_bytes": 2000001, "chunked": true },
+          "engine": null, "response": { "status": 413, "error": "body_too_large" }, "result": { "error": "body_too_large" } }
+      ]
+    },
+    {
+      "name": "not-found",
+      "about": "Unknown routes, and control routes on the public listener, are not found.",
+      "steps": [
+        { "request": { "base": "public", "method": "GET", "path": "/v1/nothing", "key": "test-key-bot" },
+          "engine": null, "response": { "status": 404, "error": "not_found" }, "result": { "error": "not_found" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/control/drain", "key": "test-key-control", "body": { "boot_id": "x" } },
+          "engine": null, "response": { "status": 404, "error": "not_found" }, "result": { "error": "not_found" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot", "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": {} },
+          "engine": null, "response": { "status": 404, "error": "not_found" }, "result": { "error": "not_found" } }
+      ]
+    },
+    {
+      "name": "control-needs-control-key",
+      "about": "Only the control key may drain or open.",
+      "steps": [
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/drain", "key": "test-key-bot", "body": { "boot_id": "x" } },
+          "engine": null, "response": { "status": 403, "error": "forbidden" }, "result": { "error": "forbidden" } }
+      ]
+    },
+    {
+      "name": "engine-refuses-before-stream",
+      "about": "An engine failure before the stream starts is a plain 503.",
+      "steps": [
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "generate_status": 500 }, "engine_receives": { "calls": ["tokenize", "generate"] },
+          "response": { "status": 503, "error": "engine_unavailable" }, "result": { "error": "engine_unavailable" } }
+      ]
+    },
+    {
+      "name": "engine-rejects-request",
+      "about": "The engine's own refusal of a request, such as a schema it cannot compile, is the client's error.",
+      "steps": [
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "generate_status": 400 }, "engine_receives": { "calls": ["tokenize", "generate"] },
+          "response": { "status": 400, "error": "invalid_request" }, "result": { "error": "invalid_request" } }
+      ]
+    },
+    {
+      "name": "engine-breaks-mid-stream",
+      "about": "An engine failure after the stream started ends it with an error event and no [DONE]; the text is not an answer.",
+      "steps": [
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": { "input_tokens": 812, "events": [ { "role": "assistant" }, { "content": "The door " }, { "break": true } ] },
+          "engine_receives": { "calls": ["tokenize", "generate"], "priority": 0, "cache_salt": "present" },
+          "response": { "status": 200, "done": false, "chunks": [
+            { "choices": [ { "index": 0, "delta": { "role": "assistant" } } ] },
+            { "choices": [ { "index": 0, "delta": { "content": "The door " } } ] }
+          ], "error_event": "engine_unavailable" },
+          "result": { "error": "engine_unavailable" } }
+      ]
+    },
+    {
+      "name": "drain-and-open",
+      "about": "A drain refuses new work but keeps state and control; open undoes only the current drain of the current boot.",
+      "steps": [
+        { "request": { "base": "control", "method": "GET", "path": "/v1/state", "key": "test-key-control" },
+          "engine": null, "response": { "status": 200, "json": { "status": "ready", "drain_generation": 0 }, "json_subset": true }, "capture": { "boot": "boot_id" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/drain", "key": "test-key-control", "body": { "boot_id": "$boot" } },
+          "engine": null, "response": { "status": 202, "json": { "status": "draining", "boot_id": "$boot", "drain_generation": 1 } } },
+        { "request": { "base": "public", "method": "GET", "path": "/v1/state", "key": "test-key-bot" },
+          "engine": null, "response": { "status": 200, "json": { "status": "drained", "drain_generation": 1 }, "json_subset": true } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },
+          "engine": null, "response": { "status": 503, "error": "drained" }, "result": { "error": "drained" } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions/input_tokens", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": {} },
+          "engine": null, "response": { "status": 503, "error": "drained" }, "result": { "error": "drained" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/drain", "key": "test-key-control", "body": { "boot_id": "$boot" } },
+          "engine": null, "response": { "status": 202, "json": { "status": "drained", "boot_id": "$boot", "drain_generation": 1 } } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/open", "key": "test-key-control", "body": { "boot_id": "$boot", "drain_generation": 0 } },
+          "engine": null, "response": { "status": 409, "error": "stale_generation" }, "result": { "error": "stale_generation" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/open", "key": "test-key-control", "body": { "boot_id": "another-boot", "drain_generation": 1 } },
+          "engine": null, "response": { "status": 409, "error": "stale_boot" }, "result": { "error": "stale_boot" } },
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/open", "key": "test-key-control", "body": { "boot_id": "$boot", "drain_generation": 1 } },
+          "engine": null, "response": { "status": 200, "json": { "status": "ready", "boot_id": "$boot", "drain_generation": 1 } } },
+        { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions/input_tokens", "key": "test-key-bot",
+            "headers": { "X-Simple-Serving-Class": "internal" }, "body_patch": {} },
+          "engine": { "input_tokens": 812 }, "engine_receives": { "calls": ["tokenize"] },
+          "response": { "status": 200, "json": { "input_tokens": 812 } }, "result": { "input_tokens": 812 } }
+      ]
+    },
+    {
+      "name": "drain-with-wrong-boot",
+      "about": "A drain for another boot is refused and changes nothing.",
+      "steps": [
+        { "request": { "base": "control", "method": "POST", "path": "/v1/control/drain", "key": "test-key-control", "body": { "boot_id": "another-boot" } },
+          "engine": null, "response": { "status": 409, "error": "stale_boot" }, "result": { "error": "stale_boot" } },
+        { "request": { "base": "public", "method": "GET", "path": "/v1/state", "key": "test-key-bot" },
+          "engine": null, "response": { "status": 200, "json": { "status": "ready", "drain_generation": 0 }, "json_subset": true } }
+      ]
+    }
+  ],
+  "scenarios": [
+    "cancel-while-waiting: the client leaves while its request waits for a slot; the request never reaches the engine and its place is freed.",
+    "cancel-during-prompt: the client leaves while the engine reads a long prompt and nothing has been sent; the gateway notices without a failed send and aborts the engine request.",
+    "cancel-during-stream: the client leaves mid-stream; the engine request is aborted and the quota is freed only after the abort is confirmed.",
+    "queue-full: with the caps of section 7, the request past Active plus Waiting gets 429 queue_full and never reaches the engine.",
+    "reader-first: with the engine cap full and outside and internal requests waiting longer, the first freed place goes to a waiting reader.",
+    "wall-time: a request past its wall time is cancelled with timeout, as 504 before the stream or as an error event after it.",
+    "drain-races-request: a request arriving while the drain starts is either served to the end or refused with 503, never lost in between.",
+    "drain-cancels-outside: an active outside stream is cancelled at the drain and ends without [DONE]; our active requests finish; after the drain deadline they are cancelled too.",
+    "late-open-after-restart: an open carrying the previous boot_id after a restart is refused with stale_boot.",
+    "error-bodies-are-safe: no error answer and no log row contains any part of the request body."
+  ]
+}

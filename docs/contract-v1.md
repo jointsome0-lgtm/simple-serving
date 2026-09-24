@@ -53,9 +53,12 @@ The engine does not hand out other people's prompts; the channel is timing only.
 
 The gateway sets `cache_salt` on every request from a scope:
 - each outside key is one scope;
-- a key allowed to name scopes sends one in `X-Simple-Serving-Scope`. The bot sends `reader.<opaque>` for each reader,
-  or `agent`, or `internal`. The bot derives the opaque part from the reader's identity with a secret of its own. It
-  is never a Telegram ID. A scope from a key without that right is refused with 403 `scope_not_allowed`;
+- a key allowed to name scopes sends one in `X-Simple-Serving-Scope`: `reader.<opaque>` for each reader, `agent` or
+  `internal`. `<opaque>` is 8 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`. Without the header the scope is
+  the class name. A request of class `reader` must name a reader scope, otherwise it is refused with 400
+  `invalid_request`, so that readers never share a cache by accident. The bot derives the opaque part from the
+  reader's identity with a secret of its own. It is never a Telegram ID. A scope from a key without that right is
+  refused with 403 `scope_not_allowed`;
 - the salt is an HMAC of the scope under a secret that the gateway generates at every start and never shows. A salt in
   the request body is refused as an unknown field.
 
@@ -71,15 +74,19 @@ bot's socket (`local/background.ts`) and do not call the service directly.
 
 ## 3. Routes
 
-| Route                                   | Method | Keys             | Reachable                     |
-|-----------------------------------------|--------|------------------|-------------------------------|
-| `/v1/chat/completions`                  | POST   | any              | HTTPS                         |
-| `/v1/chat/completions/input_tokens`     | POST   | any              | HTTPS                         |
-| `/v1/models`                            | GET    | any              | HTTPS                         |
-| `/v1/state`                             | GET    | any              | HTTPS                         |
-| `/v1/control/drain`, `/v1/control/open` | POST   | the control key  | loopback, over the SSH tunnel |
+| Route                                   | Method | Keys             | Listener         |
+|-----------------------------------------|--------|------------------|------------------|
+| `/v1/chat/completions`                  | POST   | any              | public           |
+| `/v1/chat/completions/input_tokens`     | POST   | any              | public           |
+| `/v1/models`                            | GET    | any              | public           |
+| `/v1/state`                             | GET    | any              | public, control  |
+| `/v1/control/drain`, `/v1/control/open` | POST   | the control key  | control          |
 
-Any other path is 404 `not_found`. The gateway holds at most 64 open connections (provisional, see section 7).
+The gateway has two listeners. The public one is reached over HTTPS. The control one listens on loopback and is
+reached over the SSH tunnel. The gateway tells them apart by the listener, never by the client's address, because a
+TLS proxy on the card also connects from loopback. On each listener any other path is 404 `not_found`. A key without
+the control right gets 403 `forbidden` on a control route. The gateway holds at most 64 open connections
+(provisional, see section 7).
 
 ## 4. Generation: `POST /v1/chat/completions`
 
@@ -104,14 +111,19 @@ reads, chunked bodies included, and stops reading past the limit with 413 `body_
 | `response_format`      | `{"type": "json_schema", "json_schema": {"name": string, "strict": boolean, "schema": object}}` | optional |
 | `chat_template_kwargs` | `{"enable_thinking": boolean}`                   | optional, default `false`          |
 
-Any other field, at any depth, is refused with 400 `unsupported_field`. A value of the wrong type or out of range is
-refused with 400 `invalid_request`.
+Any other field, at any depth, is refused with 400 `unsupported_field`. The rule does not look inside `schema`, which
+the gateway passes on as it is. A value of the wrong type or out of range is refused with 400 `invalid_request`.
 
 ### Before the stream starts
 
-The gateway checks the key, the class, the scope, the body, the limits and the context. It hands the request to the
-engine and waits for the engine's first answer. Only then does it send 200 and the stream headers. Every refusal up to
-that point is a plain HTTP error from section 9.
+The gateway checks, in this order: the route, the key, the service status, the class, the scope, the body (its size,
+then JSON, then the fields), `max_tokens` against the class limit. Then it counts the input and checks it against the
+class limit and, together with `max_tokens`, against the context. Then the request waits for its place (section 7).
+
+The gateway hands the request to the engine and waits for the engine's first stream event. Only then does it send 200,
+the stream headers and that event. Every refusal up to that point is a plain HTTP error from section 9. When the engine
+refuses the request with a 4xx status, the answer is 400 `invalid_request`. A 5xx status, a failed connection, or a
+stream that ends before its first event give 503 `engine_unavailable`.
 
 ### Stream
 
@@ -142,8 +154,10 @@ treats every stream without `[DONE]` as failed and never keeps its text as an an
 - Counting and generation render the prompt through one code path, with the same chat template, template arguments
   and special tokens, and nothing is cut silently. For the same body, `n` equals `usage.prompt_tokens`. A test on the
   card checks the equality.
-- The body limit of section 4 applies. At most 8 counts run at once, and 2 per outside key (provisional).
-- A body whose `n` plus `max_tokens` exceeds the context is still counted. The answer is the count.
+- The body limit of section 4 applies, and the headers are checked as for generation. At most 8 counts run at once,
+  and 2 per outside key (provisional). The count inside a generation shares these limits.
+- A count applies neither the class limits of section 7 nor the context. A body whose `n` plus `max_tokens` exceeds
+  the context is still counted. The answer is the count.
 
 ## 6. Models and state
 
@@ -166,7 +180,7 @@ sets one. `/v1/state` shows the same number.
 - The gateway reports `starting` until it has verified the engine: the engine answers, serves the alias and reports
   the context length. Then the status is `ready`.
 - The status is `draining` or `drained` during a stop (section 8), and `failed` if the engine stops answering after it
-  was ready.
+  was ready. While a drain is on, the status is `draining` or `drained` whatever the engine does.
 - In any status except `ready`, the inference routes answer 503. The code is the status itself, except `failed`,
   which answers `engine_unavailable`.
 - For the control key the answer also holds `active` and `waiting`, counted by class, and the pinned versions of
@@ -192,6 +206,9 @@ Provisional values, used until the first measurement on the card:
 
 - A request that would go over Active waits if Waiting has room. Otherwise it is refused with 429 `queue_full`. The
   gateway never hands the engine a request past the cap.
+- The engine has places for all classes together: 8, provisional. A request with room in its class but none in the
+  engine waits as well. When a place frees, the first waiting request of the first class in the order of section 2
+  takes it, among the classes that have room. Within a class the order is arrival.
 - Input or `max_tokens` over the class limit is refused with 400 `limit_exceeded`. Input plus `max_tokens` over the
   context is refused with 400 `context_limit`. The first is our quota, the second the model's size.
 - Past the wall time the gateway cancels the request with the code `timeout` (section 9).
@@ -216,8 +233,10 @@ so the service cannot wake itself.
 5. The bot stops the instance through the Vast API and reads the status back.
 
 - A second drain with the same `boot_id` answers the current state and does not increment the generation.
-- `POST /v1/control/open` with `{"boot_id": ..., "drain_generation": n}` undoes only that drain. With another
-  generation it answers 409 `stale_generation`, so a late open cannot undo a newer drain.
+- `POST /v1/control/open` with `{"boot_id": ..., "drain_generation": n}` undoes only that drain and answers 200 with
+  the state. With another generation it answers 409 `stale_generation`, so a late open cannot undo a newer drain. An
+  open during `draining` also stops the 60-second deadline. An open while no drain is on, with the current
+  generation, changes nothing.
 - A control call with a `boot_id` other than the current one answers 409 `stale_boot`. A restarted service is a new
   boot, and the controller reads `/v1/state` again.
 - The check "nothing runs" followed by a stop is not enough, because a request can arrive between the two. The drain
@@ -238,6 +257,7 @@ body. FastAPI's default validation answer echoes the input, so it is replaced.
 | 400    | `context_limit`                                   | input plus `max_tokens` over the context     |
 | 401    | `unauthorized`                                    | no key or an unknown key                     |
 | 403    | `class_not_allowed`, `scope_not_allowed`          | the key may not use the class or the scope   |
+| 403    | `forbidden`                                       | a key without the control right on a control route |
 | 404    | `not_found`                                       | a route outside section 3                    |
 | 409    | `stale_boot`, `stale_generation`                  | control calls, section 8                     |
 | 413    | `body_too_large`                                  | the body is over 2 000 000 bytes             |
@@ -253,7 +273,9 @@ Cancellation:
   and while it streams. It sends nothing while the prompt is read, so it listens for the disconnect itself instead of
   waiting for a failed send.
 - On a disconnect, a timeout or a drain, the gateway aborts the engine request in a `finally` block. It frees the
-  quota only after the engine has confirmed the abort.
+  quota only after the engine has confirmed the abort. With vLLM behind HTTP the abort is closing the engine
+  connection, and the confirmation is the end of that connection on the gateway's side. How long vLLM keeps computing
+  after that is measured on the card (section 15).
 - Tests run the gateway in a real ASGI server over HTTP, not only through a test client. They measure how long the
   engine keeps generating after the client left.
 - The gateway does not retry and sends no `Retry-After`.
@@ -331,9 +353,10 @@ Also in simple-story-chat:
 ## 14. Shared cases
 
 - `/v1/state` reports the contract version. A change that breaks a client makes it `"2"`.
-- The canonical cases live here, in `contract/cases/`. A case holds the request, a script for the fake engine, the
-  expected status and stream from the fake, and the expected normalized result or error code. Streams are compared
-  only for the fake. Real model output is never compared byte for byte.
+- The canonical cases live here, in `contract/cases-v1.json`; `contract/README.md` describes the format. A case holds
+  the request, a script for the fake engine, the expected status and stream from the fake, and the expected
+  normalized result or error code. Streams are compared only for the fake. Real model output is never compared byte
+  for byte.
 - simple-story-chat keeps a pinned copy with the contract version, the source commit and a checksum, so that
   `npm test` needs no network. The copy is updated on purpose and never edited in place.
 - The same cases run in two places: TypeScript tests of the adapter there, Python tests of the gateway here.
