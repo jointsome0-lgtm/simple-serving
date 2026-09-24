@@ -255,7 +255,7 @@ async def engine_failures(checks: Checks, scripts: dict[str, Script]) -> None:
     for name, (script, status, code) in failures.items():
         scripts[name] = script
         await checks.error(status, code, "POST", url, headers=internal, body=body(name))
-    streams = {
+    streams: dict[str, list[dict[str, Any]]] = {
         "error later": [{"content": "Wind. "}, {"error": {"message": MARKER}}],
         "raw later": [{"content": "Wind. "}, {"raw_hex": (b"\xff" + MARKER.encode()).hex()}],
         "break later": [{"content": "Wind. "}, {"break": True}],

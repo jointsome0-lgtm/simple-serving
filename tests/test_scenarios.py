@@ -106,9 +106,11 @@ async def test_cancel_during_stream(monkeypatch: pytest.MonkeyPatch) -> None:
         client = await RawClient.post(stack.public, CHAT, user_body("a long answer"), headers=reader())
         await client.read_until_events(5)
         engine_request = generate_call(stack, "a long answer")
+        assert engine_request is not None
 
         left_at = await client.leave()
         await eventually(engine_request.ended.wait())
+        assert engine_request.client_left_at is not None and engine_request.last_event_at is not None
         noticed = engine_request.client_left_at - left_at
         went_on = engine_request.last_event_at - left_at
         print(f"the fake engine noticed after {noticed * 1000:.1f} ms and sent its last event "
@@ -277,7 +279,9 @@ async def test_wall_time_while_waiting_before_the_stream_and_during_it() -> None
         assert (prompt.status, prompt.json()) == (504, {"error": {"code": "timeout"}})
         assert streamed.status == 200 and streamed.error_event == "timeout" and not streamed.done
         for text in ("a long prompt", "a long answer"):
-            await eventually(generate_call(stack, text).ended.wait())
+            engine_request = generate_call(stack, text)
+            assert engine_request is not None
+            await eventually(engine_request.ended.wait())
         for text in ("a1", "i1", "i2"):
             engine.release(text)
         assert all(answer.done for answer in await asyncio.gather(*held))
@@ -292,7 +296,8 @@ async def test_drain_races_requests() -> None:
         engine.hold("agent in its prompt", "reader in its prompt", "outside in its prompt", "internal finishing")
         engine.endless("internal past the deadline", "outside streaming")
         boot = (await control(client, stack, "/v1/state", method="GET")).json()["boot_id"]
-        accepted = {  # the request, how it is sent, and whether it has a place when the drain begins
+        # The request, how it is sent, and whether it has a place when the drain begins.
+        accepted: dict[str, tuple[dict[str, Any], str]] = {
             "agent in its prompt": ({"headers": AGENT}, "held"),
             "reader in its prompt": ({"headers": reader()}, "held"),
             "outside in its prompt": ({"key": OUTSIDE_A}, "held"),
@@ -345,8 +350,8 @@ async def test_drain_races_requests() -> None:
 
 async def test_a_drain_racing_a_burst_leaves_no_request_without_an_answer() -> None:
     block = service_with(drain_deadline_s=0.5)
-    options = [{"headers": reader()}, {"headers": AGENT}, {"headers": INTERNAL}, {"key": OUTSIDE_A},
-               {"key": OUTSIDE_B}]
+    options: list[dict[str, Any]] = [{"headers": reader()}, {"headers": AGENT}, {"headers": INTERNAL},
+                                     {"key": OUTSIDE_A}, {"key": OUTSIDE_B}]
     for seed in range(3):
         rng = random.Random(seed)
         async with running(block) as stack, httpx.AsyncClient(timeout=10) as client:

@@ -117,8 +117,9 @@ def test_control_bodies() -> None:
 
 def test_keys_are_found_by_their_hash_only() -> None:
     settings = config()
-    assert find_key(settings, f"Bearer {BOT}".encode()).label == "bot"
-    assert find_key(settings, f"bearer {OUTSIDE_A}".encode()).label == "outside-a"
+    bot, outside = find_key(settings, f"Bearer {BOT}".encode()), find_key(settings, f"bearer {OUTSIDE_A}".encode())
+    assert bot is not None and bot.label == "bot"
+    assert outside is not None and outside.label == "outside-a"
     for header in (None, b"", BOT.encode(), f"Basic {BOT}".encode(), b"Bearer ", f"Bearer {BOT}x".encode()):
         assert find_key(settings, header) is None
     assert all(len(key.digest) == 32 for key in settings.keys)
@@ -251,7 +252,8 @@ def test_the_configuration_file_holds_hashes_and_refuses_what_it_does_not_know(t
     loaded = load(str(path))
     assert loaded.engine_url == "http://127.0.0.1:8000" and loaded.public.port == 8443
     assert {key.label for key in loaded.keys} == {"bot", "control", "outside-a", "outside-b"}
-    assert find_key(loaded, f"Bearer {CONTROL}".encode()).control
+    control_key = find_key(loaded, f"Bearer {CONTROL}".encode())
+    assert control_key is not None and control_key.control
 
     def refused(change: Any) -> str:
         broken = json.loads(json.dumps(data))

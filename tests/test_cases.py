@@ -73,7 +73,13 @@ class CaseRun:
             return
         expected = step.get("engine_receives", {})
         assert [call.kind for call in calls] == expected.get("calls", []), f"{where}: engine calls"
+        for name in expected.get("headers_absent", []):
+            for call in calls:
+                assert name.lower() not in call.headers, f"{where}: {name} reached the engine"
         generate = next((call for call in calls if call.kind == "generate"), None)
+        if generate is None:
+            assert not expected.keys() & {"priority", "cache_salt", "response_format"}, f"{where}: no generate call"
+            return
         if "priority" in expected:
             assert generate.body["priority"] == expected["priority"], f"{where}: priority"
         if "cache_salt" in expected:
@@ -90,9 +96,6 @@ class CaseRun:
         if expected.get("response_format") == "json_schema":
             sent = step["request"]["body_patch"]["response_format"]
             assert generate.body["response_format"] == sent, f"{where}: response_format changed"
-        for name in expected.get("headers_absent", []):
-            for call in calls:
-                assert name.lower() not in call.headers, f"{where}: {name} reached the engine"
 
 
 def check_response(expected: dict[str, Any], answer: Answer, captured: dict[str, Any], where: str) -> None:
