@@ -1,0 +1,16 @@
+# Keys, endpoint addresses and local settings never enter the repository.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local state
+logs/
