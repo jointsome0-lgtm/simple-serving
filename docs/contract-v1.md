@@ -74,11 +74,11 @@ agents, eval or outside keys. The price is that each reader's first turn reads t
 
 The service knows single HTTP requests. A turn of the bot is several requests, such as compaction, repair and the
 scene, and between them nothing else of the bot runs on its lane. Readers' turns go through the bot's scheduler, which
-is the only controller of the card (section 8). Agent turns and `npm run memory:probe` reach the model through the
-bot's socket (`local/background.ts`) and the same scheduler when the bot serves that socket, which it does with its GPU
-control; otherwise they call the service directly. `npm run eval` and every probe run with `--direct` always call the
-service directly. A direct call carries no class of the scheduler, so it is `internal`, and the bot does not see it
-(section 8).
+is the only controller of the card (section 8). Agent turns reach the model through the bot's socket
+(`local/background.ts`) and the same scheduler when the bot serves that socket, which it does with its GPU control;
+without the socket they call the service directly. `npm run memory:probe` needs the socket and fails without it.
+`npm run eval` and every probe run with `--direct` always call the service directly. A direct call carries no class of
+the scheduler, so it is `internal`, and the bot does not see it (section 8).
 
 ## 3. Routes
 
@@ -284,11 +284,12 @@ so the service cannot wake itself.
    `agent` or `internal` runs or waits. Outside requests never keep the card awake. Only the guard's deadline stops
    the card while our work goes on. What counts as running work differs by class. A reader's job and an agent's turn
    hold the card from start to end, gaps between their requests included. A probe through the bot's socket holds it
-   per request, from the moment the bot's scheduler accepts the request to its end, at most 10 minutes of waiting
-   plus its run. A whole probe run is not a turn: between two of its requests only the idle interval keeps the card
-   up. The bot does not see work that calls the service directly (section 2), such as `npm run eval`, so in version 1
-   that work holds nothing, and the auto-pause can stop the card under it. The plan to close that gap is at the end
-   of this section.
+   per request, from the moment the bot's scheduler accepts the request until the request has ended locally. The
+   scheduler cancels a probe request that has waited 10 minutes or run 90 seconds by its next tick, and the hold ends
+   once the cancelled request has ended locally. A whole probe run is not a turn: between two of its requests only
+   the idle interval keeps the card up. The bot does not see work that calls the service directly (section 2), such
+   as `npm run eval`, so in version 1 that work holds nothing, and the auto-pause can stop the card under it. The
+   plan to close that gap is at the end of this section.
 2. The bot calls `POST /v1/control/drain` with `{"boot_id": "<from /v1/state>"}`. The gateway increments
    `drain_generation` and answers 202 with `{"status": ..., "boot_id": ..., "drain_generation": n}`. The status is
    `drained` when the gateway had no accepted work, counts included, because the drain then completes before the
@@ -394,7 +395,8 @@ Cancellation:
 The gateway measures in whole milliseconds, counting from the moment it accepted the request:
 - `wait_ms`: until it handed the request to the engine to generate, its count stage included;
 - `first_token_ms`: until it received the first generated token of any kind from the engine, reasoning included;
-- `total_ms`: until it wrote its terminal event.
+- `total_ms`: until it read the end of the engine's stream. The cleanup and the send of the terminal event come after
+  and are not in it, because the usage chunk cannot know how long its own send will take.
 
 These are the gateway's own numbers, not llama.cpp's timings. The engine's queue and preemption are inside
 `first_token_ms` and `total_ms`. The numbers arrive in `usage.simple_serving`.
