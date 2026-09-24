@@ -319,12 +319,13 @@ def launcher_stand_in(state: Path) -> subprocess.Popen[bytes]:
     return process
 
 
-def test_hold_lasts_as_long_as_the_launcher(tmp_path: Path) -> None:
+def test_hold_lasts_as_long_as_the_launcher(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     ready = prepared(tmp_path)
     state = ready.state
     pauses: list[float] = []
     assert card.hold(ready, pauses.append) == 0  # none started: it waits a while for onstart
     assert sum(pauses) == card.HOLD_START_S
+    assert capsys.readouterr().out == f"{card.HOLDING}\n"  # the command's sign that the tunnel's forwards are up
     assert card.hold(replace(ready, credential={}), pauses.append) == card.NOT_PREPARED  # and none will start
 
     process, pauses = launcher_stand_in(state), []

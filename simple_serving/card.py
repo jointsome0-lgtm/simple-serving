@@ -7,9 +7,9 @@ rental. Without an option it checks the card, starts the pair in the background 
 already runs. Otherwise it returns 3 when the card is not prepared (bootstrap.sh has not run for this manifest and
 these locks, or the keys or the instance's credential are missing), 6 when the launcher gave up, and the file
 `given-up` says why, and 7 when a port is taken. `--retry` removes `given-up` and starts. `--stop` ends the pair and
-leaves the instance running. `--hold` waits while the pair runs and returns 0 once it has ended, or 6 once the
-launcher has given up, or 3 at once on a card that is not prepared: it is the remote command of the tunnel, and it
-never owns the pair. `--dry-run` prints the two commands and checks, and starts nothing.
+leaves the instance running. `--hold` prints one line, then waits while the pair runs and returns 0 once it has
+ended, or 6 once the launcher has given up, or 3 at once on a card that is not prepared: it is the remote command of
+the tunnel, and it never owns the pair. `--dry-run` prints the two commands and checks, and starts nothing.
 
 The pair runs once, with no restarts. It ends on SIGTERM, when a process exits, or when the gateway is not ready by
 the manifest's load deadline. Unless a signal ended it, the launcher then stops the instance as the gateway does when
@@ -52,6 +52,7 @@ ROOT = Path(os.environ.get("SIMPLE_SERVING_CARD_ROOT", "/root"))  # where onstar
 STAMPED = ("manifest.env", "gateway-requirements.txt", "vllm-requirements.txt")  # the files in card/ that were prepared
 NOT_PREPARED, GAVE_UP, PORT_TAKEN = 3, 6, 7
 GIVEN_UP = "given-up"
+HOLDING = "simple-serving card: holding"  # the first line of --hold
 LINE_BYTES = 8192  # a longer line of output is read in pieces and never kept
 CARD_LOG_BYTES, GATEWAY_LOG_BYTES = 1 << 20, 8 << 20
 GATEWAY_GRACE_S, ENGINE_GRACE_S = 10, 30  # from SIGTERM to SIGKILL
@@ -97,10 +98,7 @@ class Card:
     @classmethod
     def load(cls, code: Path = CODE, state: Path = STATE, environ: Mapping[str, str] = os.environ,
              root: Path = ROOT) -> Card:
-        lines = (line.strip() for line in (code / "card/manifest.env").read_text().splitlines())
-        manifest = {name: value for name, _, value in (line.partition("=") for line in lines)
-                    if name and not name.startswith("#")}
-        return cls(code, state, manifest, credential(environ, root))
+        return cls(code, state, read_manifest(code), credential(environ, root))
 
     @property
     def ports(self) -> dict[str, int]:
@@ -156,6 +154,12 @@ class Card:
             return False
 
 
+def read_manifest(code: Path = CODE) -> dict[str, str]:
+    lines = (line.strip() for line in (code / "card/manifest.env").read_text().splitlines())
+    return {name: value for name, _, value in (line.partition("=") for line in lines)
+            if name and not name.startswith("#")}
+
+
 def credential(environ: Mapping[str, str], root: Path) -> dict[str, str]:
     """The instance's id and key: from the environment Vast gives the container, or, in an SSH session, which lacks
     it, from the files onstart.sh writes."""
@@ -209,7 +213,9 @@ def start(card: Card, *, dry_run: bool = False) -> int:
 
 def hold(card: Card, pause: Callable[[float], object] = time.sleep) -> int:
     """Wait while the launcher runs. One that onstart has not started yet is waited for HOLD_START_S, unless the card
-    is not prepared, and then none will come."""
+    is not prepared, and then none will come. The first line out tells the command that its forwards are up, since
+    ssh runs its remote command only once it has bound them."""
+    print(HOLDING, flush=True)
     waited, seen = 0, False
     while not (card.state / GIVEN_UP).exists():
         if launcher(card.state) is not None:
