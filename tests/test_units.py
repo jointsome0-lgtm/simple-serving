@@ -18,7 +18,7 @@ from simple_serving.config import ConfigError, from_service_block, load
 from simple_serving.engine import EngineError, refusal
 from simple_serving.errors import STATUS, ServiceError
 from simple_serving.policy import cache_salt, find_key, resolve
-from simple_serving.stream import Translator
+from simple_serving.stream import Translator, Usage
 from simple_serving.validation import check_chat, check_drain, check_open, parse_json
 
 from .support import ALIAS, BOT, CONTROL, OUTSIDE_A, OUTSIDE_B, SERVICE, chat_body, service_with
@@ -297,8 +297,13 @@ def translate(*events: dict[str, Any]) -> tuple[Translator, list[dict[str, Any]]
                         for c in chunks]
 
 
+def event(**fields: Any) -> dict[str, Any]:
+    """An engine event as vLLM sends it."""
+    return {"id": "chatcmpl-engine", "object": "chat.completion.chunk", "created": 0, "model": ALIAS, **fields}
+
+
 def choice(delta: dict[str, Any] | None = None, finish: str | None = None, index: int = 0) -> dict[str, Any]:
-    return {"choices": [{"index": index, "delta": delta or {}, "finish_reason": finish}]}
+    return event(choices=[{"index": index, "delta": delta or {}, "finish_reason": finish}])
 
 
 def test_a_delta_with_several_fields_becomes_one_chunk_for_each() -> None:
@@ -318,9 +323,22 @@ def test_reasoning_under_either_name_and_empty_text() -> None:
     assert translator.generated
 
 
+def test_what_vllm_leaves_out_or_sends_as_null_means_none() -> None:
+    text = event(choices=[{"index": 0, "delta": {"content": "Hi.", "reasoning_content": None, "tool_calls": None}}])
+    finish = event(choices=[{"index": 0, "delta": {}, "logprobs": None, "finish_reason": "stop", "stop_reason": None}],
+                   usage=None)
+    usage = event(choices=[], usage={"prompt_tokens": 3, "completion_tokens": 1, "prompt_tokens_details": None})
+    translator, chunks = translate(text, finish, usage)
+    assert chunks == [{"delta": {"content": "Hi."}, "finish": None}, {"delta": {}, "finish": "stop"}]
+    assert translator.end() == Usage(prompt_tokens=3, completion_tokens=1, cached_tokens=None)
+
+
 @pytest.mark.parametrize("events", [
     [choice({"content": "x"}, index=1)],
-    [{"choices": [choice()["choices"][0], choice()["choices"][0]]}],
+    [event(choices=[choice()["choices"][0], choice()["choices"][0]])],
+    [event(choices=[{"delta": {"content": "x"}}])],
+    [event(choices=[{"index": 0, "finish_reason": "stop"}])],
+    [{**choice({"content": "x"}), "object": None}],
     [choice({"role": "user"})],
     [choice({"content": 5})],
     [choice({"content": "x"}, "tool_calls")],
@@ -329,8 +347,11 @@ def test_reasoning_under_either_name_and_empty_text() -> None:
     [choice({}, "stop"), choice({}, "stop")],
     [{"error": {"message": MARKER}}],
     [{"object": "error", "message": MARKER, "code": 400}],
-    [{"choices": [], "usage": {"prompt_tokens": "1", "completion_tokens": 1}}],
-    [{"choices": "x"}],
+    [event(choices=[], usage={"prompt_tokens": "1", "completion_tokens": 1})],
+    [event(choices=[], usage=5)],
+    [event(choices=[], usage={"prompt_tokens": 1, "completion_tokens": 1,
+                              "prompt_tokens_details": {"cached_tokens": -1}})],
+    [event(choices="x")],
 ])
 def test_events_that_break_the_rules(events: list[dict[str, Any]]) -> None:
     with pytest.raises(EngineError) as caught:
@@ -339,8 +360,8 @@ def test_events_that_break_the_rules(events: list[dict[str, Any]]) -> None:
 
 
 def test_the_end_needs_a_finish_and_usage() -> None:
-    usage = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2,
-                                      "prompt_tokens_details": {"cached_tokens": None}}}
+    usage = event(choices=[], usage={"prompt_tokens": 5, "completion_tokens": 2,
+                                     "prompt_tokens_details": {"cached_tokens": None}})
     translator, _ = translate(choice({"content": "x"}, "stop"), usage)
     assert translator.end().cached_tokens is None
     chunk = translator.usage_chunk(translator.end(), {"wait_ms": 0, "first_token_ms": 1, "total_ms": 2})

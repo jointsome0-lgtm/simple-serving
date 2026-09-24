@@ -233,6 +233,31 @@ async def test_the_control_key_sees_places_by_class_and_the_pinned_versions() ->
         assert all(answer.done for answer in await asyncio.gather(*turns))
 
 
+ENGINE_HEAD = {"id": "chatcmpl-engine", "object": "chat.completion.chunk", "created": 0, "model": ALIAS}
+NOT_TEXT_CHUNKS = {  # of the served model
+    "an empty event": {},
+    "another model": {**ENGINE_HEAD, "model": "WRONG", "choices": [{"index": 0, "delta": {"content": "Hi."},
+                                                                     "finish_reason": "stop"}],
+                      "usage": {"prompt_tokens": 9, "completion_tokens": 1}},
+    "a tool call": {**ENGINE_HEAD, "choices": [{"index": 0, "finish_reason": None, "delta": {"tool_calls": [
+        {"index": 0, "id": "call-1", "type": "function", "function": {"name": "open_door", "arguments": "{}"}}]}}]},
+    "a function call": {**ENGINE_HEAD, "choices": [{"index": 0, "finish_reason": None, "delta": {
+        "function_call": {"name": "open_door", "arguments": "{}"}}}]},
+}
+
+
+@pytest.mark.parametrize("name", NOT_TEXT_CHUNKS)
+async def test_an_engine_event_that_is_not_a_text_chunk_of_the_served_model_is_engine_unavailable(name: str) -> None:
+    broken = {"raw_hex": json.dumps(NOT_TEXT_CHUNKS[name]).encode().hex()}
+    async with running() as stack, httpx.AsyncClient(timeout=10) as client:
+        stack.fake.script = Script(events=[broken])
+        assert_refused(await generate(client, stack, chat_body()), 503, "engine_unavailable")
+        stack.fake.script = Script(events=[{"role": "assistant"}, {"content": "The keeper "}, broken,
+                                           {"finish_reason": "stop"}])
+        later = await generate(client, stack, chat_body())
+    assert (later.status, later.error_event, later.done) == (200, "engine_unavailable", False)
+
+
 @pytest.fixture
 def logged() -> Iterator[io.StringIO]:
     """Everything logged during the test, formatted as the gateway writes its log."""
