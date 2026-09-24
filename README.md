@@ -50,6 +50,7 @@ It prints, once the gateway is ready:
 ```
 simple-serving dev launcher: ready
   fake engine  http://127.0.0.1:8200
+  delays       0 ms before the first event, 0 ms after each event
   public       http://127.0.0.1:8201
   control      http://127.0.0.1:8202
   model        test-model, context 4096 tokens
@@ -71,7 +72,10 @@ with keys alone gets the full limits:
 ```
 
 The fake engine counts a prompt as the characters of all message contents divided by 4, rounded up, and answers every
-generation with a fixed synthetic sentence in a few chunks, then `stop` and its usage.
+generation with a fixed synthetic sentence in a few chunks, then `stop` and its usage. It answers in milliseconds, so
+requests rarely overlap. `--first-event-delay-ms N` makes it pause N ms before the first event of each generation, as
+for a long prompt, and `--event-delay-ms N` after each event; with them, concurrent requests fill the places and wait.
+Both default to 0.
 
 ## Running the gateway
 

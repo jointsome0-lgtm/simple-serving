@@ -38,6 +38,7 @@ class Script:
     hold_tokenize: asyncio.Event | None = None  # hold the count's answer until the gate opens
     hold_headers: asyncio.Event | None = None  # hold a generation before its status line
     hold_first: asyncio.Event | None = None  # hold after the headers, before the first event: a long prompt
+    first_delay_s: float = 0.0  # a pause after the headers, before the first event: a long prompt
     delay_s: float = 0.0  # a pause after each event
     endless: bool = False  # after the events, keep generating until the client leaves
 
@@ -124,6 +125,8 @@ class FakeEngine:
                     "headers": [(b"content-type", b"text/event-stream; charset=utf-8")]})
         if script.hold_first is not None:
             await _hold(script.hold_first, call)
+        if script.first_delay_s:
+            await _hold(asyncio.Event(), call, timeout=script.first_delay_s)
         events = script.events if script.events is not None else self._default_events()
         for event in events:
             if call.client_left.is_set():
