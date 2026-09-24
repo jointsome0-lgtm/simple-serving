@@ -120,9 +120,11 @@ class Card:
             str(self.state / "vllm/bin/vllm"), "serve", str(self.state / "models" / m["MODEL_FILE"]),
             "--served-model-name", m["MODEL_ALIAS"], "--host", "127.0.0.1", "--port", m["ENGINE_PORT"],
             "--tokenizer", str(self.state / "tokenizer"), "--max-model-len", m["CONTEXT_TOKENS"],
-            "--max-num-seqs", m["MAX_NUM_SEQS"], "--gpu-memory-utilization", m["GPU_MEMORY_UTILIZATION"],
-            "--kv-cache-dtype", m["KV_CACHE_DTYPE"], "--scheduling-policy", "priority", "--enable-prefix-caching",
-            "--enable-prompt-tokens-details",
+            "--max-num-seqs", m["MAX_NUM_SEQS"], "--max-num-batched-tokens", m["MAX_NUM_BATCHED_TOKENS"],
+            "--gpu-memory-utilization", m["GPU_MEMORY_UTILIZATION"], "--kv-cache-dtype", m["KV_CACHE_DTYPE"],
+            "--scheduling-policy", "priority", "--enable-prefix-caching", "--enable-prompt-tokens-details",
+            "--reasoning-parser", "gemma4",  # the model's thinking in the reasoning field, apart from the answer
+            "--language-model-only",  # text only: the vision tower stays off the GPU
             # Sampling defaults from vLLM, not from a generation_config.json that nobody pinned on purpose.
             "--generation-config", "vllm",
             "--disable-uvicorn-access-log", "--uvicorn-log-level", "warning",
