@@ -24,27 +24,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import log, vast
-from .config import CLASSES, Config, ConfigError, Listener, from_service_block
+from .config import CLASSES, PROVISIONAL, Config, ConfigError, Listener, from_service_block
 from .fake_engine import FakeEngine, Script
 from .server import Gateway, Servers, bind
 
 HOST = "127.0.0.1"
-PROVISIONAL: dict[str, Any] = {
-    "alias": "dev-model",
-    "context_tokens": 65536,
-    "body_limit_bytes": 2_000_000,
-    "limits": {
-        "reader": {"active": 4, "waiting": 8, "input_tokens": None, "max_tokens": 8192, "wall_s": 300},
-        "agent": {"active": 1, "waiting": 2, "input_tokens": None, "max_tokens": 8192, "wall_s": 900},
-        "internal": {"active": 2, "waiting": 8, "input_tokens": None, "max_tokens": 8192, "wall_s": 900},
-        "external": {"active": 2, "waiting": 4, "input_tokens": 8192, "max_tokens": 1024, "wall_s": 120},
-        "external_per_key": {"active": 1, "waiting": 2},
-        "shared": {"active": 4},
-    },
-    "count_limits": {"active": 8, "per_outside_key": 2},
-    "engine_priority": {"reader": 0, "agent": 1, "internal": 2, "external": 3},
-    "drain_deadline_s": 60,
-}
 
 
 @dataclass(frozen=True)
@@ -98,7 +82,7 @@ def service_block(path: str) -> dict[str, Any]:
     if not isinstance(block, dict):
         raise ConfigError("service must be an object")
     limits = {**PROVISIONAL["limits"], **block.get("limits", {})}
-    return {**PROVISIONAL, **block, "limits": limits}
+    return {"alias": "dev-model", "context_tokens": 65536, **PROVISIONAL, **block, "limits": limits}
 
 
 async def run(config: Config, engine_port: int, delays: Delays) -> None:

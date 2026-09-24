@@ -27,6 +27,22 @@ FIELDS = {"alias", "engine_url", "listen", "context_tokens", "body_limit_bytes",
           "count_limits", "engine_priority", "drain_deadline_s", "idle_timeout_s", "health_interval_s", "versions"}
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 LOOPBACK_V4, LOOPBACK_V6 = ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_address("::1")
+# The provisional values of contract section 7, which the dev launcher and the card use until the card has measured
+# its own (section 15, step 4).
+PROVISIONAL: dict[str, Any] = {
+    "body_limit_bytes": 2_000_000,
+    "limits": {
+        "reader": {"active": 4, "waiting": 8, "input_tokens": None, "max_tokens": 8192, "wall_s": 300},
+        "agent": {"active": 1, "waiting": 2, "input_tokens": None, "max_tokens": 8192, "wall_s": 900},
+        "internal": {"active": 2, "waiting": 8, "input_tokens": None, "max_tokens": 8192, "wall_s": 900},
+        "external": {"active": 2, "waiting": 4, "input_tokens": 8192, "max_tokens": 1024, "wall_s": 120},
+        "external_per_key": {"active": 1, "waiting": 2},
+        "shared": {"active": 4},
+    },
+    "count_limits": {"active": 8, "per_outside_key": 2},
+    "engine_priority": {"reader": 0, "agent": 1, "internal": 2, "external": 3},
+    "drain_deadline_s": 60,
+}
 
 
 class ConfigError(Exception):
