@@ -594,17 +594,20 @@ Before the rental, without a card:
 
 On the card:
 
-1. Smoke: vLLM loads the GGUF Q6_K that the bot uses with llama.cpp. The time for this is fixed in advance. If the
-   file does not load or is too slow, nobody fixes that on the paid card, and other weights are measured later as a
+1. Smoke: vLLM loads the weights of the manifest, route A: a 4-bit NVFP4 conversion of the heretic whose Q6_K GGUF
+   the bot uses with llama.cpp, since no released vLLM loads that GGUF. The time for this is fixed in advance. If the
+   weights do not load or are too slow, nobody fixes that on the paid card, and other weights are measured later as a
    separate configuration. Once it is `ready`, before anything long, the stop: `sleep`, and the command reads
    `stopped` back from Vast; then `up` resumes the instance, and the rental's own onstart, with no start over SSH,
    starts exactly one pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline
    unchanged. Then the smoke probes and the count matrix run, with the real template.
 2. Isolation and privacy, before any real story or outside key: a synthetic series checks that cache scopes stay
    apart, and that the privacy marker shows up in no log of the engine, the proxy or the gateway.
-3. The same weights on llama.cpp and on vLLM. The tokenizer, chat template, thinking, sampling, context and cache
-   mode are pinned. Cold and warm runs are measured apart. This compares two engines on one set of weights. It does
-   not promise the same tokens.
+3. llama.cpp with the bot's Q6_K, and vLLM with route A's 4-bit weights. The tokenizer, chat template, thinking,
+   sampling, context and cache mode are pinned on each side. Cold and warm runs are measured apart. The two differ in
+   engine and in weights at once, so this step measures both together and cannot tell the 4-bit loss from the
+   engine. It does not promise the same tokens. Whether A's quality is enough is for eval to judge, against the
+   llama.cpp baseline (step 6).
 4. Synthetic load: the readers' time to first token and speed while `internal` and `external` load runs, including a
    long outside prompt. The measured limits replace the provisional ones of section 7. Also the tail of an abort: how
    long the engine keeps computing a request after the gateway closed it, measured apart while the prompt is read and
@@ -612,12 +615,12 @@ On the card:
 5. The card's own lifecycle, with no bot running: eval requests hold the service, and once they end the service falls
    asleep on its own, and the command reads `stopped` back from Vast. The listeners stay on loopback, and no raw
    output is kept.
-6. `npm run eval` in simple-story-chat.
+6. `npm run eval` in simple-story-chat: route A's quality against the llama.cpp baseline.
 7. Readers move to the service.
 8. Outside keys, as a separate step.
 
-AWQ and GPTQ are separate configurations, measured later. They free memory, but whether more requests then run at
-once has to be measured.
+If eval finds A's quality short, route B follows: our own 4-bit conversion of the heretic's bfloat16 weights, AWQ,
+GPTQ or NVFP4, a separate configuration, measured again.
 
 ## Decided
 
@@ -626,3 +629,5 @@ once has to be measured.
 - 2026-09-24, the owner: the service stops its own card after 13 minutes without work of ours, and stops rather
   than deletes it. The bot keeps the story flow only; everything about the card and the model service lives in
   simple-serving.
+- 2026-09-25, the owner: the trial serves route A, a ready 4-bit NVFP4 conversion of the heretic that vLLM loads in
+  tree. Route B, our own conversion, follows only if eval finds A's quality short.
