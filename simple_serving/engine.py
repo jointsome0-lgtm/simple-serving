@@ -58,7 +58,8 @@ class EngineStream:
     """The engine's server-sent events of one generation, one JSON object at a time.
 
     Closing the stream closes its connection: that is how vLLM behind HTTP is told to abort the request. When `aclose`
-    returns, the gateway's engine request has ended on its side.
+    returns, the gateway's engine request has ended locally. That is not a confirmation from the engine, which learns of
+    the abort from the closed connection and may compute a little longer (contract section 9).
     """
 
     def __init__(self, response: httpx.Response) -> None:

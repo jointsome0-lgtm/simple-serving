@@ -1,11 +1,11 @@
 """Places for generations and counts (contract sections 5 and 7).
 
 A generation is Waiting from the moment it may wait for a place until the gateway hands it to the engine, and Active
-from then until its engine request has ended. Each class has caps for both, and each outside key has its own. Readers
-have places of their own, their Active cap; `agent`, `internal` and `external` share a few places, each class within its
-cap. When a shared place frees, the first waiting request of the first class in the order of section 2 takes it, among
-the classes that have room; within a class the order is arrival. A request with room takes a free place at once: a
-request still waiting while a place is free is held by its own caps.
+from then until its engine request has ended locally. Each class has caps for both, and each outside key has its own.
+Readers have places of their own, their Active cap; `agent`, `internal` and `external` share a few places, each class
+within its cap. When a shared place frees, the first waiting request of the first class in the order of section 2 takes
+it, among the classes that have room; within a class the order is arrival. A request with room takes a free place at
+once: a request still waiting while a place is free is held by its own caps.
 
 Counts have places of their own, shared by all classes. A count past them waits, in the same order; an outside key has
 a cap on its counts, waiting ones included.

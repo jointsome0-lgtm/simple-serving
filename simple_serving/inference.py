@@ -5,7 +5,7 @@ and the service holds it as work that a drain must see end. The work runs in a t
 leaves, a wall time that runs out or a drain can stop it at any await: while it waits for a count place or is counted,
 while it waits for a place, while the engine reads the prompt and while it streams. The client is watched on `receive`
 the whole time, since nothing is sent while the prompt is read. After the task has ended, its engine request is
-closed, which is the abort, and only then is its place freed.
+closed, which is the abort, and only then is its place freed: a local end, not a confirmation from the engine.
 """
 
 from __future__ import annotations
@@ -175,7 +175,7 @@ class Generation(Work):
     async def cleanup(self) -> None:
         try:
             if self.stream is not None:
-                await self.stream.aclose()  # the abort: once it returns, the engine request has ended on our side
+                await self.stream.aclose()  # the abort: once it returns, our engine request has ended locally
         except Exception as error:
             self.exchange.record.exception = type(error).__name__
         finally:

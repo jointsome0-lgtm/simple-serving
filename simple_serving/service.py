@@ -55,7 +55,7 @@ class Service:
     @property
     def status(self) -> str:
         if self.draining:  # whatever the engine does
-            return "draining" if self.work else "drained"
+            return "draining" if self.work else "drained"  # the gateway has no work; the GPU may not be idle yet
         return self.engine_status
 
     # The checks of an inference request, in the order of section 4.
