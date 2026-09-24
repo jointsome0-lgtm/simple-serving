@@ -25,7 +25,8 @@ launcher's next start: costs may go on. The attempts go on too, but they bound n
 
 The logs are in `logs/` of the state directory, with one older file beside each. The launcher makes a log 0600 when it
 opens it; one that it moves aside keeps its mode. `card.jsonl` holds the launcher's rows and, of vLLM's output, only a
-few numbers and fixed categories of failure. `gateway.jsonl` holds the gateway's rows that pass `gateway_row`.
+few numbers and fixed categories of failure and warning. `gateway.jsonl` holds the gateway's rows that pass
+`gateway_row`.
 """
 
 from __future__ import annotations
@@ -88,6 +89,9 @@ FAILURES = (
     ("engine_dead", ("enginedeaderror", "engine core initialization failed", "frontend process failed")),
     ("traceback", ("traceback (most recent call last)",)),
 )
+# And of warnings, by the same rule. NVFP4 weights that vLLM fuses, q/k/v or gate/up, should share one global scale;
+# where they do not, it takes the largest, which "will likely reduce accuracy" (modelopt.py in vLLM 0.30.0).
+WARNINGS = (("fused_scales_differ", ("scale differs across parallel layers",)),)
 GATEWAY_KEYS = log.FIELDS | {"time", "logger", "level"}
 
 
@@ -343,7 +347,7 @@ class Pair:
         self.gateway_log = JsonLines(state / "logs/gateway.jsonl", GATEWAY_LOG_BYTES)
         self.ready = asyncio.Event()
         self.asleep = False
-        self.failures: set[str] = set()  # the categories logged so far, each once
+        self.noted: set[str] = set()  # the categories logged so far, each once
 
     async def run(self, engine: Command, gateway: Command, deadline_s: float, ended: asyncio.Event) -> str:
         """Run until a signal, the exit of either process or the load deadline, whichever comes first, and return
@@ -379,7 +383,7 @@ class Pair:
         await asyncio.Future()
 
     def engine_line(self, line: bytes) -> None:
-        """A line of vLLM's output gives a few numbers, a category of failure, or nothing."""
+        """A line of vLLM's output gives a few numbers, a category of failure or of warning, or nothing."""
         text = line.decode(errors="replace")
         fields = {name: value for pattern in MEASUREMENTS if (found := pattern.search(text))
                   for name, value in found.groupdict().items()}  # vLLM prints some of them on one line
@@ -388,10 +392,11 @@ class Pair:
                                          for name, value in fields.items()})
             return
         lowered = text.lower()
-        category = next((name for name, words in FAILURES if any(word in lowered for word in words)), None)
-        if category is not None and category not in self.failures:
-            self.failures.add(category)
-            log.row("engine_failure", code=category)
+        for event, categories in (("engine_failure", FAILURES), ("engine_warning", WARNINGS)):
+            category = next((name for name, words in categories if any(word in lowered for word in words)), None)
+            if category is not None and category not in self.noted:
+                self.noted.add(category)
+                log.row(event, code=category)
 
     def gateway_line(self, line: bytes) -> None:
         row = gateway_row(line)

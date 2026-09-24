@@ -230,6 +230,8 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
          "utilization (0.92, 29.3 GiB)."),
         "AssertionError: Error in memory profiling. Initial free memory 29.1 GiB, current free memory 29.6 GiB.",
         "RuntimeError: Frontend process failed during engine core initialization. See root cause above.",
+        ("(EngineCore pid=7) WARNING 09-24 12:00:05 [modelopt.py:1981] In NVFP4 linear, the global weight scale "
+         "differs across parallel layers (e.g. q_proj, k_proj, v_proj). This will likely reduce accuracy."),
     ):
         pair.engine_line(text.encode() + b"\n")
     assert rows(logged, "engine_measure") == [
@@ -240,6 +242,7 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
     ]
     assert [row["code"] for row in rows(logged, "engine_failure")] == [
         "cuda_error", "kv_cache_too_small", "memory_taken", "memory_profiling_failed", "engine_dead"]
+    assert rows(logged, "engine_warning") == [{"event": "engine_warning", "code": "fused_scales_differ"}]
     refused = json.dumps({"event": "stop_failed", "code": "forbidden", "status": 403})  # the gateway's own stop
     lines = [
         READY.encode(),

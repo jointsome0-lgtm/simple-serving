@@ -458,8 +458,8 @@ Cancellation:
   prompt, no output and no schema. The rule covers the gateway, the web server and the engine, and the engine's
   request logging stays off.
 - On the card nothing of vLLM's own output is kept. A bounded filter reads it to the end and keeps the exit code, a
-  fixed category of failure and a few numbers: load time, memory and KV cache capacity. The gateway's rows are
-  checked again on the way to their file. Request and access logging, core dumps and usage statistics are off.
+  fixed category of failure or warning and a few numbers: load time, memory and KV cache capacity. The gateway's rows
+  are checked again on the way to their file. Request and access logging, core dumps and usage statistics are off.
 - A log row may hold the time, route, key label, class, scope kind (`reader`, `agent`, `internal` or `external`, never
   the opaque part), status, error code, token counts, the measurements of section 11, whether the request was
   cancelled, and the finish reason.
