@@ -6,13 +6,17 @@ leaves, a wall time that runs out or a drain can stop it at any await: while it 
 while it waits for a place, while the engine reads the prompt and while it streams. The client is watched on `receive`
 the whole time, since nothing is sent while the prompt is read. After the task has ended, its engine request is
 closed, which is the abort, and only then is its place freed: a local end, not a confirmation from the engine.
+
+The terminal message goes out after that: the usage chunk and `[DONE]`, the count, or an error. When the client does
+not read, that send waits without an engine request or a place, and not past a stop: once the work is stopped, a send
+that waits for the client is given up, and the server closes the connection.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .admission import Ticket
 from .asgi import Exchange
@@ -39,7 +43,9 @@ class Work:
         self.request = request
         self.accepted_at: float | None = None
         self.stop_reason: str | None = None
+        self._stopped_at: float | None = None  # the event loop's time of the stop
         self._task: asyncio.Task[None] | None = None
+        self._terminal_send: asyncio.Timeout | None = None  # while the terminal message is sent; a stop cuts it
         self._count_place: Ticket | None = None
 
     @property
@@ -47,13 +53,25 @@ class Work:
         """Whether the engine has the request's main call (section 7). A drain lets our active work finish."""
         raise NotImplementedError
 
+    @property
+    def waiting(self) -> bool:
+        """Whether the task runs and the engine does not have the main call yet: the work is counted or waits for a
+        place. A drain stops it."""
+        return self._task is not None and not self._task.done() and not self.active
+
     def stop(self, reason: str) -> None:
-        """Stop the work: "disconnect", "timeout", "draining" or "shutdown". The cleanup runs once it has stopped."""
-        if self._task is None or self._task.done() or self.exchange.finished or self.stop_reason is not None:
+        """Stop the work: "disconnect", "timeout", "draining" or "shutdown". Only the first stop counts. It cancels the
+        task, whose cleanup runs once it has stopped, and from then on a send of the terminal message that waits for
+        the client is given up."""
+        if self._task is None or self.stop_reason is not None:
             return
         self.stop_reason = reason
-        self._stopping()
-        self._task.cancel()
+        self._stopped_at = asyncio.get_running_loop().time()
+        if not self._task.done():
+            self._stopping()
+            self._task.cancel()
+        elif self._terminal_send is not None:
+            self._terminal_send.reschedule(self._stopped_at)
 
     async def serve(self) -> None:
         """Accept the request and run it to its terminal event. A service that does not serve refuses it with 503."""
@@ -62,17 +80,23 @@ class Work:
         except ServiceError as error:
             await self.exchange.send_error(error.code)
             return
+        self.accepted_at = time.monotonic()
+        wall_s = self.service.config.limits[self.caller.cls].wall_s
+        wall_timer = asyncio.get_running_loop().call_later(wall_s, self.stop, "timeout")
+        watcher = asyncio.create_task(self._watch_client())
         try:
             task = await self._run()
-            await self._answer_outcome(task)
+            await self._send_terminal(task)
         finally:
+            watcher.cancel()
+            wall_timer.cancel()
             self.service.release(self)
 
     async def run(self) -> None:
         raise NotImplementedError
 
     async def answer(self) -> None:
-        """The answer of work that ended well, sent after its task, where nothing can stop it halfway."""
+        """The answer of work that ended well, sent after its task and its cleanup."""
 
     async def cleanup(self) -> None:
         """Runs after the task has ended, however it ended."""
@@ -91,26 +115,34 @@ class Work:
             places.leave(self._count_place)  # the engine call has ended: it returned, failed or was cancelled
 
     async def _run(self) -> asyncio.Task[None]:
-        """Run the work's task under its wall time while the client is watched, then clean up."""
-        self.accepted_at = time.monotonic()
-        wall_s = self.service.config.limits[self.caller.cls].wall_s
-        wall_timer = asyncio.get_running_loop().call_later(wall_s, self.stop, "timeout")
+        """Run the work's task to its end, then clean up."""
         task = self._task = asyncio.create_task(self.run())
-        watcher = asyncio.create_task(self._watch_client())
         try:
             await asyncio.wait({task})
         finally:
             if not task.done():  # the server shuts down and cancelled this handler
                 self.stop("shutdown")
                 await asyncio.wait({task})
-            watcher.cancel()
-            wall_timer.cancel()
             await self.cleanup()
         return task
 
     async def _watch_client(self) -> None:
         await self.exchange.disconnected()
         self.stop("disconnect")
+
+    async def _send_terminal(self, task: asyncio.Task[None]) -> None:
+        """Send the terminal message of the task's outcome. After a stop it goes out only if the connection takes it
+        at once: a client that does not read is given up."""
+        send = self._terminal_send = asyncio.timeout_at(self._stopped_at)
+        try:
+            async with send:
+                await self._answer_outcome(task)
+        except TimeoutError:
+            if not send.expired():
+                raise
+            self.exchange.record.cancelled = True
+        finally:
+            self._terminal_send = None
 
     async def _answer_outcome(self, task: asyncio.Task[None]) -> None:
         record = self.exchange.record
@@ -151,6 +183,7 @@ class Generation(Work):
         super().__init__(service, exchange, caller, request)
         self.ticket: Ticket | None = None
         self.stream: EngineStream | None = None
+        self._usage_chunk: dict[str, Any] | None = None  # the last chunk, once the engine's stream has ended well
         self._handed_at: float | None = None
         self._first_token_at: float | None = None
 
@@ -167,6 +200,11 @@ class Generation(Work):
         self._handed_at = time.monotonic()
         self.stream = await self.service.engine.generate(self.service.payload(self.caller, self.request))
         await self._relay(self.stream)
+
+    async def answer(self) -> None:
+        assert self._usage_chunk is not None
+        await self.exchange.send_event(self._usage_chunk)
+        await self.exchange.send_event("[DONE]", last=True)
 
     def _stopping(self) -> None:
         if self.ticket is not None and self.ticket.waiting:
@@ -185,7 +223,8 @@ class Generation(Work):
             self._record_times(self._measure(time.monotonic()))  # a stopped or failed request, for its log row
 
     async def _relay(self, stream: EngineStream) -> None:
-        """Send 200 with the engine's first event, then each event as it comes; at the end usage and [DONE]."""
+        """Send 200 with the engine's first event, then each event as it comes. At the engine's end the usage chunk is
+        built, which the answer sends with [DONE]."""
         translator = Translator(self.service.config.alias)
         event = await stream.next_event()
         if event is None:  # [DONE] before any event
@@ -209,8 +248,7 @@ class Generation(Work):
         record.count_matches = usage.prompt_tokens == record.input_tokens
         times = self._measure(time.monotonic())
         self._record_times(times)
-        await self.exchange.send_event(translator.usage_chunk(usage, times))
-        await self.exchange.send_event("[DONE]", last=True)
+        self._usage_chunk = translator.usage_chunk(usage, times)
 
     def _measure(self, end: float) -> dict[str, int]:
         """The measurements of section 11, in whole milliseconds from acceptance. A stream without any token measures

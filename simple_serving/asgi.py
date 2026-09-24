@@ -50,7 +50,7 @@ class Exchange:
         self.headers = header_map(scope)
         self.record: RequestRecord = scope[RECORD]
         self.started = False  # the status and headers are sent
-        self.finished = False  # the terminal message is sent
+        self.ending = False  # the terminal message has begun: nothing may follow it, even if its send was cut short
 
     def header(self, name: str) -> str | None:
         value = self.headers.get(name)
@@ -80,14 +80,14 @@ class Exchange:
             pass
 
     async def send_json(self, status: int, payload: Any) -> None:
-        self.started = self.finished = True  # set first: a send cut short by a cancellation is not repeated
+        self.started = self.ending = True
         for message in json_response(status, payload):
             await self._send(message)
 
     async def send_error(self, code: str) -> None:
         """An error of section 9: a plain HTTP error before the stream started, the error event after it. Nothing is
-        sent after the terminal message."""
-        if self.finished:
+        sent once the terminal message has begun."""
+        if self.ending:
             return
         self.record.code = code
         if self.started:
@@ -103,5 +103,6 @@ class Exchange:
 
     async def send_event(self, data: dict[str, Any] | str, *, last: bool = False) -> None:
         text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        self.finished = last
+        if last:
+            self.ending = True
         await self._send({"type": "http.response.body", "body": f"data: {text}\n\n".encode(), "more_body": not last})

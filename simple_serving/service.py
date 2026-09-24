@@ -123,7 +123,7 @@ class Service:
         return state
 
     def drain(self, boot_id: str) -> dict[str, Any]:
-        """Refuse new work, stop waiting work and active outside work, and let our active work finish until the
+        """Refuse new work, stop waiting work and outside work, and let the rest of our work finish until the
         deadline. With no work at all the drain is complete before it answers."""
         self._check_boot(boot_id)
         if self.draining:  # a repeated drain answers the current state
@@ -132,7 +132,7 @@ class Service:
         self.drain_generation += 1
         log.row("drain", drain_generation=self.drain_generation)
         for work in list(self.work):
-            if not work.active or work.caller.key.outside:
+            if work.waiting or work.caller.key.outside:
                 work.stop("draining")
         self._deadline = asyncio.get_running_loop().call_later(self.config.drain_deadline_s, self._drain_deadline)
         return self._control_answer()

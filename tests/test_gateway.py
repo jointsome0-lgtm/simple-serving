@@ -1,6 +1,6 @@
 """What the cases and the scenarios leave out: the engine's health and context, what the engine receives, the
-listeners' answers outside the cases, and errors inside the gateway itself. Every test runs its own gateway over real
-sockets (support.py)."""
+listeners' answers outside the cases, errors inside the gateway itself, and a client that does not read its terminal
+message. Every test runs its own gateway over real sockets (support.py)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import secrets
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -16,14 +17,15 @@ import httpx
 import pytest
 
 from simple_serving import app, log
+from simple_serving.asgi import Exchange
 from simple_serving.config import CLASSES
 from simple_serving.fake_engine import FakeEngine, Script
 from simple_serving.service import Service
 from simple_serving.stream import Translator
 from simple_serving.validation import MAX_DEPTH
 
-from .support import (ALIAS, CLASS, CONTROL, SCOPE, SERVICE, Answer, call, chat_body, control, count, generate, reader,
-                      running, service_with, until, user_body)
+from .support import (ALIAS, CLASS, CONTROL, SCOPE, SERVICE, Answer, RawClient, call, chat_body, control, count,
+                      eventually, generate, reader, record_abort_order, running, service_with, until, user_body)
 
 pytestmark = pytest.mark.anyio
 MARKER = "Mk" + secrets.token_hex(8)
@@ -295,3 +297,68 @@ async def test_an_error_in_the_error_handler_still_gets_an_answer(
     async with running() as stack, httpx.AsyncClient(timeout=10) as client:
         assert_refused(await call(client, "GET", stack.public + "/v1/state"), 500, "internal_error")
     assert_logged_class_only(logged)
+
+
+def stall_the_send_of(monkeypatch: pytest.MonkeyPatch, start: bytes) -> asyncio.Event:
+    """Make the gateway's send of the first body that begins with `start` wait until it is cancelled, as a send waits
+    while its client does not read. The event is set when that send begins."""
+    began = asyncio.Event()
+    init = Exchange.__init__
+
+    def stalling_init(self: Exchange, scope: Any, receive: Any, send: Any) -> None:
+        async def stalling_send(message: Any) -> None:
+            if not began.is_set() and message.get("body", b"").startswith(start):
+                began.set()
+                await asyncio.Future()  # nothing resolves it: only a cancellation ends the wait
+            await send(message)
+
+        init(self, scope, receive, stalling_send)
+
+    monkeypatch.setattr(Exchange, "__init__", stalling_init)
+    return began
+
+
+async def stalled_terminal(monkeypatch: pytest.MonkeyPatch, logged: io.StringIO, script: Script, start: bytes,
+                           ending: str) -> tuple[bytes, dict[str, Any]]:
+    """An internal generation whose terminal message stalls at `start`, until its wall time or a drain's deadline ends
+    it. Returns what its client received and the request's log row."""
+    order = record_abort_order(monkeypatch)
+    began = stall_the_send_of(monkeypatch, start)
+    wall_s, deadline_s = (0.4, 60.0) if ending == "timeout" else (60.0, 0.4)
+    block = service_with(limits={"internal": {"wall_s": wall_s}}, drain_deadline_s=deadline_s)
+    async with running(block) as stack, httpx.AsyncClient(timeout=10) as client:
+        stack.fake.script = script
+        since = time.monotonic()
+        raw = await RawClient.post(stack.public, "/v1/chat/completions", chat_body(), headers={CLASS: "internal"})
+        await eventually(began.wait())
+        # The engine request is closed and its place freed before the terminal message: only the send waits.
+        assert order == ["closed", "freed"]
+        assert stack.service.admission.active_counts()["internal"] == 0 and stack.service.work
+        if ending == "drain deadline":
+            since = time.monotonic()
+            await control(client, stack, "/v1/control/drain", {"boot_id": stack.service.boot_id})
+            assert stack.service.status == "draining"  # our work may finish until the deadline
+        await until(lambda: not stack.service.work)
+        assert time.monotonic() - since >= min(wall_s, deadline_s)
+        assert stack.service.status == ("ready" if ending == "timeout" else "drained")
+        received = await raw.read_to_end()  # the server closed the connection
+    rows = [json.loads(line) for line in logged.getvalue().splitlines()]
+    (row,) = [row for row in rows if row.get("route") == "/v1/chat/completions"]
+    return received, row
+
+
+@pytest.mark.parametrize("ending", ["timeout", "drain deadline"])
+async def test_a_done_the_client_does_not_read_holds_no_place_and_a_stop_still_ends_it(
+        monkeypatch: pytest.MonkeyPatch, logged: io.StringIO, ending: str) -> None:
+    received, row = await stalled_terminal(monkeypatch, logged, Script(), b"data: [DONE]", ending)
+    assert b'"usage"' in received and b"[DONE]" not in received and b'"error"' not in received
+    assert (row["status"], row["finish"], row["cancelled"], row.get("code")) == (200, "stop", True, None)
+
+
+@pytest.mark.parametrize("ending", ["timeout", "drain deadline"])
+async def test_an_error_event_the_client_does_not_read_holds_no_place_and_a_stop_still_ends_it(
+        monkeypatch: pytest.MonkeyPatch, logged: io.StringIO, ending: str) -> None:
+    script = Script(events=[{"role": "assistant"}, {"content": "The keeper "}, {"error": {"message": "synthetic"}}])
+    received, row = await stalled_terminal(monkeypatch, logged, script, b'data: {"error"', ending)
+    assert b"The keeper" in received and b'"error"' not in received and b"[DONE]" not in received
+    assert (row["status"], row["code"], row["cancelled"]) == (200, "engine_unavailable", True)
