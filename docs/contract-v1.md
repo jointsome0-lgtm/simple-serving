@@ -193,8 +193,18 @@ sets one. `/v1/state` shows the same number.
 
 - The gateway reports `starting` until it has verified the engine: the engine answers, serves the alias and reports
   the context length. Then the status is `ready`.
-- The status is `draining` or `drained` during a stop (section 8), and `failed` if the engine stops answering after it
-  was ready. While a drain is on, the status is `draining` or `drained` whatever the engine does.
+- The status is `draining` or `drained` during a stop (section 8), and `failed` if the engine stops answering or
+  changes after it was ready. While a drain is on, the status is `draining` or `drained` whatever the engine does.
+- The gateway checks the engine every 5 seconds. A check that fails makes a `ready` service `failed`: new requests are
+  refused, and the requests already accepted go on within their wall time, since the engine may only be busy. An
+  error from the engine still ends its own request at once. The next check that passes makes the service `ready`
+  again.
+- An engine that answers a check with another model, or with another context length than the boot verified, has
+  changed. The service becomes `failed` at once and cancels every request it has accepted, counts included, since
+  they were checked against an engine that is gone. One that has not started its stream gets 503
+  `engine_unavailable`. One whose stream has started ends with the error event `engine_unavailable`. The service is
+  `ready` again only once the engine serves the verified model and context again. A restarted service verifies the
+  engine anew.
 - In any status except `ready`, the inference routes answer 503. The code is the status itself, except `failed`,
   which answers `engine_unavailable`.
 - For the control key the answer also holds `active` and `waiting`, counted by class, and the pinned versions of

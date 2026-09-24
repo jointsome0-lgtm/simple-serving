@@ -33,8 +33,10 @@ class Service:
         self._salt_secret = secrets.token_bytes(32)  # made at every start, never shown
         self.drain_generation = 0
         self.draining = False
-        self.engine_status = "starting"  # then "ready", or "failed" once a ready engine stops answering
+        self.engine_status = "starting"  # then "ready", and "failed" while checks fail or once the engine has changed
         self.context_tokens: int | None = None
+        self._engine_length: int | None = None  # the engine's own context length, as this boot verified it
+        self._engine_changed = False
         self.admission = Admission(config)
         self.count_places = CountPlaces(config)
         self.work: set[Work] = set()  # accepted generations and counts that have not answered yet
@@ -174,14 +176,43 @@ class Service:
             try:
                 length = await self.engine.context_length(self.config.alias)
             except Exception as error:
-                if self.engine_status == "ready":
-                    self.engine_status = "failed"
-                    log.row("engine", service_status="failed", exception=type(error).__name__)
+                self._check_failed(error)
             else:
-                limit = self.config.context_tokens
-                self.context_tokens = min(length, limit) if limit is not None else length
-                if self.engine_status != "ready":
-                    self.engine_status = "ready"
-                    log.row("engine", service_status="ready", context_tokens=self.context_tokens)
+                self._engine_answered(length)
             interval = self.config.health_interval_s
             await asyncio.sleep(min(interval, STARTING_RETRY_S) if self.engine_status == "starting" else interval)
+
+    def _check_failed(self, error: Exception) -> None:
+        """A failed check makes a ready service failed, and new work is refused. Accepted work goes on within its wall
+        time: the engine may only be busy, and an error from the engine ends its own request."""
+        if self.engine_status == "ready":
+            self.engine_status = "failed"
+            log.row("engine", service_status="failed", exception=type(error).__name__)
+
+    def _engine_answered(self, length: int | None) -> None:
+        """The engine answered a check with the alias's context length, or with None: it serves another model."""
+        if self._engine_length is None:
+            if length is None:
+                return  # not verified: the service stays starting
+            self._engine_length = length
+            limit = self.config.context_tokens
+            self.context_tokens = min(length, limit) if limit is not None else length
+        elif length != self._engine_length:
+            self._engine_changes()
+            return
+        self._engine_changed = False
+        if self.engine_status != "ready":
+            self.engine_status = "ready"
+            log.row("engine", service_status="ready", context_tokens=self.context_tokens)
+
+    def _engine_changes(self) -> None:
+        """The engine serves another model or another context than this boot verified. The work in flight was checked
+        against an engine that is gone: the service fails, and all its work ends with engine_unavailable. It is ready
+        again once the engine serves the verified model and context again."""
+        if self._engine_changed:
+            return
+        self._engine_changed = True
+        self.engine_status = "failed"
+        log.row("engine_changed", service_status="failed")
+        for work in list(self.work):
+            work.stop("engine_changed")

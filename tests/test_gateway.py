@@ -24,11 +24,13 @@ from simple_serving.service import Service
 from simple_serving.stream import Translator
 from simple_serving.validation import MAX_DEPTH
 
-from .support import (ALIAS, CLASS, CONTROL, SCOPE, SERVICE, Answer, RawClient, call, chat_body, control, count,
-                      eventually, generate, reader, record_abort_order, running, service_with, until, user_body)
+from .support import (ALIAS, CLASS, CONTROL, SCOPE, SERVICE, Answer, RawClient, by_prompt, call, chat_body, control,
+                      count, eventually, generate, reached, reader, record_abort_order, running, service_with, until,
+                      user_body)
 
 pytestmark = pytest.mark.anyio
 MARKER = "Mk" + secrets.token_hex(8)
+AGENT = {CLASS: "agent"}
 
 
 def assert_refused(answer: Answer, status: int, code: str) -> None:
@@ -93,15 +95,53 @@ async def test_an_engine_that_serves_another_model_is_not_verified() -> None:
         assert_refused(await generate(client, stack, chat_body()), 503, "starting")
 
 
-async def test_an_engine_that_stops_answering_fails_the_service_until_it_answers_again() -> None:
+async def test_an_engine_that_stops_answering_fails_the_service_and_lets_accepted_work_go_on() -> None:
     async with running(health_interval_s=0.05) as stack, httpx.AsyncClient(timeout=10) as client:
+        prompt_read = asyncio.Event()
+        stack.fake.script = Script(hold_first=prompt_read)
+        accepted = asyncio.ensure_future(generate(client, stack, chat_body()))
+        await until(lambda: bool(stack.fake.calls_of("generate")))
         stack.fake.healthy = False
         await until(lambda: stack.service.status == "failed")
         state = (await call(client, "GET", stack.public + "/v1/state")).json()
         assert (state["status"], state["context_tokens"]) == ("failed", SERVICE["context_tokens"])
         assert_refused(await generate(client, stack, chat_body()), 503, "engine_unavailable")
         assert_refused(await count(client, stack, chat_body()), 503, "engine_unavailable")
+        prompt_read.set()
+        assert (await accepted).done
         stack.fake.healthy = True
+        await until(lambda: stack.service.status == "ready")
+        assert (await generate(client, stack, chat_body())).done
+
+
+@pytest.mark.parametrize("change", ["another model", "another context"])
+async def test_an_engine_that_changes_under_a_verified_boot_fails_it_and_ends_all_its_work(change: str) -> None:
+    async with running(health_interval_s=0.05) as stack, httpx.AsyncClient(timeout=10) as client:
+        stack.fake.script = by_prompt({"streams": Script(events=[{"content": "On. "}], endless=True, delay_s=0.01),
+                                       "in its prompt": Script(hold_first=asyncio.Event()),
+                                       "counted": Script(hold_tokenize=asyncio.Event())})
+        streaming = asyncio.ensure_future(generate(client, stack, user_body("streams"), headers=reader()))
+        stream_call = await reached(stack, "streams")
+        await until(lambda: stream_call.events_sent > 0)
+        work = [asyncio.ensure_future(generate(client, stack, user_body("in its prompt"), headers=AGENT))]
+        await reached(stack, "in its prompt")
+        work.append(asyncio.ensure_future(generate(client, stack, user_body("waits"), headers=AGENT)))
+        await until(lambda: stack.service.admission.waiting_counts()["agent"] == 1)  # one agent place
+        work.append(asyncio.ensure_future(count(client, stack, user_body("counted"), headers=reader())))
+        await reached(stack, "counted", "tokenize")
+
+        verified = stack.fake.served_name, stack.fake.max_model_len
+        if change == "another model":
+            stack.fake.served_name = "another-model"
+        else:  # a longer one, past the gateway's own limit: the engine has changed all the same
+            stack.fake.max_model_len += 1024
+        for answer in await asyncio.gather(*work):
+            assert_refused(answer, 503, "engine_unavailable")
+        streamed = await streaming
+        assert (streamed.status, streamed.error_event, streamed.done) == (200, "engine_unavailable", False)
+        assert stack.service.status == "failed" and not stack.service.work
+        assert_refused(await generate(client, stack, chat_body()), 503, "engine_unavailable")
+        stack.fake.served_name, stack.fake.max_model_len = verified
         await until(lambda: stack.service.status == "ready")
         assert (await generate(client, stack, chat_body())).done
 

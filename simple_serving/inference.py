@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from .service import Service
 
 # What the client is told when its request is stopped. A client that left is told nothing.
-STOP_CODES = {"timeout": "timeout", "draining": "draining"}
+STOP_CODES = {"timeout": "timeout", "draining": "draining", "engine_changed": "engine_unavailable"}
 
 
 class Work:
@@ -60,9 +60,9 @@ class Work:
         return self._task is not None and not self._task.done() and not self.active
 
     def stop(self, reason: str) -> None:
-        """Stop the work: "disconnect", "timeout", "draining" or "shutdown". Only the first stop counts. It cancels the
-        task, whose cleanup runs once it has stopped, and from then on a send of the terminal message that waits for
-        the client is given up."""
+        """Stop the work: "disconnect", "timeout", "draining", "engine_changed" or "shutdown". Only the first stop
+        counts. It cancels the task, whose cleanup runs once it has stopped, and from then on a send of the terminal
+        message that waits for the client is given up."""
         if self._task is None or self.stop_reason is not None:
             return
         self.stop_reason = reason

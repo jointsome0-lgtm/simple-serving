@@ -102,16 +102,20 @@ class EngineClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def context_length(self, alias: str) -> int:
-        """Verify the engine: it answers, serves the alias and reports its context length."""
+    async def context_length(self, alias: str) -> int | None:
+        """Check the engine: it answers and reports the context length of the alias. None means that it answers with
+        a list of models without the alias: it serves another model."""
         await self._call("GET", "/health")
-        models = _object(await self._json("GET", "/v1/models"))
-        for card in models.get("data") or []:
+        cards = _object(await self._json("GET", "/v1/models")).get("data")
+        if not isinstance(cards, list):
+            raise EngineError("engine_unavailable")
+        for card in cards:
             if isinstance(card, dict) and card.get("id") == alias:
                 length = card.get("max_model_len")
-                if type(length) is int and length >= 1:
-                    return length
-        raise EngineError("engine_unavailable")
+                if type(length) is not int or length < 1:
+                    raise EngineError("engine_unavailable")
+                return length
+        return None
 
     async def count(self, alias: str, request: ChatRequest) -> int:
         answer = _object(await self._json("POST", "/tokenize", tokenize_payload(alias, request), UNBOUNDED))
