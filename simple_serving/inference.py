@@ -74,12 +74,7 @@ class Work:
             self._terminal_send.reschedule(self._stopped_at)
 
     async def serve(self) -> None:
-        """Accept the request and run it to its terminal event. A service that does not serve refuses it with 503."""
-        try:
-            self.service.accept(self)
-        except ServiceError as error:
-            await self.exchange.send_error(error.code)
-            return
+        """Run the request, which the service has accepted, to its terminal event."""
         self.accepted_at = time.monotonic()
         wall_s = self.service.config.limits[self.caller.cls].wall_s
         wall_timer = asyncio.get_running_loop().call_later(wall_s, self.stop, "timeout")

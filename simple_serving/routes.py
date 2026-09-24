@@ -2,10 +2,12 @@
 
 The router has already matched the route; each handler checks the key next. The inference routes then check the
 service status, the class and the scope, and only then read the body, which is refused past its limit before it is
-parsed as JSON.
+parsed as JSON. From the arrival to the acceptance, a refusal's send included, they have PREPARE_S in all.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 from .asgi import ClientGone, Exchange
 from .errors import ServiceError
@@ -14,36 +16,54 @@ from .service import Service
 from .validation import check_chat, check_drain, check_open, parse_json
 
 CONTROL_BODY_LIMIT = 4096  # a drain or an open is a few dozen bytes
+PREPARE_S = 30  # a fixed bound, not a setting (contract section 4)
 
 
 async def generation(service: Service, exchange: Exchange) -> None:
-    try:
-        caller = service.authorize(exchange)
-        request = check_chat(parse_json(await exchange.read_body(service.config.body_limit_bytes)),
-                             service.config.alias)
-        service.check_max_tokens(caller, request)
-    except ServiceError as error:
-        await exchange.send_error(error.code)
-        return
-    except ClientGone:
-        exchange.record.cancelled = True
-        return
-    await Generation(service, exchange, caller, request).serve()
+    await _inference(service, exchange, Generation)
 
 
 async def count(service: Service, exchange: Exchange) -> None:
     # The same body and headers as a generation; no class limits and no context (contract section 5).
+    await _inference(service, exchange, Count)
+
+
+async def _inference(service: Service, exchange: Exchange, kind: type[Generation | Count]) -> None:
+    """Check a request, accept it and serve it. A request of ours keeps the service awake from its authorization to
+    its end (section 8), so what comes before acceptance is bounded: a client that sends its body slowly, or does not
+    read a refusal, is given up at PREPARE_S."""
+    deadline = asyncio.get_running_loop().time() + PREPARE_S
     try:
         caller = service.authorize(exchange)
-        request = check_chat(parse_json(await exchange.read_body(service.config.body_limit_bytes)),
-                             service.config.alias)
     except ServiceError as error:
-        await exchange.send_error(error.code)
+        await _refuse(exchange, error.code, deadline)
         return
-    except ClientGone:
+    with service.ours(caller):
+        try:
+            async with asyncio.timeout_at(deadline):
+                body = await exchange.read_body(service.config.body_limit_bytes)
+            request = check_chat(parse_json(body), service.config.alias)
+            if kind is Generation:
+                service.check_max_tokens(caller, request)
+            work = kind(service, exchange, caller, request)
+            service.accept(work)  # a drain that began while the body was read refuses it here
+        except ServiceError as error:
+            await _refuse(exchange, error.code, deadline)
+        except TimeoutError:
+            await _refuse(exchange, "timeout", deadline)
+        except ClientGone:
+            exchange.record.cancelled = True
+        else:
+            await work.serve()
+
+
+async def _refuse(exchange: Exchange, code: str, deadline: float) -> None:
+    """A refusal before acceptance. Past the deadline it goes out only if the connection takes it at once."""
+    try:
+        async with asyncio.timeout_at(deadline):
+            await exchange.send_error(code)
+    except TimeoutError:
         exchange.record.cancelled = True
-        return
-    await Count(service, exchange, caller, request).serve()
 
 
 async def models(service: Service, exchange: Exchange) -> None:

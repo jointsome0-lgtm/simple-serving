@@ -4,8 +4,10 @@ that every inference request passes (sections 4, 5 and 7), and the work it has a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import platform
 import secrets
+from collections.abc import Iterator
 from importlib import metadata
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +42,8 @@ class Service:
         self.admission = Admission(config)
         self.count_places = CountPlaces(config)
         self.work: set[Work] = set()  # accepted generations and counts that have not answered yet
+        self.ours_inflight = 0  # requests of ours between their authorization and their end, accepted or not
+        self.idle_since = 0.0  # the event loop's time when the last of them ended
         self._deadline: asyncio.TimerHandle | None = None
         self._watch: asyncio.Task[None] | None = None
 
@@ -77,6 +81,20 @@ class Service:
         exchange.record.cls, exchange.record.scope = caller.cls, caller.scope_kind
         return caller
 
+    @contextlib.contextmanager
+    def ours(self, caller: Caller) -> Iterator[None]:
+        """Hold the service awake while a request of ours runs, from its authorization, before its body is read, to
+        its end. Outside requests hold nothing (section 8)."""
+        if caller.key.outside:
+            yield
+            return
+        self.ours_inflight += 1
+        try:
+            yield
+        finally:
+            self.ours_inflight -= 1
+            self.idle_since = asyncio.get_running_loop().time()
+
     def check_serving(self) -> None:
         status = self.status
         if status != "ready":
@@ -87,7 +105,7 @@ class Service:
             raise ServiceError("limit_exceeded")
 
     def accept(self, work: Work) -> None:
-        """Take on a checked request. A drain that began while its body was read refuses it here."""
+        """Take on a checked request, if the service still serves."""
         self.check_serving()
         self.work.add(work)
 

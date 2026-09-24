@@ -17,7 +17,6 @@ import httpx
 import pytest
 
 from simple_serving import app, log
-from simple_serving.asgi import Exchange
 from simple_serving.config import CLASSES
 from simple_serving.fake_engine import FakeEngine, Script
 from simple_serving.service import Service
@@ -44,6 +43,7 @@ from .support import (
     record_abort_order,
     running,
     service_with,
+    stall_the_send_of,
     until,
     user_body,
 )
@@ -390,25 +390,6 @@ async def test_an_error_in_the_error_handler_still_gets_an_answer(
     async with running() as stack, httpx.AsyncClient(timeout=10) as client:
         assert_refused(await call(client, "GET", stack.public + "/v1/state"), 500, "internal_error")
     assert_logged_class_only(logged)
-
-
-def stall_the_send_of(monkeypatch: pytest.MonkeyPatch, start: bytes) -> asyncio.Event:
-    """Make the gateway's send of the first body that begins with `start` wait until it is cancelled, as a send waits
-    while its client does not read. The event is set when that send begins."""
-    began = asyncio.Event()
-    init = Exchange.__init__
-
-    def stalling_init(self: Exchange, scope: Any, receive: Any, send: Any) -> None:
-        async def stalling_send(message: Any) -> None:
-            if not began.is_set() and message.get("body", b"").startswith(start):
-                began.set()
-                await asyncio.Future()  # nothing resolves it: only a cancellation ends the wait
-            await send(message)
-
-        init(self, scope, receive, stalling_send)
-
-    monkeypatch.setattr(Exchange, "__init__", stalling_init)
-    return began
 
 
 async def stalled_terminal(monkeypatch: pytest.MonkeyPatch, logged: io.StringIO, script: Script, start: bytes,

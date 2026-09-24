@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from simple_serving.admission import Admission
+from simple_serving.asgi import Exchange
 from simple_serving.config import Listener, from_service_block
 from simple_serving.engine import EngineStream
 from simple_serving.fake_engine import Call, FakeEngine, Script
@@ -237,12 +239,14 @@ class RawClient:
 
     @classmethod
     async def post(cls, base: str, path: str, body: Any, *, key: str | None = BOT,
-                   headers: dict[str, str] | None = None) -> RawClient:
+                   headers: dict[str, str] | None = None, missing: int = 0) -> RawClient:
+        """Send a request. With `missing`, the body is announced that many bytes longer than it is, so that its end
+        never arrives."""
         host, port = base.removeprefix("http://").split(":")
         reader_, writer = await asyncio.open_connection(host, int(port))
         payload = json.dumps(body).encode()
         lines = [f"POST {path} HTTP/1.1", f"Host: {host}:{port}", "Content-Type: application/json",
-                 f"Content-Length: {len(payload)}"]
+                 f"Content-Length: {len(payload) + missing}"]
         lines += [f"{name}: {value}" for name, value in request_headers(key, headers).items()]
         writer.write(("\r\n".join(lines) + "\r\n\r\n").encode() + payload)
         await writer.drain()
@@ -285,3 +289,39 @@ class RawClient:
 
 async def eventually(awaitable: Awaitable[Any], timeout: float = 5.0) -> Any:
     return await asyncio.wait_for(awaitable, timeout)
+
+
+class FakeClock:
+    """The event loop's clock, moved on by hand. Every timer of the loop, the gateway's and the servers' alike, comes
+    due as if that time had passed, so no test waits for one. Requests still take their real milliseconds."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop = asyncio.get_running_loop()
+        real = loop.time
+        self.offset = 0.0
+        monkeypatch.setattr(loop, "time", lambda: real() + self.offset)
+
+    async def advance(self, seconds: float) -> None:
+        """Move the clock on and let what came due run."""
+        self.offset += seconds
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+
+def stall_the_send_of(monkeypatch: pytest.MonkeyPatch, start: bytes) -> asyncio.Event:
+    """Make the gateway's send of the first body that begins with `start` wait until it is cancelled, as a send waits
+    while its client does not read. The event is set when that send begins."""
+    began = asyncio.Event()
+    init = Exchange.__init__
+
+    def stalling_init(self: Exchange, scope: Any, receive: Any, send: Any) -> None:
+        async def stalling_send(message: Any) -> None:
+            if not began.is_set() and message.get("body", b"").startswith(start):
+                began.set()
+                await asyncio.Future()  # nothing resolves it: only a cancellation ends the wait
+            await send(message)
+
+        init(self, scope, receive, stalling_send)
+
+    monkeypatch.setattr(Exchange, "__init__", stalling_init)
+    return began
