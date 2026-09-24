@@ -158,6 +158,47 @@ async def test_a_load_that_is_not_ready_by_the_deadline_gives_up(state: Path, lo
 
 
 @pytest.mark.anyio
+async def test_a_card_that_gave_up_loads_nothing_at_a_resume_and_stops_again(state: Path, logged: io.StringIO,
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = FakeClock(monkeypatch)
+    stand_in(state / ENGINE, exit_code=1)
+    stand_in(state / GATEWAY)
+    failed = FakeVast()
+    assert await card.launch(card_at(state), asyncio.Event(), failed) == "engine_exit"
+    assert failed.stopped
+    resumed = FakeVast()  # the owner resumes the instance, and onstart starts the launcher again
+    launch = asyncio.create_task(card.launch(card_at(state), asyncio.Event(), resumed))
+    await until(lambda: bool(rows(logged, "wait_for_retry")))
+    await clock.advance(card.IDLE_TIMEOUT_S - 1)
+    assert not launch.done() and resumed.attempts == []
+    await clock.advance(1)
+    assert await launch == "given_up"
+    assert resumed.stopped and (state / "given-up").read_text() == "engine_exit\n"
+    assert [row["reason"] for row in rows(logged, "pair_end")] == ["engine_exit", "given_up"]
+    assert len(rows(logged, "exit")) == 2  # the processes of the failed load, and none since
+
+
+@pytest.mark.anyio
+async def test_a_retry_within_the_interval_runs_the_pair_and_stops_nothing(state: Path, logged: io.StringIO,
+                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = FakeClock(monkeypatch)
+    stand_in(state / ENGINE)
+    stand_in(state / GATEWAY, READY)
+    (state / "given-up").write_text("load_deadline\n")
+    ended, vast = asyncio.Event(), FakeVast()
+    launch = asyncio.create_task(card.launch(card_at(state), ended, vast))
+    await until(lambda: bool(rows(logged, "wait_for_retry")))
+    await clock.advance(card.IDLE_TIMEOUT_S - 60)
+    (state / "given-up").unlink()  # what --retry does, and its start then finds this launcher running
+    await clock.advance(card.POLL_S)
+    await until(lambda: bool(rows(logged, "ready")))
+    await clock.advance(60)  # past the end of the interval, which no longer counts
+    ended.set()
+    assert await launch == "signal"
+    assert vast.attempts == []
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(("lines", "exit_code", "outcome"), [
     ((READY, SLEEP), 0, "asleep"),  # the gateway had begun to stop the instance
     ((READY,), 1, "gateway_exit"),
@@ -294,7 +335,8 @@ def prepared(tmp_path: Path) -> Card:
     return Card.load(code=code, state=state, environ=CREDENTIAL, root=state)
 
 
-def test_start_says_what_stands_in_the_way(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_start_says_what_stands_in_the_way(tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
     ready = prepared(tmp_path)
     assert card.start(ready, dry_run=True) == 0
     engine, gateway = capsys.readouterr().out.splitlines()
@@ -310,6 +352,10 @@ def test_start_says_what_stands_in_the_way(tmp_path: Path, capsys: pytest.Captur
     assert card.start(ready, dry_run=True) == card.NOT_PREPARED
     (ready.state / "given-up").write_text("load_deadline\n")
     assert card.start(ready, dry_run=True) == card.GAVE_UP
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **options: spawned.append(argv))
+    assert card.start(ready) == card.GAVE_UP
+    assert spawned == [[sys.executable, "-m", "simple_serving.card", "--run"]]  # the launcher that will stop it
 
 
 def launcher_stand_in(state: Path) -> subprocess.Popen[bytes]:
@@ -327,6 +373,7 @@ def test_hold_lasts_as_long_as_the_launcher(tmp_path: Path, capsys: pytest.Captu
     assert sum(pauses) == card.HOLD_START_S
     assert capsys.readouterr().out == f"{card.HOLDING}\n"  # the command's sign that the tunnel's forwards are up
     assert card.hold(replace(ready, credential={}), pauses.append) == card.NOT_PREPARED  # and none will start
+    assert capsys.readouterr().out == ""
 
     process, pauses = launcher_stand_in(state), []
 
@@ -342,6 +389,9 @@ def test_hold_lasts_as_long_as_the_launcher(tmp_path: Path, capsys: pytest.Captu
     process = launcher_stand_in(state)
     try:
         assert card.hold(ready, lambda _: (state / "given-up").write_text("engine_exit\n")) == card.GAVE_UP
+        capsys.readouterr()
+        assert card.hold(ready, pauses.append) == card.GAVE_UP
+        assert capsys.readouterr().out == ""
     finally:
         process.kill()
         process.wait()

@@ -177,6 +177,16 @@ command waits while the pair runs:
 cd /workspace/simple-serving && /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --hold
 ```
 
+A load that never becomes ready leaves the file `given-up` in the card's state, and the card has given up. Every
+later start, a resume included, then loads nothing: the launcher waits 13 minutes for the owner's retry and otherwise
+stops the instance again. `up` and `status` say so. The retry, within those 13 minutes, runs the pair, and then `up`
+holds it as usual:
+
+```
+ssh <card> 'cd /workspace/simple-serving &&
+  /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --retry'
+```
+
 The service stops its card and never deletes it. A disposable trial rental arms a guard through its own onstart,
 simple-story-chat's `gpu/trial-onstart.sh`: it deletes the instance three hours after the first start, and it also
 writes the instance's id and key, which the first preparation needs. An onstart for a permanent rental, which writes

@@ -263,8 +263,9 @@ async def test_tunnels_that_keep_ending_before_ready_are_given_up(tmp_path: Path
 @pytest.mark.anyio
 @pytest.mark.parametrize(("refuse", "end", "words"), [
     ((1,), (), "not prepared"),  # the card's shell found no checkout or no venv
-    ((), (card.NOT_PREPARED,), "not prepared"),
-    ((), (card.GAVE_UP,), "gave up"),
+    ((card.NOT_PREPARED,), (), "not prepared"),
+    ((card.GAVE_UP,), (), "given up"),  # as at a resume after a failed load
+    ((), (card.GAVE_UP,), "given up"),  # a load that fails while up waits
 ])
 async def test_up_says_why_the_card_does_not_serve(tmp_path: Path, clock: Clock, refuse: tuple[int, ...],
                                                    end: tuple[int, ...], words: str) -> None:
@@ -303,7 +304,7 @@ async def test_sleep_uses_the_tunnel_that_up_holds(tmp_path: Path, clock: Clock)
 @pytest.mark.anyio
 async def test_sleep_stops_nothing_when_the_gateway_cannot_be_reached(tmp_path: Path, clock: Clock) -> None:
     instance, ssh = Instance("running"), Ssh(refuse=(cli.SSH_FAILED,))
-    with pytest.raises(cli.Refusal, match="so nothing stops"):
+    with pytest.raises(cli.Refusal, match="never stops the card itself"):
         await cli.sleep(setup_for(tmp_path, instance, ssh))
     assert (instance.reads, instance.resumes) == (1, 0)  # and neither the command nor its Vast can stop
 
@@ -327,6 +328,8 @@ async def test_status_tells_vast_apart_from_the_gateway(tmp_path: Path, clock: C
     assert proxied == []  # the control key goes to loopback only, never to a proxy
     await cli.status(setup_for(tmp_path, Instance("running"), Ssh(refuse=(cli.SSH_FAILED,))))
     assert capsys.readouterr().out.splitlines() == ["vast: running", "gateway: ssh ended with 255"]
+    await cli.status(setup_for(tmp_path, Instance("running"), Ssh(refuse=(card.GAVE_UP,))))
+    assert capsys.readouterr().out.splitlines() == ["vast: running", f"gateway: {cli.GIVEN_UP}"]
     ssh = Ssh()
     await cli.status(setup_for(tmp_path, Instance("stopped"), ssh))
     assert capsys.readouterr().out == "vast: stopped\n" and ssh.opened == []

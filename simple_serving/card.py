@@ -3,18 +3,20 @@
     python -m simple_serving.card [--hold | --stop | --retry | --dry-run]
 
 card/onstart.sh runs it from the checkout with the gateway's venv, and card/bootstrap.sh prepares the card once per
-rental. Without an option it checks the card, starts the pair in the background and returns 0, also when the pair
+rental. Without an option it checks the card, starts the launcher in the background and returns 0, also when one
 already runs. Otherwise it returns 3 when the card is not prepared (bootstrap.sh has not run for this manifest and
-these locks, or the keys or the instance's credential are missing), 6 when the launcher gave up, and the file
+these locks, or the keys or the instance's credential are missing), 6 when the card has given up, and the file
 `given-up` says why, and 7 when a port is taken. `--retry` removes `given-up` and starts. `--stop` ends the pair and
 leaves the instance running. `--hold` prints one line, then waits while the pair runs and returns 0 once it has
-ended, or 6 once the launcher has given up, or 3 at once on a card that is not prepared: it is the remote command of
-the tunnel, and it never owns the pair. `--dry-run` prints the two commands and checks, and starts nothing.
+ended, or 6 once the card has given up; on a card that has given up, or is not prepared, it returns 6 or 3 at once
+and prints nothing. It is the remote command of the tunnel, and it never owns the pair. `--dry-run` prints the two
+commands and checks, and starts nothing.
 
 The pair runs once, with no restarts. It ends on SIGTERM, when a process exits, or when the gateway is not ready by
 the manifest's load deadline. Unless a signal ended it, the launcher then stops the instance as the gateway does when
-it falls asleep (`vast.py`). When the pair never became ready, it first leaves `given-up`, so that the next start of
-the container does not load the model again until the owner retries.
+it falls asleep (`vast.py`). When the pair never became ready, it first leaves `given-up`, and the card has given up:
+a later start, a resume included, loads nothing. Its launcher waits the idle interval for the owner's `--retry`, which
+runs the pair, and without one stops the instance again, so that no card stays up with nothing to stop it.
 
 The logs are in `logs/` of the state directory, each file 0600 with one older file beside it. `card.jsonl` holds the
 launcher's rows and, of vLLM's output, only a few numbers and fixed categories of failure. `gateway.jsonl` holds the
@@ -44,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from . import log, vast
-from .config import PROVISIONAL
+from .config import IDLE_TIMEOUT_S, PROVISIONAL
 
 CODE = Path(__file__).resolve().parent.parent  # the checkout
 STATE = Path(os.environ.get("SIMPLE_SERVING_CARD_DIR", "/workspace/simple-serving-card"))
@@ -192,29 +194,33 @@ def taken(port: int) -> bool:
 
 
 def start(card: Card, *, dry_run: bool = False) -> int:
-    """Start the pair in the background, unless something stands in the way. A dry run prints the two commands and
+    """Start the launcher in the background, unless something stands in the way. A card that has given up gets its
+    launcher all the same, since that is what stops the instance, and 6 says so. A dry run prints the two commands and
     starts nothing."""
     if dry_run:
         print(shlex.join(card.engine().argv), shlex.join(card.gateway().argv), sep="\n")
-    if (card.state / GIVEN_UP).exists():
-        return GAVE_UP
+    given_up = (card.state / GIVEN_UP).exists()
     if launcher(card.state) is not None:
-        return 0
-    if not card.prepared():
+        return GAVE_UP if given_up else 0
+    if not given_up and not card.prepared():
         return NOT_PREPARED
-    if any(taken(port) for port in card.ports.values()):
+    if not given_up and any(taken(port) for port in card.ports.values()):
         return PORT_TAKEN
     if not dry_run:
         subprocess.Popen([sys.executable, "-m", "simple_serving.card", "--run"], cwd=card.code,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
-    return 0
+    return GAVE_UP if given_up else 0
 
 
 def hold(card: Card, pause: Callable[[float], object] = time.sleep) -> int:
-    """Wait while the launcher runs. One that onstart has not started yet is waited for HOLD_START_S, unless the card
-    is not prepared, and then none will come. The first line out tells the command that its forwards are up, since
-    ssh runs its remote command only once it has bound them."""
+    """Wait while the launcher runs. One that onstart has not started yet is waited for HOLD_START_S. The first line
+    out tells the command that its forwards are up, since ssh runs its remote command only once it has bound them. A
+    card with nothing to hold gets no line: one that has given up, or one that is not prepared and runs no launcher."""
+    if (card.state / GIVEN_UP).exists():
+        return GAVE_UP
+    if launcher(card.state) is None and not card.prepared():
+        return NOT_PREPARED
     print(HOLDING, flush=True)
     waited, seen = 0, False
     while not (card.state / GIVEN_UP).exists():
@@ -222,8 +228,6 @@ def hold(card: Card, pause: Callable[[float], object] = time.sleep) -> int:
             seen = True
         elif seen or waited >= HOLD_START_S:
             return 0
-        elif not card.prepared():
-            return NOT_PREPARED
         pause(POLL_S)
         waited += POLL_S
     return GAVE_UP
@@ -271,20 +275,37 @@ async def serve(card: Card) -> None:
 
 
 async def launch(card: Card, ended: asyncio.Event, stop: vast.Stop) -> str:
-    """Run the pair once, then stop the instance unless a signal ended it. Returns how the pair ended."""
+    """Run the pair once, then stop the instance unless a signal ended it. Returns how the pair ended, or `given_up`
+    when the card had given up and no retry came."""
     pair = Pair(card.state / "logs")
-    try:
-        outcome = await pair.run(card.engine(), card.gateway(), float(card.manifest["LOAD_DEADLINE_S"]), ended)
-    except OSError:  # a process that could not start
-        outcome = "spawn_failed"
-    if outcome != "signal" and pair.asleep:
-        outcome = "asleep"  # the gateway had begun to stop the instance
+    outcome = await retried(card.state / GIVEN_UP, ended)
+    if outcome is None:
+        try:
+            outcome = await pair.run(card.engine(), card.gateway(), float(card.manifest["LOAD_DEADLINE_S"]), ended)
+        except OSError:  # a process that could not start
+            outcome = "spawn_failed"
+        if outcome != "signal" and pair.asleep:
+            outcome = "asleep"  # the gateway had begun to stop the instance
     log.row("pair_end", reason=outcome)
     if outcome != "signal":
-        if outcome != "asleep" and not pair.ready.is_set():
+        if outcome not in ("asleep", "given_up") and not pair.ready.is_set():
             (card.state / GIVEN_UP).write_text(f"{outcome}\n")
         await first(vast.stop_until_accepted(stop), ended.wait())
     return outcome
+
+
+async def retried(marker: Path, ended: asyncio.Event) -> str | None:
+    """None when the pair may run: at once on a card that has not given up, or once the owner's --retry has removed
+    `marker` within the idle interval. Otherwise `given_up` at the interval's end, or `signal`."""
+    if not marker.exists():  # noqa: ASYNC240 - one stat of a local file, in the launcher's own process
+        return None
+    log.row("wait_for_retry")
+    return ("signal", "given_up", None)[await first(ended.wait(), asyncio.sleep(IDLE_TIMEOUT_S), removed(marker))]
+
+
+async def removed(path: Path) -> None:
+    while path.exists():  # noqa: ASYNC240 - as above, every POLL_S
+        await asyncio.sleep(POLL_S)
 
 
 class Pair:

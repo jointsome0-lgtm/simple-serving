@@ -27,6 +27,7 @@ FIELDS = {"alias", "engine_url", "listen", "context_tokens", "body_limit_bytes",
           "count_limits", "engine_priority", "drain_deadline_s", "idle_timeout_s", "health_interval_s", "versions"}
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 LOOPBACK_V4, LOOPBACK_V6 = ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_address("::1")
+IDLE_TIMEOUT_S = 780  # without work of ours, before the service falls asleep (contract section 8)
 # The provisional values of contract section 7, which the dev launcher and the card use until the card has measured
 # its own (section 15, step 4).
 PROVISIONAL: dict[str, Any] = {
@@ -168,7 +169,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
         engine_priority=MappingProxyType({name: _integer(priority.get(name), f"engine_priority.{name}", None)
                                           for name in CLASSES}),
         drain_deadline_s=_seconds(data.get("drain_deadline_s"), "drain_deadline_s"),
-        idle_timeout_s=_seconds(data.get("idle_timeout_s", 780), "idle_timeout_s"),
+        idle_timeout_s=_seconds(data.get("idle_timeout_s", IDLE_TIMEOUT_S), "idle_timeout_s"),
         public=_listener(listen.get("public"), "listen.public"),
         control=_listener(listen.get("control"), "listen.control", loopback=True),
         max_connections=_integer(data.get("max_connections", 64), "max_connections", 1),

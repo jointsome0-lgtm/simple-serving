@@ -45,6 +45,7 @@ from typing import Any
 import httpx
 
 from . import card, vast
+from .config import IDLE_TIMEOUT_S
 
 CONFIG = Path.home() / ".config/simple-serving/config.json"
 KEYS = ("client_key", "control_key")
@@ -64,6 +65,8 @@ CONNECT_S = 30  # from starting ssh to the remote command's first line
 CALL_S = 10  # one call to the gateway
 RECONNECTS = 3  # tunnels in a row that may end before the gateway is ready again
 NOT_PREPARED = "the card is not prepared: run its preparation first (README, 'The card')"
+GIVEN_UP = ("the card has given up loading the model and stops itself: to load it again, run the launcher's --retry "
+            f"on the card within {IDLE_TIMEOUT_S // 60} minutes of its start (README, 'The card')")
 
 now = time.monotonic  # the command's own clock, which the tests replace
 pause = asyncio.sleep
@@ -239,10 +242,8 @@ async def hold(setup: Setup) -> None:
             code = await tunnel.wait()
         finally:
             await tunnel.close()
-        if code == card.NOT_PREPARED:
-            raise Refusal(NOT_PREPARED)
         if code == card.GAVE_UP:
-            raise Refusal("the card gave up loading the model: read its logs, then run the launcher with --retry")
+            raise Refusal(GIVEN_UP)
         ended += 1
         if ended > RECONNECTS:
             raise Refusal("the tunnel keeps ending before the gateway is ready")
@@ -262,7 +263,7 @@ async def connect(setup: Setup) -> Tunnel | None:
                 return await setup.connect(forwards)
             except NoTunnel as error:
                 if error.code != SSH_FAILED:
-                    raise Refusal(NOT_PREPARED) from None
+                    raise Refusal(GIVEN_UP if error.code == card.GAVE_UP else NOT_PREPARED) from None
         if now() >= deadline:
             raise Refusal(f"the card does not take SSH; Vast says {state}")
         await pause(POLL_S)
@@ -302,7 +303,8 @@ async def sleep(setup: Setup) -> int:
             async with control(setup) as base:
                 say(f"gateway: {await ask_sleep(base, setup.control_key)}, falling asleep")
         except (NoTunnel, GatewayError) as error:
-            raise Refusal(f"the gateway did not take the sleep ({describe(error)}), so nothing stops") from None
+            raise Refusal(f"the gateway did not take the sleep ({describe(error)}), and this command never stops "
+                          "the card itself") from None
     await await_state(setup, {"stopped"}, STOP_WAIT_S, "the instance to stop")
     say("vast: stopped")
     return 0
@@ -397,7 +399,7 @@ def describe(error: Exception) -> str:
     if isinstance(error, vast.VastError):
         return error.code if error.status is None else f"{error.code} {error.status}"
     if isinstance(error, NoTunnel):
-        return f"ssh ended with {error.code}"
+        return {card.NOT_PREPARED: NOT_PREPARED, card.GAVE_UP: GIVEN_UP}.get(error.code, f"ssh ended with {error.code}")
     return str(error) or "timeout"
 
 
