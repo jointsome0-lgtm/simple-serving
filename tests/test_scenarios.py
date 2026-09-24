@@ -1,4 +1,4 @@
-"""The scenarios of contract/cases-v1.json, which a static case cannot describe: cancellation, places, wall time and
+"""The scenarios of contract/cases-v2.json, which a static case cannot describe: cancellation, places, wall time and
 drains, over real sockets. The one about error bodies is in test_privacy.py."""
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 # Shared cases
 
-`cases-v1.json` holds the cases of contract v1 ([docs/contract-v1.md](../docs/contract-v1.md)). The gateway's Python
+`cases-v2.json` holds the cases of contract v2 ([docs/contract-v2.md](../docs/contract-v2.md)). The gateway's Python
 tests and the bot's TypeScript tests read the same file.
 
 ## Who runs what

@@ -32,7 +32,7 @@ from .support import (
 )
 
 pytestmark = pytest.mark.anyio
-CONFIG = "contract/cases-v1.json"
+CONFIG = "contract/cases-v2.json"
 CHAT, COUNT = "/v1/chat/completions", "/v1/chat/completions/input_tokens"
 
 

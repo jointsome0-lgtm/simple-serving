@@ -1,16 +1,16 @@
-# Contract v1 (draft)
+# Contract v2 (draft)
 
-The HTTP API of simple-serving, version 1. Status: draft. The gateway in this repository implements it and passes
+The HTTP API of simple-serving, version 2. Status: draft. The gateway in this repository implements it and passes
 the shared cases in front of a fake engine; nothing has run in front of vLLM yet (section 15). The bot's side is
 `local/serving.ts` in simple-story-chat; section 13 is written from its `local/llama.ts` and `local/scheduler.ts` at
 commit 80fd241.
 
 ## 1. Scope
 
-- One text model behind a gateway on one rented card. The gateway is FastAPI, run as one worker process in version 1,
+- One text model behind a gateway on one rented card. The gateway is FastAPI, run as one worker process in version 2,
   because the drain state, the quotas and the boot identity live in its memory. The engine is vLLM.
 - Clients reach only the gateway. The engine, its metrics and its own API listen on loopback.
-- Version 1 is streamed text chat. There are no tools, images, audio, logprobs, LoRA adapters, `n > 1` or answers
+- Version 2 is streamed text chat. There are no tools, images, audio, logprobs, LoRA adapters, `n > 1` or answers
   without streaming.
 - The clients are simple-story-chat and outside keys. The bot sends readers' turns, agent turns and our eval and
   probes, all through its own scheduler.
@@ -26,7 +26,7 @@ Every request carries `Authorization: Bearer <key>`, on loopback too. The gatewa
 - the classes it may use and its default class;
 - whether it may name cache scopes.
 
-Outside keys are issued by hand in version 1. There is no sign-up.
+Outside keys are issued by hand in version 2. There is no sign-up.
 
 ### Classes
 
@@ -153,7 +153,7 @@ connection, an error event, an invalid event, or a stream that ends before its f
 
 An engine event is valid when it is a chunk of the served model: `object` is `chat.completion.chunk`, `model` is the
 alias, and `choices` holds at most one choice, with `index` 0 and a delta that holds nothing but the role
-`assistant`, text and reasoning. Version 1 is text only, so a tool call or a function call is invalid. Where a field
+`assistant`, text and reasoning. Version 2 is text only, so a tool call or a function call is invalid. Where a field
 may be absent, such as `usage`, `finish_reason` or a field of the delta, null counts as absent.
 
 ### Stream
@@ -214,7 +214,7 @@ sets one. `/v1/state` shows the same number.
 `GET /v1/state`:
 
 ```json
-{"contract": "1", "boot_id": "<random at every start>", "status": "ready", "model": "<alias>",
+{"contract": "2", "boot_id": "<random at every start>", "status": "ready", "model": "<alias>",
  "context_tokens": 65536, "drain_generation": 0}
 ```
 
@@ -415,7 +415,7 @@ Before any contract run on the card, a lock file in this repository pins:
 
 The new adapter is separate from `createLlama` and `createOpenAI`. `SIMPLE_CHAT_ALLOW_HOSTED` stays as it is.
 
-| Today, llama-server                                          | Contract v1                                     |
+| Today, llama-server                                          | Contract v2                                     |
 |--------------------------------------------------------------|-------------------------------------------------|
 | `GET /props`: `n_ctx` at least the configured context, `total_slots` equal to the configured slots | `/v1/models` and `/v1/state`, no slots |
 | `id_slot` when the scheduler names a slot, and `cache_prompt: true` | dropped                                  |
@@ -441,7 +441,7 @@ Also in simple-story-chat:
   `gpu/ensure-server.sh` on the card and forwards port 8080.
 - Over the new adapter the scheduler runs one lane, so the bot's calls stay one at a time. The guarantees built on
   slots are off. Work marked `sharesPrefix` no longer has a slot where its prefix is sure to be cached, and the engine
-  may evict any prefix. This is a limitation of version 1. Several lanes without placement come later.
+  may evict any prefix. This is a limitation of version 2. Several lanes without placement come later.
 - `usage.simple_serving` goes into new log fields, added to the whitelist in `local/model-error.ts` as non-negative
   integers. The adapter does not write these numbers into `promptMs` or `predictedMs`.
 - `generateMany` stays on llama.cpp (section 1).
@@ -452,8 +452,8 @@ Also in simple-story-chat:
 
 ## 14. Shared cases
 
-- `/v1/state` reports the contract version. A change that breaks a client makes it `"2"`.
-- The canonical cases live here, in `contract/cases-v1.json`; `contract/README.md` describes the format. A case holds
+- `/v1/state` reports the contract version. A change that breaks a client makes it `"3"`.
+- The canonical cases live here, in `contract/cases-v2.json`; `contract/README.md` describes the format. A case holds
   the request, a script for the fake engine, the expected status and stream from the fake, and the expected
   normalized result or error code. Streams are compared only for the fake. Real model output is never compared byte
   for byte.

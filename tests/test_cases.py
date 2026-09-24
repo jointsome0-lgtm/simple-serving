@@ -1,4 +1,4 @@
-"""Every case of contract/cases-v1.json, each on a fresh gateway in front of the fake engine (contract/README.md)."""
+"""Every case of contract/cases-v2.json, each on a fresh gateway in front of the fake engine (contract/README.md)."""
 
 from __future__ import annotations
 

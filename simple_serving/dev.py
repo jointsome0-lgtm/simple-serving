@@ -1,9 +1,9 @@
 """The dev launcher: the fake engine and the gateway on loopback, for a run of a real client against the real gateway.
 
-    uv run python -m simple_serving.dev --config contract/cases-v1.json \
+    uv run python -m simple_serving.dev --config contract/cases-v2.json \
         --engine-port 8200 --public-port 8201 --control-port 8202
 
-The configuration file is a `service` block in the shape of contract/cases-v1.json, with its test keys in the clear,
+The configuration file is a `service` block in the shape of contract/cases-v2.json, with its test keys in the clear,
 or a file that holds one under "service", such as the cases file itself. Fields it leaves out take the provisional
 values of contract section 7. The fake engine answers every request: the count is ceil(characters of all message
 contents / 4), and a generation streams a fixed synthetic sentence and ends with stop. It answers in milliseconds,

@@ -1,3 +1,3 @@
-"""simple-serving: a gateway in front of vLLM that serves one text model under contract v1 (docs/contract-v1.md)."""
+"""simple-serving: a gateway in front of vLLM that serves one text model under contract v2 (docs/contract-v2.md)."""
 
-CONTRACT = "1"
+CONTRACT = "2"

@@ -3,11 +3,11 @@
 Text model serving for [simple-story-chat](https://github.com/jointsome0-lgtm/simple-story-chat): a FastAPI gateway in
 front of vLLM, run on rented GPUs. The bot calls it over HTTP. Outside clients with a key may call it too.
 
-Status: the gateway of contract v1 is written and tested against a fake engine. It has not run in front of vLLM yet;
-that happens on the first rental (contract section 15). The API is in [docs/contract-v1.md](docs/contract-v1.md), the
+Status: the gateway of contract v2 is written and tested against a fake engine. It has not run in front of vLLM yet;
+that happens on the first rental (contract section 15). The API is in [docs/contract-v2.md](docs/contract-v2.md), the
 shared cases in [contract/](contract/README.md).
 
-Version 1 serves one text model. Pictures stay in simple-story-chat for now.
+Version 2 serves one text model. Pictures stay in simple-story-chat for now.
 
 ## Install
 
@@ -31,7 +31,7 @@ uv run mypy .
 No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback ports, in front of a fake vLLM
 (`simple_serving/fake_engine.py`), and call it over HTTP:
 
-- `tests/test_cases.py`: every case of `contract/cases-v1.json`, each on a new gateway;
+- `tests/test_cases.py`: every case of `contract/cases-v2.json`, each on a new gateway;
 - `tests/test_scenarios.py`: the scenarios of the cases file: a client that leaves in every phase, places and lines,
   counts, wall time, drains;
 - `tests/test_privacy.py`: the gateway as its own process, started as in production; every error path carries a marker
@@ -47,7 +47,7 @@ the same checks.
 The fake engine and the gateway on loopback, to run a real client against the real gateway:
 
 ```
-uv run python -m simple_serving.dev --config contract/cases-v1.json --engine-port 8200 --public-port 8201 --control-port 8202
+uv run python -m simple_serving.dev --config contract/cases-v2.json --engine-port 8200 --public-port 8201 --control-port 8202
 ```
 
 It prints, once the gateway is ready:

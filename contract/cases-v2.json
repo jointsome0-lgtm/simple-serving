@@ -1,6 +1,6 @@
 {
-  "contract": "1",
-  "about": "Shared cases of contract v1 (docs/contract-v1.md). The gateway's tests play the engine part through the fake engine and check the response; a client's tests play the response and check the result. Format: contract/README.md.",
+  "contract": "2",
+  "about": "Shared cases of contract v2 (docs/contract-v2.md). The gateway's tests play the engine part through the fake engine and check the response; a client's tests play the response and check the result. Format: contract/README.md.",
   "service": {
     "alias": "test-model",
     "context_tokens": 4096,
@@ -199,13 +199,13 @@
         {
           "request": { "base": "public", "method": "GET", "path": "/v1/state", "key": "test-key-bot" },
           "engine": null,
-          "response": { "status": 200, "json": { "contract": "1", "boot_id": "present", "status": "ready", "model": "test-model", "context_tokens": 4096, "drain_generation": 0 } },
+          "response": { "status": 200, "json": { "contract": "2", "boot_id": "present", "status": "ready", "model": "test-model", "context_tokens": 4096, "drain_generation": 0 } },
           "result": { "status": "ready" }
         },
         {
           "request": { "base": "control", "method": "GET", "path": "/v1/state", "key": "test-key-control" },
           "engine": null,
-          "response": { "status": 200, "json": { "contract": "1", "boot_id": "present", "status": "ready", "model": "test-model", "context_tokens": 4096, "drain_generation": 0,
+          "response": { "status": 200, "json": { "contract": "2", "boot_id": "present", "status": "ready", "model": "test-model", "context_tokens": 4096, "drain_generation": 0,
             "active": { "reader": 0, "agent": 0, "internal": 0, "external": 0 }, "waiting": { "reader": 0, "agent": 0, "internal": 0, "external": 0 }, "versions": "present" } },
           "result": { "status": "ready" }
         }

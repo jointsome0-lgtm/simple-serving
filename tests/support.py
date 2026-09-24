@@ -27,7 +27,7 @@ from simple_serving.fake_engine import Call, FakeEngine, Script
 from simple_serving.server import Gateway, Servers, bind
 
 ROOT = Path(__file__).resolve().parent.parent
-CASES: dict[str, Any] = json.loads((ROOT / "contract" / "cases-v1.json").read_text(encoding="utf-8"))
+CASES: dict[str, Any] = json.loads((ROOT / "contract" / "cases-v2.json").read_text(encoding="utf-8"))
 SERVICE: dict[str, Any] = CASES["service"]
 ALIAS: str = SERVICE["alias"]
 BOT, CONTROL, OUTSIDE_A, OUTSIDE_B = "test-key-bot", "test-key-control", "test-key-outside-a", "test-key-outside-b"
