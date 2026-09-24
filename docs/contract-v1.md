@@ -168,8 +168,8 @@ ends its stream with the error event `engine_unavailable`.
   (provisional). A count past that waits for a count place, in the class order of section 2 and within its wall
   time. An outside key has at most 2 counts at once; a third is refused with 429 `queue_full`. The count inside a
   generation shares these limits.
-- The gateway sends the engine only what renders the prompt: the messages and the template arguments, never the rest
-  of the body.
+- The gateway sends the engine only what renders the prompt: the model alias, the messages and the template arguments,
+  never the rest of the body.
 - A count applies neither the class limits of section 7 nor the context. A body whose `n` plus `max_tokens` exceeds
   the context is still counted. The answer is the count.
 
