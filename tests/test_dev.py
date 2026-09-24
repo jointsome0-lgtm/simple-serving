@@ -18,7 +18,18 @@ import pytest
 from simple_serving import dev
 from simple_serving.fake_engine import SENTENCE
 
-from .support import BOT, CONTROL, OUTSIDE_A, OUTSIDE_B, ROOT, SERVICE, Answer, call, chat_body, reader
+from .support import (
+    BOT,
+    CONTROL,
+    OUTSIDE_A,
+    OUTSIDE_B,
+    ROOT,
+    SERVICE,
+    Answer,
+    call,
+    chat_body,
+    reader,
+)
 
 pytestmark = pytest.mark.anyio
 CONFIG = "contract/cases-v1.json"

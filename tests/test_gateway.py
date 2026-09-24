@@ -24,9 +24,29 @@ from simple_serving.service import Service
 from simple_serving.stream import Translator
 from simple_serving.validation import MAX_DEPTH
 
-from .support import (ALIAS, CLASS, CONTROL, SCOPE, SERVICE, Answer, RawClient, by_prompt, call, chat_body, control,
-                      count, eventually, generate, reached, reader, record_abort_order, running, service_with, until,
-                      user_body)
+from .support import (
+    ALIAS,
+    CLASS,
+    CONTROL,
+    SCOPE,
+    SERVICE,
+    Answer,
+    RawClient,
+    by_prompt,
+    call,
+    chat_body,
+    control,
+    count,
+    eventually,
+    generate,
+    reached,
+    reader,
+    record_abort_order,
+    running,
+    service_with,
+    until,
+    user_body,
+)
 
 pytestmark = pytest.mark.anyio
 MARKER = "Mk" + secrets.token_hex(8)

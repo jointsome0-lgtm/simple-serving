@@ -24,6 +24,8 @@ Starlette, uvicorn and httpx, the gateway's part of contract section 12.
 
 ```
 uv run pytest
+uv run ruff check .
+uv run mypy .
 ```
 
 No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback ports, in front of a fake vLLM
@@ -36,6 +38,9 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
   that no answer and no log line may hold;
 - `tests/test_gateway.py`: the engine's health and context, what the engine receives, errors inside the gateway;
 - `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher.
+
+The dev group of `pyproject.toml` pins ruff and mypy, and the same file holds their settings, so every machine runs
+the same checks.
 
 ## Dev launcher
 

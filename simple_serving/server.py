@@ -10,6 +10,7 @@ import socket
 import sys
 from collections.abc import Iterator
 from types import TracebackType
+from typing import Self
 
 import uvicorn
 from starlette.types import ASGIApp
@@ -84,7 +85,7 @@ class Gateway:
         self._graceful_s = graceful_s
         self._servers: Servers | None = None
 
-    async def __aenter__(self) -> Gateway:
+    async def __aenter__(self) -> Self:
         sockets = {"public": bind(self.config.public), "control": bind(self.config.control)}
         self.ports = {name: sock.getsockname()[1] for name, sock in sockets.items()}
         public, control = public_app(self.service), control_app(self.service)

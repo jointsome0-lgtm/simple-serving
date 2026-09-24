@@ -214,7 +214,7 @@ class Generation(Work):
         try:
             if self.stream is not None:
                 await self.stream.aclose()  # the abort: once it returns, our engine request has ended locally
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - httpx does not map close errors; the client is answered anyway
             self.exchange.record.exception = type(error).__name__
         finally:
             if self.ticket is not None:

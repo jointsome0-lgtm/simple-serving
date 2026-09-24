@@ -175,7 +175,7 @@ class Service:
         while True:
             try:
                 length = await self.engine.context_length(self.config.alias)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - whatever a check raises, the check has failed
                 self._check_failed(error)
             else:
                 self._engine_answered(length)

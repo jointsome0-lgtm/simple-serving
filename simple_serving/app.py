@@ -90,7 +90,7 @@ class Guard:
                 await self._refuse(record, send_noting_status, "queue_full", close=True)
             else:
                 await self._app(scope, receive, send_noting_status)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - the last resort: no exception may reach the server's log
             record.exception = type(error).__name__
             if record.status is None:
                 with contextlib.suppress(Exception):

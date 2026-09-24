@@ -14,9 +14,40 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "mypy==2.3.1",
     "pytest",
+    "ruff==0.16.6",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# Named in full: ruff's default set changes between versions and has no name to select it by. This holds every rule
+# of ruff 0.16.6's default set: whole linters where they fit this code, less the three rules ignored below, and of the
+# rest only the default's own rules, since their other rules argue with its style (asserts in tests, messages in
+# exceptions, imports at the top).
+select = [
+    "F", "E", "W", "I", "B", "BLE", "ASYNC", "PYI", "UP", "SIM", "RUF", "C4", "PIE", "PERF", "FURB", "DTZ", "LOG",
+    "G", "T10", "YTT", "EXE", "FA", "ISC", "FLY", "PGH", "INT", "RET", "PLC", "PLE", "PLW",
+    "D419", "N999", "S102", "S110", "S112", "PTH124", "PTH210",
+    "PT010", "PT014", "PT020", "PT025", "PT026", "PT031",
+    "TC004", "TC005", "TC007", "TC010",
+    "TRY002", "TRY004", "TRY201", "TRY203", "TRY401",
+    "PLR0124", "PLR0133", "PLR0206", "PLR0402", "PLR1704", "PLR1708", "PLR1711", "PLR1716", "PLR1722", "PLR1730",
+    "PLR1733", "PLR1736", "PLR2044",
+]
+ignore = [
+    "ASYNC109",  # a timeout argument is httpx's own, or a limit in the fake engine or a test helper, not a cancel scope
+    "ASYNC110",  # the dev launcher polls a service status that has no event to wait on
+    "PLW2901",   # the configuration loader replaces a loop variable with its checked value on purpose
+]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true

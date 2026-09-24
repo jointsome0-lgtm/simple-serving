@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import logging
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,16 @@ from simple_serving.policy import cache_salt, find_key, resolve
 from simple_serving.stream import Translator, Usage
 from simple_serving.validation import check_chat, check_drain, check_open, parse_json
 
-from .support import ALIAS, BOT, CONTROL, OUTSIDE_A, OUTSIDE_B, SERVICE, chat_body, service_with
+from .support import (
+    ALIAS,
+    BOT,
+    CONTROL,
+    OUTSIDE_A,
+    OUTSIDE_B,
+    SERVICE,
+    chat_body,
+    service_with,
+)
 
 MARKER = "Mk7c0ffee"
 
@@ -139,7 +149,7 @@ def test_classes_and_scopes() -> None:
     assert code_of(lambda: resolve(keys["control"], None, None)) == "class_not_allowed"
     assert code_of(lambda: resolve(outside, None, "reader.r1aaaaaa")) == "scope_not_allowed"
     for scope in ("reader.short", "reader." + "a" * 65, "reader.r1aa aaaa", "reader.r1aaaaa!", "external", "x"):
-        assert code_of(lambda: resolve(bot, "internal", scope)) == "invalid_request", scope
+        assert code_of(partial(resolve, bot, "internal", scope)) == "invalid_request", scope
     assert code_of(lambda: resolve(bot, "reader", None)) == "invalid_request"
     assert code_of(lambda: resolve(bot, "reader", "internal")) == "invalid_request"
 

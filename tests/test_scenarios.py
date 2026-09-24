@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from functools import partial
 from typing import Any
 
 import httpx
@@ -13,9 +14,31 @@ import pytest
 
 from simple_serving.fake_engine import Script
 
-from .support import (BOT, CLASS, OUTSIDE_A, OUTSIDE_B, Answer, RawClient, Stack, by_prompt, call, control, count,
-                      engine_call, eventually, generate, generate_call, reached, reader, record_abort_order, running,
-                      service_with, streaming, until, user_body)
+from .support import (
+    BOT,
+    CLASS,
+    OUTSIDE_A,
+    OUTSIDE_B,
+    Answer,
+    RawClient,
+    Stack,
+    by_prompt,
+    call,
+    control,
+    count,
+    engine_call,
+    eventually,
+    generate,
+    generate_call,
+    reached,
+    reader,
+    record_abort_order,
+    running,
+    service_with,
+    streaming,
+    until,
+    user_body,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -52,6 +75,10 @@ def active(stack: Stack) -> dict[str, int]:
 
 def waiting(stack: Stack) -> dict[str, int]:
     return stack.service.admission.waiting_counts()
+
+
+def waiting_is(stack: Stack, cls: str, number: int) -> bool:
+    return waiting(stack)[cls] == number
 
 
 async def settled(stack: Stack) -> None:
@@ -130,7 +157,7 @@ async def test_queue_full_for_a_class() -> None:
         await reached(stack, "a1")
         for number, text in enumerate(("a2", "a3"), 1):  # the agent class waits for two
             held.append(start(generate(client, stack, user_body(text), headers=AGENT)))
-            await until(lambda: waiting(stack)["agent"] == number)
+            await until(partial(waiting_is, stack, "agent", number))
 
         refused = await generate(client, stack, user_body("a4"), headers=AGENT)
         assert (refused.status, refused.json()) == (429, {"error": {"code": "queue_full"}})
@@ -148,7 +175,7 @@ async def test_queue_full_for_one_outside_key() -> None:
         await reached(stack, "o1")
         for number, text in enumerate(("o2", "o3"), 1):  # one outside key: one active, two waiting
             held.append(start(generate(client, stack, user_body(text), key=OUTSIDE_A)))
-            await until(lambda: waiting(stack)["external"] == number)
+            await until(partial(waiting_is, stack, "external", number))
 
         refused = await generate(client, stack, user_body("o4"), key=OUTSIDE_A)
         assert (refused.status, refused.json()) == (429, {"error": {"code": "queue_full"}})
@@ -355,7 +382,7 @@ async def test_a_drain_racing_a_burst_leaves_no_request_without_an_answer() -> N
     for seed in range(3):
         rng = random.Random(seed)
         async with running(block) as stack, httpx.AsyncClient(timeout=10) as client:
-            stack.fake.script = lambda body: Script(delay_s=rng.choice((0.0, 0.02, 0.05)))
+            stack.fake.script = lambda body, rng=rng: Script(delay_s=rng.choice((0.0, 0.02, 0.05)))
             boot = (await control(client, stack, "/v1/state", method="GET")).json()["boot_id"]
             burst = [start(generate(client, stack, user_body(f"burst {n}"), **rng.choice(options)))
                      for n in range(16)]
