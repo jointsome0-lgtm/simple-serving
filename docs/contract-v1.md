@@ -238,14 +238,19 @@ so the service cannot wake itself.
 
 1. The bot stops starting new turns and waits until its running turns end. It does not pause while work of `reader`,
    `agent` or `internal` runs or waits. Outside requests never keep the card awake. Only the guard's deadline stops
-   the card while our work goes on.
+   the card while our work goes on. What counts as running work differs by class. A reader's job and an agent's turn
+   hold the card from start to end, gaps between their requests included. Eval and probes hold it per request, from
+   the moment the bot's scheduler accepts the request to its end. A whole eval run is not a turn: between two of its
+   requests only the idle interval keeps the card up.
 2. The bot calls `POST /v1/control/drain` with `{"boot_id": "<from /v1/state>"}`. The gateway increments
    `drain_generation` and answers 202 with `{"status": ..., "boot_id": ..., "drain_generation": n}`. The status is
    `drained` when nothing was active or waiting, because the drain then completes before the answer, and `draining`
-   otherwise. From then
-   on every new generation or count gets 503 `draining`. `/v1/state` and the control routes stay available.
+   otherwise. From then on every new generation or count gets 503 with the current status as its code, `draining`
+   or `drained`. `/v1/state` and the control routes stay available.
 3. The gateway removes waiting requests of every class and answers them 503 `draining`. It cancels active outside
    requests at once. Active requests of our classes finish. Any of them still running after 60 seconds is cancelled.
+   A cancelled request that has not started its stream yet, because the engine is still reading its prompt, gets
+   503 `draining`. One whose stream has started ends with the error event `draining`.
 4. The bot polls `/v1/state` until it reads `drained`, with nothing active and nothing waiting. `drained` means the
    gateway has no work left. It does not confirm that the GPU is idle: an aborted request may compute a moment longer
    inside the engine (section 9), and stopping the instance ends that too.
