@@ -19,7 +19,8 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -247,7 +248,7 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
         json.dumps({"event": "request", "code": [SECRET]}).encode(),  # a value that is not a scalar
         b"[" * 5000,
         b'{"event": "\xff"}',
-        b"",  # as read() hands on a line that was too long
+        b"",  # a blank line
     ]
     for line in lines:
         pair.gateway_line(line + b"\n")
@@ -255,6 +256,16 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
     assert len(rows(logged, "gateway_output")) == len(lines) - 2
     assert pair.ready.is_set() and not pair.asleep and card.marked(state) == card.STOP_UNCONFIRMED
     assert SECRET not in logged.getvalue()
+
+
+@pytest.mark.anyio
+async def test_of_a_line_over_line_bytes_only_the_head_is_read() -> None:
+    output = asyncio.StreamReader(limit=card.LINE_BYTES)
+    output.feed_data(b"x" * 3 * card.LINE_BYTES + b"CUDA error\nshort\nlast")
+    output.feed_eof()
+    lines: list[bytes] = []
+    await card.read(cast(Any, SimpleNamespace(stdout=output)), lines.append)  # a process, as far as read() needs one
+    assert lines == [b"x" * card.LINE_BYTES, b"short\n", b"last"]
 
 
 def test_a_log_file_moves_aside_before_it_grows_past_its_size(tmp_path: Path) -> None:

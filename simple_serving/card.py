@@ -61,7 +61,7 @@ STAMPED = ("manifest.env", "gateway-requirements.txt", "vllm-requirements.txt") 
 NOT_PREPARED, GAVE_UP, PORT_TAKEN, STOP_UNCONFIRMED = 3, 6, 7, 8
 GIVEN_UP, UNCONFIRMED = "given-up", "stop-unconfirmed"  # the card's markers
 HOLDING = "simple-serving card: holding"  # the first line of --hold
-LINE_BYTES = 8192  # a longer line of output is read in pieces and never kept
+LINE_BYTES = 8192  # a longer line of output reaches the filter cut to this length
 CARD_LOG_BYTES, GATEWAY_LOG_BYTES = 1 << 20, 8 << 20
 GATEWAY_GRACE_S, ENGINE_GRACE_S = 10, 30  # from SIGTERM to SIGKILL
 POLL_S, HOLD_START_S, STOP_WAIT_S = 2, 60, 60
@@ -423,18 +423,22 @@ async def spawn(command: Command) -> asyncio.subprocess.Process:
 
 
 async def read(process: asyncio.subprocess.Process, handle: Callable[[bytes], None]) -> None:
-    """Read a process's output to its end. A line over LINE_BYTES reaches `handle` as an empty line, and a part of it
-    that had not arrived yet may come as a line of its own."""
+    """Read a process's output to its end, a line at a time. Of a line over LINE_BYTES, `handle` gets the first
+    LINE_BYTES, and the rest is dropped."""
     assert process.stdout is not None
+    starts = True  # whether the next piece read starts a line
     while True:
         try:
-            line = await process.stdout.readline()
-        except ValueError:  # the stream has dropped the part it held
-            handle(b"")
-            continue
-        if not line:
+            piece = await process.stdout.readuntil(b"\n")
+        except asyncio.IncompleteReadError as error:  # the last line, without its newline, or nothing
+            piece = error.partial
+        except asyncio.LimitOverrunError as error:  # a part of a long line, as much as has arrived
+            piece = await process.stdout.read(error.consumed)
+        if not piece:
             return
-        handle(line)
+        if starts:
+            handle(piece[:LINE_BYTES])
+        starts = piece.endswith(b"\n")
 
 
 async def end(process: asyncio.subprocess.Process, grace_s: float) -> None:
