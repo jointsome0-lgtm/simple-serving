@@ -19,12 +19,13 @@ state=${SIMPLE_SERVING_CARD_DIR:-/workspace/simple-serving-card}
 source "$code/card/manifest.env"
 stamped=("$code/card/manifest.env" "$code/card/gateway-requirements.txt" "$code/card/vllm-requirements.txt")
 
-for pin in VLLM_VERSION MODEL_SHA256 TOKENIZER_REPO TOKENIZER_REVISION TOKENIZER_FILES; do
+for pin in VLLM_VERSION MODEL_REPO MODEL_REVISION MODEL_FILES TOKENIZER_REPO TOKENIZER_REVISION TOKENIZER_FILES; do
   [[ -n ${!pin} ]] || exit 3
 done
 for file in "${stamped[@]}"; do [[ -s $file ]] || exit 3; done
 grep -Fq "vllm==$VLLM_VERSION " "$code/card/vllm-requirements.txt" || exit 3
-mkdir -p "$state/models" "$state/tokenizer"
+model=$state/models/$MODEL_REVISION
+mkdir -p "$model" "$state/tokenizer"
 
 read -r client || true
 read -r control || true
@@ -43,17 +44,23 @@ for venv in gateway vllm; do
     -r "$code/card/$venv-requirements.txt"
 done
 
-# fetch <repo> <revision> <file> <sha256> <path>: a file of the Hugging Face hub, kept only with its hash.
+# fetch <repo> <revision> <files> <directory>: each name:sha256 of the comma-separated files, from the Hugging Face
+# hub, kept only with its hash.
 fetch() {
-  [[ $(sha256sum 2>/dev/null < "$5") == "$4  -" ]] && return
-  curl --fail --location --silent --show-error --continue-at - --output "$5" "https://huggingface.co/$1/resolve/$2/$3"
-  [[ $(sha256sum < "$5") == "$4  -" ]] || { rm -f "$5"; exit 1; }
+  local entries entry path
+  IFS=, read -ra entries <<< "$3"
+  for entry in "${entries[@]}"; do
+    path=$4/${entry%%:*}
+    [[ $(sha256sum 2>/dev/null < "$path") == "${entry#*:}  -" ]] && continue
+    curl --fail --location --silent --show-error --retry 5 --retry-all-errors --continue-at - --output "$path" \
+      "https://huggingface.co/$1/resolve/$2/${entry%%:*}"
+    [[ $(sha256sum < "$path") == "${entry#*:}  -" ]] || { rm -f "$path"; exit 1; }
+  done
 }
-fetch "$MODEL_REPO" "$MODEL_REVISION" "$MODEL_FILE" "$MODEL_SHA256" "$state/models/$MODEL_FILE"
-IFS=, read -ra files <<< "$TOKENIZER_FILES"
-for entry in "${files[@]}"; do
-  fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "${entry%%:*}" "${entry#*:}" "$state/tokenizer/${entry%%:*}"
-done
+# vLLM loads every *.safetensors in the model's directory, so it keeps the pinned files alone.
+for path in "$model"/*; do [[ ,$MODEL_FILES == *,"${path##*/}":* ]] || rm -f "$path"; done
+fetch "$MODEL_REPO" "$MODEL_REVISION" "$MODEL_FILES" "$model"
+fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "$TOKENIZER_FILES" "$state/tokenizer"
 
 cat "${stamped[@]}" | sha256sum | cut -d ' ' -f 1 > "$state/prepared"
 exec bash "$code/card/onstart.sh"

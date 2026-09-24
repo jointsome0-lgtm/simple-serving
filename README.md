@@ -166,8 +166,8 @@ The preparation, once per rental and never at a resume:
 
 bootstrap.sh installs each lock into a venv of its own with every hash checked, fetches the weights and the tokenizer
 files at their pinned revisions and checks their hashes, keeps the key hashes in `keys.json`, and starts the
-service. It refuses while a pin is empty, as `VLLM_VERSION` is until the pin is chosen, and it never replaces the keys
-the card holds.
+service. It refuses while a pin or a lock is missing, as vLLM's lock is until it is made with the pin, and it never
+replaces the keys the card holds.
 
 At every later start of the container the rental's own onstart starts the service. Its last line runs the service's
 `onstart.sh` from the persistent disk, once the preparation has put it there:

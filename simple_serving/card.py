@@ -117,7 +117,7 @@ class Card:
     def engine(self) -> Command:
         m = self.manifest
         return Command([
-            str(self.state / "vllm/bin/vllm"), "serve", str(self.state / "models" / m["MODEL_FILE"]),
+            str(self.state / "vllm/bin/vllm"), "serve", str(self.state / "models" / m["MODEL_REVISION"]),
             "--served-model-name", m["MODEL_ALIAS"], "--host", "127.0.0.1", "--port", m["ENGINE_PORT"],
             "--tokenizer", str(self.state / "tokenizer"), "--max-model-len", m["CONTEXT_TOKENS"],
             "--max-num-seqs", m["MAX_NUM_SEQS"], "--max-num-batched-tokens", m["MAX_NUM_BATCHED_TOKENS"],
@@ -125,7 +125,7 @@ class Card:
             "--scheduling-policy", "priority", "--enable-prefix-caching", "--enable-prompt-tokens-details",
             "--reasoning-parser", "gemma4",  # the model's thinking in the reasoning field, apart from the answer
             "--language-model-only",  # text only: the vision tower stays off the GPU
-            # Sampling defaults from vLLM, not from a generation_config.json that nobody pinned on purpose.
+            # Sampling defaults from vLLM: the model's generation_config.json is pinned for its stop ids alone.
             "--generation-config", "vllm",
             "--disable-uvicorn-access-log", "--uvicorn-log-level", "warning",
         ], {name: value for name, value in os.environ.items() if name != "CONTAINER_API_KEY"} | ENGINE_ENV)
@@ -150,7 +150,7 @@ class Card:
                 {"sha256": keys["control"], "label": "control", "classes": [], "default": None, "scopes": False,
                  "control": True},
             ],
-            "versions": {"vllm": m["VLLM_VERSION"], "model_sha256": m["MODEL_SHA256"],
+            "versions": {"vllm": m["VLLM_VERSION"], "model_revision": m["MODEL_REVISION"],
                          "tokenizer_revision": m["TOKENIZER_REVISION"]},
         }
 

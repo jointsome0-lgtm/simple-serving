@@ -482,9 +482,9 @@ These are the gateway's own numbers, not llama.cpp's timings. The engine's queue
 ## 12. Pinned versions, configuration and keys
 
 Before any contract run on the card, this repository pins:
-- vLLM and its GGUF plugin, in a lock with hashes;
+- vLLM, in a lock with hashes;
 - FastAPI, Starlette, the ASGI server and the rest of the gateway, in `uv.lock`;
-- the model file, with its hash;
+- the model's files at one revision, each with its hash;
 - the revision of the tokenizer and the chat template.
 
 `card/manifest.env` holds the card's pins and parameters. The card's preparation installs each lock into a venv of its

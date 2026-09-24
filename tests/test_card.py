@@ -120,7 +120,7 @@ async def test_a_signal_ends_the_pair_and_leaves_the_instance_running(state: Pat
     assert (state / "logs/gateway.jsonl").read_text() == READY + "\n"
     engine, gateway = ran(state / ENGINE), ran(state / GATEWAY)
     argv = engine["argv"]
-    assert argv[:2] == ["serve", str(state / "models" / card_at(state).manifest["MODEL_FILE"])]
+    assert argv[:2] == ["serve", str(state / "models" / card_at(state).manifest["MODEL_REVISION"])]
     assert (argv[argv.index("--host") + 1], argv[argv.index("--port") + 1]) == ("127.0.0.1", "8092")
     assert argv[argv.index("--scheduling-policy") + 1] == "priority"
     assert argv[argv.index("--reasoning-parser") + 1] == "gemma4" and "--language-model-only" in argv
@@ -453,9 +453,10 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     for name in ("gateway", "vllm"):
         (code / f"card/{name}-requirements.txt").write_text(f"{name}==0.0.1 \\\n    --hash=sha256:{'0' * 64}\n")
     weights, tokenizer = b"synthetic weights", b'{"synthetic": true}'
-    model_file = Card.load(code=code, state=state, environ={}, root=root).manifest["MODEL_FILE"]
-    (state / "models").mkdir(parents=True)
-    (state / "models" / model_file).write_bytes(weights)  # in place, so nothing is fetched
+    model = state / "models" / Card.load(code=code, state=state, environ={}, root=root).manifest["MODEL_REVISION"]
+    model.mkdir(parents=True)
+    for name in ("model.safetensors", "other.safetensors"):  # the pinned one in place, so nothing is fetched
+        (model / name).write_bytes(weights)
     (state / "tokenizer").mkdir()
     (state / "tokenizer/tokenizer.json").write_bytes(tokenizer)
     for path in (state / "gateway/bin/pip", state / "vllm/bin/pip", state / GATEWAY, tmp_path / "bin/curl",
@@ -469,17 +470,17 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
         return done.returncode
 
     keys = f"{CLIENT}\n{CONTROL}\n"
-    assert bootstrap(keys) == 3  # the pins are empty
+    assert bootstrap(keys) == 3  # the lock is not the pinned vLLM's
     assert not (state / "keys.json").exists()
     for older, text in ((state / "keys.json", json.dumps({"client": CLIENT, "control": CONTROL})),
                         (root / ".simple-chat-instance-api-key", "synthetic-older-key")):
         older.write_text(text + "\n")  # left wide, as by another hand
         older.chmod(0o644)
-    pins = {"VLLM_VERSION": "0.0.1", "MODEL_SHA256": hashlib.sha256(weights).hexdigest(),
-            "TOKENIZER_REPO": "synthetic/tokenizer", "TOKENIZER_REVISION": "0" * 40,
+    pins = {"VLLM_VERSION": "0.0.1", "MODEL_FILES": f"model.safetensors:{hashlib.sha256(weights).hexdigest()}",
             "TOKENIZER_FILES": f"tokenizer.json:{hashlib.sha256(tokenizer).hexdigest()}"}
     (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in pins.items()))
     assert bootstrap(keys) == 0
+    assert [path.name for path in model.iterdir()] == ["model.safetensors"]  # vLLM would load any other
     written = [state / "keys.json", state / "prepared", *root.glob(".simple-chat-*")]
     first = {path: (path.read_bytes(), path.stat().st_mode & 0o777) for path in written}
     assert bootstrap(keys) == 0

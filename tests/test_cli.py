@@ -210,7 +210,7 @@ def test_the_configuration_names_the_instance_its_key_and_the_host(tmp_path: Pat
             cli.load(path)
     path.write_text(json.dumps(config))
     setup = cli.load(path)
-    assert (setup.alias, setup.card_ports) == ("gemma-4-31b-heretic-q6k", {"public": 8090, "control": 8091})
+    assert (setup.alias, setup.card_ports) == ("gemma-4-31b-heretic-nvfp4", {"public": 8090, "control": 8091})
     assert "synthetic-vast-key" not in repr(setup)
 
 
