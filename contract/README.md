@@ -11,8 +11,9 @@ tests and the bot's TypeScript tests read the same file.
 - A client's tests start a fake gateway that answers each step with `response`. They call the client and compare what
   it returns with `result`. Where the response holds a placeholder, the fake sends a concrete value: any string for
   `"present"`, a valid object for `"measurements"`. A client skips two kinds of steps and no others: steps marked
-  `"only": "gateway"`, and steps on a listener it has no calls for (the bot today has none for `base: control`). Its
-  tests count the skipped steps and assert the count, so that nothing is skipped by accident.
+  `"only": "gateway"`, and steps on a listener it has no calls for. The bot has none for `base: control`: the control
+  routes are for simple-serving's own command (contract section 8). A client's tests count the skipped steps and
+  assert the count, so that nothing is skipped by accident.
 - A static case cannot describe timing. `scenarios` lists what each implementation tests on its own (contract
   section 14).
 
@@ -26,6 +27,7 @@ tests and the bot's TypeScript tests read the same file.
   own).
 - `count_limits`: counts at once, and counts at once for one outside key.
 - `engine_priority` (lower goes first, as in vLLM), `drain_deadline_s`.
+- `idle_timeout_s` is left out, so its default of 780 seconds applies; no static case lasts that long.
 
 The values are small so that tests reach them. They are not the provisional values of section 7.
 

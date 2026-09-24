@@ -5,15 +5,22 @@ the shared cases in front of a fake engine; nothing has run in front of vLLM yet
 `local/serving.ts` in simple-story-chat; section 13 is written from its `local/llama.ts` and `local/scheduler.ts` at
 commit 80fd241.
 
+Version 2 changes who stops the card (section 8). In version 1 the bot stopped it, and a reader's or an agent's turn
+held it between calls. In version 2 the service stops its own card after 13 minutes without work of ours, only
+requests hold it, and simple-serving's own command starts it. A client of version 1 counts on both things that went,
+so the number changes.
+
 ## 1. Scope
 
 - One text model behind a gateway on one rented card. The gateway is FastAPI, run as one worker process in version 2,
-  because the drain state, the quotas and the boot identity live in its memory. The engine is vLLM.
+  because the drain state, the idle interval, the quotas and the boot identity live in its memory. The engine is
+  vLLM.
 - Clients reach only the gateway. The engine, its metrics and its own API listen on loopback.
 - Version 2 is streamed text chat. There are no tools, images, audio, logprobs, LoRA adapters, `n > 1` or answers
   without streaming.
-- The clients are simple-story-chat and outside keys. The bot sends readers' turns, agent turns and our eval and
-  probes, all through its own scheduler.
+- The clients call the API with a key: simple-story-chat for readers' turns, its agent interface, our eval and probes,
+  and outside keys. The story turn, its storage, the prompts and the reader's identity stay in simple-story-chat.
+  Admission, the idle interval and the stop of the card are the gateway's (sections 7 and 8).
 - The bot's research batches stay on llama.cpp. They ask one server for several samples of one prompt in a single call
   without streaming (`generateMany` in `local/llama.ts`, used by `local/memory-probe.ts --lab`).
 
@@ -33,7 +40,7 @@ Outside keys are issued by hand in version 2. There is no sign-up.
 | Class      | Who                                  | Order | Keeps the card awake |
 |------------|--------------------------------------|-------|----------------------|
 | `reader`   | a person's turn in the bot           | 1     | yes                  |
-| `agent`    | a turn of the bot's agent interface  | 2     | yes                  |
+| `agent`    | a call of the bot's agent interface  | 2     | yes                  |
 | `internal` | our eval and probes                  | 3     | yes                  |
 | `external` | outside keys                         | 4     | no                   |
 
@@ -73,12 +80,11 @@ agents, eval or outside keys. The price is that each reader's first turn reads t
 ### Turns
 
 The service knows single HTTP requests. A turn of the bot is several requests, such as compaction, repair and the
-scene, and between them nothing else of the bot runs on its lane. Readers' turns go through the bot's scheduler, which
-is the only controller of the card (section 8). Agent turns reach the model through the bot's socket
-(`local/background.ts`) and the same scheduler when the bot serves that socket, which it does with its GPU control;
-without the socket they call the service directly. `npm run memory:probe` needs the socket and fails without it.
-`npm run eval` and every probe run with `--direct` always call the service directly. A direct call carries no class of
-the scheduler, so it is `internal`, and the bot does not see it (section 8).
+scene, and between them nothing else of the bot runs on its lane. Each client calls the service directly and names
+its class: the bot's readers' turns `reader` with the reader's scope, the agent interface `agent`, eval and the probes
+`internal`. The agent interface does not go through the bot's model socket (`local/background.ts`) on this path, and
+`npm run memory:probe`, which needs that socket, does not run on it. A turn holds the card only while one of its
+requests runs (section 8).
 
 ## 3. Routes
 
@@ -88,15 +94,19 @@ the scheduler, so it is `internal`, and the bot does not see it (section 8).
 | `/v1/chat/completions/input_tokens`     | POST   | any              | public           |
 | `/v1/models`                            | GET    | any              | public           |
 | `/v1/state`                             | GET    | any              | public, control  |
-| `/v1/control/drain`, `/v1/control/open` | POST   | the control key  | control          |
+| `/v1/control/drain`                     | POST   | the control key  | control          |
+| `/v1/control/sleep`                     | POST   | the control key  | control          |
+| `/v1/control/open`                      | POST   | the control key  | control          |
 
-The gateway has two listeners. The public one is reached over HTTPS. The control one listens on loopback and is
-reached over the SSH tunnel. The gateway tells them apart by the listener, never by the client's address, because a
-TLS proxy on the card also connects from loopback. The gateway starts only when the control listener and the engine
-are on loopback IP addresses, 127.0.0.0/8 or ::1; a name, even `localhost`, is refused. On each listener any other
-path or method is 404 `not_found`, and so is a path with a trailing slash: the gateway does not redirect. A key
-without the control right gets 403 `forbidden` on a control route. A control body is at most 4096 bytes; a longer
-one is refused with 413 `body_too_large`.
+The gateway has two listeners, both on loopback on the card: public on 8090, control on 8091. Our clients reach them
+through one SSH tunnel that simple-serving's command holds (section 8), local port 8080 to the public listener and 8081
+to the control one. The control listener is for that command; the bot holds no control key. Outside keys will reach
+the public listener over HTTPS through a TLS proxy on the card, which also connects from loopback, so the gateway
+tells the listeners apart by the listener, never by the client's address. The gateway starts only when the control
+listener and the engine are on loopback IP addresses, 127.0.0.0/8 or ::1; a name, even `localhost`, is refused. On
+each listener any other path or method is 404 `not_found`, and so is a path with a trailing slash: the gateway does
+not redirect. A key without the control right gets 403 `forbidden` on a control route. A control body is at most 4096
+bytes; a longer one is refused with 413 `body_too_large`.
 
 When the public listener handles a request, the gateway counts the connections open on it. Past 64 (provisional, see
 section 7) it answers 429 `queue_full` and closes the connection. That is a check on each request, not a cap on TCP
@@ -135,8 +145,10 @@ a body whose objects and arrays nest more than 64 deep, counting the body itself
 The gateway checks, in this order: the route, the key, the service status, the class, the scope, the body (its size,
 then JSON, then the fields), `max_tokens` against the class limit. Then it accepts the request, checking the service
 status once more, since a drain may have begun while the body was read. From acceptance on, the wall time and the
-measurements of section 11 run, and a drain sees the request as work (section 8). The body is read before
-acceptance, so the wall time does not bound that read: the TLS proxy's own timeout and body limit do (section 3).
+measurements of section 11 run, and a drain sees the request as work (section 8). Before acceptance a fixed bound
+applies instead, 30 seconds from the request's arrival, and it is not a setting: a body that has not all arrived by
+then is refused with 504 `timeout`, and a refusal that its client does not take by then is given up with the
+connection.
 
 An accepted generation passes two stages:
 1. The count stage: the request waits for a count place and the engine counts the input, under the count limits of
@@ -220,8 +232,9 @@ sets one. `/v1/state` shows the same number.
 
 - The gateway reports `starting` until it has verified the engine: the engine answers, serves the alias and reports
   the context length. Then the status is `ready`.
-- The status is `draining` or `drained` during a stop (section 8), and `failed` if the engine stops answering or
-  changes after it was ready. While a drain is on, the status is `draining` or `drained` whatever the engine does.
+- The status is `draining` or `drained` during a drain or a sleep (section 8), and `failed` if the engine stops
+  answering or changes after it was ready. While a drain is on, the status is `draining` or `drained` whatever the
+  engine does.
 - The gateway checks the engine every 5 seconds. A check that fails makes a `ready` service `failed`: new requests are
   refused, and the requests already accepted go on within their wall time, since the engine may only be busy. An
   error from the engine still ends its own request at once. The next check that passes makes the service `ready`
@@ -234,10 +247,10 @@ sets one. `/v1/state` shows the same number.
   engine anew.
 - In any status except `ready`, the inference routes answer 503. The code is the status itself, except `failed`,
   which answers `engine_unavailable`.
-- For the control key the answer also holds `active` and `waiting`, counted by class, and the pinned versions of
-  section 12. Both cover generation admission only (section 7): a count, and a generation still in its count stage,
-  are in neither. A controller that stops the card waits for the status `drained` (section 8), not for zero
-  counters.
+- For the control key the answer also holds `sleep_requested`, true once a sleep has begun (section 8); `active` and
+  `waiting`, counted by class; and the pinned versions of section 12. `active` and `waiting` cover generation
+  admission only (section 7): a count, and a generation still in its count stage, are in neither. Whether the card
+  may stop is the gateway's own decision (section 8), never a client's reading of these counters.
 - `/v1/state` and the control routes answer in every status.
 
 ## 7. Limits
@@ -275,64 +288,111 @@ Provisional values, used until the first measurement on the card:
 - A limit on requests per minute alone would not protect readers: one long prompt costs more than many short ones.
 - The measured values follow one rule: the engine holds the readers' places and the shared places at once.
 
-## 8. Stopping the card
+## 8. Sleep, stop and start
 
-One controller stops the card: the bot's GPU control, `local/gpu.ts` in simple-story-chat. A paused card runs nothing,
-so the service cannot wake itself.
+The service decides when its card stops: after 13 minutes without work of ours, or at once when simple-serving's
+command asks it to sleep. The same command starts the card again. A stopped card runs nothing and nothing wakes it by
+itself; a client that finds it asleep gets connection errors, or 503 while it falls asleep.
 
-1. The bot stops starting new turns and waits until its running turns end. It does not pause while work of `reader`,
-   `agent` or `internal` runs or waits. Outside requests never keep the card awake. Only the guard's deadline stops
-   the card while our work goes on. What counts as running work differs by class. A reader's job and an agent's turn
-   hold the card from start to end, gaps between their requests included. A probe through the bot's socket holds it
-   per request, from the moment the bot's scheduler accepts the request until the request has ended locally. The
-   scheduler cancels a probe request that has waited 10 minutes or run 90 seconds by its next tick, and the hold ends
-   once the cancelled request has ended locally. A whole probe run is not a turn: between two of its requests only
-   the idle interval keeps the card up. The bot does not see work that calls the service directly (section 2), such
-   as `npm run eval`, so in version 1 that work holds nothing, and the auto-pause can stop the card under it. The
-   plan to close that gap is at the end of this section.
-2. The bot calls `POST /v1/control/drain` with `{"boot_id": "<from /v1/state>"}`. The gateway increments
-   `drain_generation` and answers 202 with `{"status": ..., "boot_id": ..., "drain_generation": n}`. The status is
-   `drained` when the gateway had no accepted work, counts included, because the drain then completes before the
-   answer, and `draining` otherwise. From then on every new generation or count gets 503 with the current status as
-   its code, `draining` or `drained`. `/v1/state` and the control routes stay available.
-3. The gateway removes waiting requests of every class and answers them 503 `draining`. That includes a generation
+### What holds the card
+
+- A request of class `reader`, `agent` or `internal` holds the card from the moment its key, class and scope have
+  passed their checks, before its body is read, until it has ended, whether it was accepted, refused or cancelled.
+- Nothing else holds it: not outside requests, `/v1/models`, `/v1/state`, the control routes, the engine's health
+  checks, a request refused before its class is known, or an open tunnel. Nor does a turn between its calls, or a job
+  that waits in a client and has not reached the service.
+- `idle_timeout_s` is 780 seconds by default. The interval starts when the service is first `ready` in its boot, and
+  runs again in full from the end of the last request of ours. While a request of ours runs, the service does not
+  fall asleep.
+- So a turn whose calls are more than 13 minutes apart may find the card asleep. A client or a tunnel that goes away
+  never stops the card: only the interval and the command's sleep do.
+- The interval lives in the gateway's memory. A new boot starts a new one at its first `ready`. A load that never
+  becomes `ready` is bounded by the card's load deadline instead (below).
+
+### Falling asleep
+
+When the interval has run out, the gateway checks in one step, with nothing else running in between, that no request
+of ours is in flight and that the interval has really run out. In the same step it sets `sleep_requested` and begins a
+drain. A request that arrived before that step holds the card; one that arrives after it gets 503 `draining` or
+`drained`, and the sleep goes on.
+
+`POST /v1/control/sleep` with `{"boot_id": "<from /v1/state>"}` does the same at once, whatever the interval. It
+answers 202 with `{"status": ..., "boot_id": ..., "drain_generation": n}`. A repeated sleep answers the current state
+and starts nothing new, so a client that lost the answer asks again. A sleep for another boot answers 409 `stale_boot`
+and changes nothing.
+
+The drain of a sleep is the drain below. When a drain is already on, the sleep goes on with it and the generation
+stays. Once the drain has ended, status `drained`, the gateway stops its instance. Nothing undoes a sleep: an open
+answers 409 `sleep_pending`, because a stop already on its way would take down a service that had opened again.
+
+If the drain has not ended 120 seconds after the sleep began, the gateway stops the instance all the same. This is
+the one case where the card stops under unfinished work of ours, an exception to the rule that our work finishes. It
+happens only with a drain deadline above 120 seconds, or with a request that fails to end when the drain cancels it.
+An idle sleep has no work of ours when it begins.
+
+### The stop
+
+- The gateway stops the instance it runs on with the credential Vast gives the container, `CONTAINER_API_KEY`, never
+  the owner's account key: `PUT {"state": "stopped"}` for its own instance, `CONTAINER_ID`, to one fixed HTTPS
+  endpoint, with the key in a header. The stop is accepted when Vast answers 2xx with `"success": true`.
+- One attempt runs at a time, each for at most 20 seconds, and after a failure the next comes 30 seconds later, until
+  Vast accepts one. A timeout, a network error, a 5xx, a 401 or 403 and an answer without success are all failures,
+  which the log tells apart by a fixed category and the HTTP status, never by Vast's text. Stopping an instance that
+  already stops changes nothing, so a repeated attempt does no harm.
+- Stop, not delete: the disk with the weights stays, and Vast bills for it while the card is stopped.
+- The gateway cannot see its own stop complete, since the stop ends it. Until then its status stays `drained`,
+  admission stays closed, and it never reports `ready`. The command reads the stopped state back from Vast.
+
+### The command
+
+simple-serving's command on the owner's machine starts the card, holds the tunnel and asks for sleep. It uses the
+owner's restricted Vast key (section 12) and never the card's.
+
+- `up` reads the instance's state in Vast. It waits for a stop in flight to end rather than start against it, resumes
+  the instance once if it is stopped, and waits for it to run and for SSH. It opens the tunnel, checks the gateway's
+  identity, contract and model, waits for `ready`, and holds the tunnel in the foreground. It never starts a service
+  over SSH; the card starts its own (below). Ctrl+C closes the tunnel and sends nothing, so the card stays up until
+  its interval runs out.
+- `sleep` sends `POST /v1/control/sleep` through the tunnel, or through a short control-only forward when no tunnel
+  is open, and then reads `stopped` back from Vast. Without the gateway it does not stop the instance directly, since
+  that would skip the drain.
+- `status` tells the instance's state in Vast apart from whether the gateway answers.
+
+### Starting the card
+
+- The container's onstart runs the card's launcher at every start of the instance. The launcher runs one pair, vLLM
+  and the gateway, under a lock and with no restarts. Each start is a new boot.
+- A load that is not `ready` by the load deadline of the card's manifest, or a process of the pair that exits, ends
+  the pair. The launcher then stops the instance with the same call as the gateway and leaves a marker, and the card
+  does not start the service again until the owner retries by hand. A load never stays `starting` without end.
+- The guard on the card deletes the instance at the rental's deadline, whatever the service and the command do. Every
+  start of the container arms it before the service and apart from it, and never moves its deadline.
+
+### Drain and open
+
+A sleep drains through the same steps. On their own, drain and open are for technical checks.
+
+1. `POST /v1/control/drain` with `{"boot_id": "<from /v1/state>"}`. The gateway increments `drain_generation` and
+   answers 202 with `{"status": ..., "boot_id": ..., "drain_generation": n}`. The status is `drained` when the gateway
+   had no accepted work, counts included, because the drain then completes before the answer, and `draining`
+   otherwise. From then on every new generation or count gets 503 with the current status as its code, `draining` or
+   `drained`. `/v1/state` and the control routes stay available.
+2. The gateway removes waiting requests of every class and answers them 503 `draining`. That includes a generation
    still in its count stage and a count that waits for a count place. It cancels active outside requests at once.
    Active requests of our classes finish, a count the engine is computing included. Any of them still running after
    60 seconds is cancelled. A cancelled request that has not started its stream yet, because the engine is still
    reading its prompt, gets 503 `draining`. One whose stream has started ends with the error event `draining`.
-4. The bot polls `/v1/state` until it reads `drained`. `drained` means the gateway has no accepted work left, counts
-   included; the counters `active` and `waiting` do not show counts (section 6). It does not confirm that the GPU is
-   idle: an aborted request may compute a moment longer inside the engine (section 9), and stopping the instance
-   ends that too.
-5. The bot stops the instance through the Vast API and reads the status back.
+3. `drained` means the gateway has no accepted work left, counts included; the counters `active` and `waiting` do not
+   show counts (section 6). It does not confirm that the GPU is idle: an aborted request may compute a moment longer
+   inside the engine (section 9), and stopping the instance ends that too.
 
 - A second drain with the same `boot_id` answers the current state and does not increment the generation.
 - `POST /v1/control/open` with `{"boot_id": ..., "drain_generation": n}` undoes only that drain and answers 200 with
   the state. With another generation it answers 409 `stale_generation`, so a late open cannot undo a newer drain. An
   open during `draining` also stops the 60-second deadline. An open while no drain is on, with the current
-  generation, changes nothing.
+  generation, changes nothing. Once a sleep has begun, an open answers 409 `sleep_pending`.
 - A control call with a `boot_id` other than the current one answers 409 `stale_boot`. A restarted service is a new
-  boot, and the controller reads `/v1/state` again.
-- The check "nothing runs" followed by a stop is not enough, because a request can arrive between the two. The drain
-  closes that gap.
-- The guard on the card deletes the instance at the rental's deadline, whatever the bot and the service do. Clients
-  then see connection errors.
-
-Not in version 1 yet, the plan for work the bot does not see:
-
-- Polling `active` and `waiting` is not enough. They leave out counts, so the card could sleep under a long count.
-  A short request can start and end between two reads, so a sequential eval could look idle every time. And zero
-  counters between an agent's calls do not mean its turn has ended.
-- For the control key, `/v1/state` would report our accepted, unfinished work per class, counts included. It would
-  also report a counter that grows at every change in our activity within the boot. Outside work counts in neither.
-- The controller holds the card while that work is above zero. It starts the idle interval again when the counter
-  has moved between two reads, and forgets both after a boot change. The bot's own holds for readers' jobs and agent
-  turns stay.
-- An idle drain carries the counter the controller last read. The gateway refuses it with 409 if our activity has
-  changed since. Without that, work that arrives between the check and the drain would wait and be cancelled by
-  step 3. A manual drain has no such condition.
-- Tests, none of which needs a card: a long count, short calls between two reads, an agent turn between its calls,
-  an outside stream with none of our work, and work that arrives between the idle check and the drain.
+  boot, and the command reads `/v1/state` again.
 
 ## 9. Errors and cancellation
 
@@ -349,12 +409,12 @@ body. FastAPI's default validation answer echoes the input, so it is replaced.
 | 403    | `class_not_allowed`, `scope_not_allowed`          | the key may not use the class or the scope   |
 | 403    | `forbidden`                                       | a key without the control right on a control route |
 | 404    | `not_found`                                       | a path or method outside section 3           |
-| 409    | `stale_boot`, `stale_generation`                  | control calls, section 8                     |
+| 409    | `stale_boot`, `stale_generation`, `sleep_pending` | control calls, section 8                     |
 | 413    | `body_too_large`                                  | a body over 2 000 000 bytes, a control body over 4096 bytes |
 | 429    | `queue_full`                                      | a cap of section 3, 5 or 7                   |
 | 500    | `internal_error`                                  | an error in the gateway itself               |
 | 503    | `starting`, `draining`, `drained`, `engine_unavailable` | the service is not serving             |
-| 504    | `timeout`                                         | the wall time ran out before the stream started |
+| 504    | `timeout`                                         | the wall time ran out before the stream started, or the body did not arrive within 30 seconds (section 4) |
 
 After the stream has started, the same codes arrive as the error event of section 4.
 
@@ -382,6 +442,9 @@ Cancellation:
 - No log, trace, error report or metric label holds a request or response body. That means no messages, no system
   prompt, no output and no schema. The rule covers the gateway, the web server and the engine, and the engine's
   request logging stays off.
+- On the card nothing of vLLM's own output is kept. A bounded filter reads it to the end and keeps the exit code, a
+  fixed category of failure and a few numbers: load time, memory and KV cache capacity. The gateway's rows are
+  checked again on the way to their file. Request and access logging, core dumps and usage statistics are off.
 - A log row may hold the time, route, key label, class, scope kind (`reader`, `agent`, `internal` or `external`, never
   the opaque part), status, error code, token counts, the measurements of section 11, whether the request was
   cancelled, and the finish reason.
@@ -401,15 +464,24 @@ The gateway measures in whole milliseconds, counting from the moment it accepted
 These are the gateway's own numbers, not llama.cpp's timings. The engine's queue and preemption are inside
 `first_token_ms` and `total_ms`. The numbers arrive in `usage.simple_serving`.
 
-## 12. Pinned versions
+## 12. Pinned versions, configuration and keys
 
-Before any contract run on the card, a lock file in this repository pins:
-- vLLM and its GGUF plugin;
-- FastAPI, Starlette and the ASGI server;
+Before any contract run on the card, this repository pins:
+- vLLM and its GGUF plugin, in a lock with hashes;
+- FastAPI, Starlette, the ASGI server and the rest of the gateway, in `uv.lock`;
 - the model file, with its hash;
 - the revision of the tokenizer and the chat template.
 
-`/v1/state` shows them to the control key. A change to any of them makes a new configuration, which is measured again.
+`card/manifest.env` holds the card's pins and parameters. The card's preparation installs each lock into a venv of its
+own and checks every hash, once per rental and never at a resume. `/v1/state` shows the versions to the control key.
+A change to any of them makes a new configuration, which is measured again.
+
+Configuration and keys live in simple-serving. The owner's machine keeps one private configuration of the command,
+with the owner's restricted Vast key, allowed GET and PUT on the chosen instance only, and two gateway keys: a
+client key and a control key. The card gets only the SHA-256 of each, once, through the stdin of SSH during the
+preparation. The owner copies the client key and the address into the bot's model profile, so simple-story-chat holds
+neither a Vast key nor the control key. The bot, its agent interface, eval and the probes share the client key for
+now; their classes still differ (section 2).
 
 ## 13. What changes in simple-story-chat
 
@@ -437,18 +509,16 @@ Unchanged:
 - neighbouring messages of the same role are merged before sending.
 
 Also in simple-story-chat:
-- The service's address and key are configured apart from the rental control. Today `local/gpu-connection.ts` starts
-  `gpu/ensure-server.sh` on the card and forwards port 8080.
+- The service's address and client key are the whole model profile. The bot has no card control on this path: no
+  start or pause buttons, no drain and no stop. It starts while the service is down, and a request that finds the
+  service unavailable fails with `model_unavailable`.
+- The agent interface calls the service directly with class `agent` (section 2).
 - Over the new adapter the scheduler runs one lane, so the bot's calls stay one at a time. The guarantees built on
   slots are off. Work marked `sharesPrefix` no longer has a slot where its prefix is sure to be cached, and the engine
   may evict any prefix. This is a limitation of version 2. Several lanes without placement come later.
 - `usage.simple_serving` goes into new log fields, added to the whitelist in `local/model-error.ts` as non-negative
   integers. The adapter does not write these numbers into `promptMs` or `predictedMs`.
 - `generateMany` stays on llama.cpp (section 1).
-- The idle pause in `local/gpu.ts` counts readers' jobs, agent turns and probe requests through its queue as work that
-  keeps the card awake. Before, only readers' jobs held the countdown, and an agent turn delayed the pause while the
-  countdown ran on. Work that calls the service directly, such as `npm run eval`, waits for the plan at the end of
-  section 8.
 
 ## 14. Shared cases
 
@@ -462,8 +532,12 @@ Also in simple-story-chat:
 - The same cases run in two places: TypeScript tests of the adapter there, Python tests of the gateway here.
 - Cancellation, a dropped connection, a drain racing a new request and a late open are scenario tests in each
   implementation. A static case cannot describe them.
-- Before the first rental there is one run of the real adapter against the real gateway, in a real ASGI server, over
-  the fake engine.
+- Three kinds of test stay apart:
+  - the adapter's conformance to the public cases, in simple-story-chat;
+  - the control routes, the idle interval, the sleep, the stop and the command, in simple-serving alone, on a fake
+    clock, a fake Vast and a fake SSH;
+  - an opt-in test in simple-story-chat that runs the real adapter against the real gateway, in a real ASGI server,
+    over the fake engine, and records both commits.
 
 ## 15. The first rental
 
@@ -508,9 +582,13 @@ On the card:
    long outside prompt. The measured limits replace the provisional ones of section 7. Also the tail of an abort: how
    long the engine keeps computing a request after the gateway closed it, measured apart while the prompt is read and
    while the answer streams, through the proxy.
-5. `npm run eval` in simple-story-chat.
-6. Readers move to the service.
-7. Outside keys, as a separate step.
+5. The card's own lifecycle, with no bot running: the gateway stops the instance with the container's key, and the
+   command reads `stopped` back from Vast; the command resumes it; onstart starts exactly one pair with a new boot,
+   the pins, keys and weights still in place, and the guard's deadline unchanged. eval requests hold the service,
+   and once they end the service falls asleep on its own. The listeners stay on loopback, and no raw output is kept.
+6. `npm run eval` in simple-story-chat.
+7. Readers move to the service.
+8. Outside keys, as a separate step.
 
 AWQ and GPTQ are separate configurations, measured later. They free memory, but whether more requests then run at
 once has to be measured.
@@ -519,3 +597,6 @@ once has to be measured.
 
 - 2026-09-24, the owner: our `internal` work keeps the card awake until the rental's deadline, and outside keys
   are issued by hand only.
+- 2026-09-24, the owner: the service stops its own card after 13 minutes without work of ours, and stops rather
+  than deletes it. The bot keeps the story flow only; everything about the card and the model service lives in
+  simple-serving.
