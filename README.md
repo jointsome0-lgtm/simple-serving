@@ -39,6 +39,8 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
 - `tests/test_gateway.py`: the engine's health and context, what the engine receives, errors inside the gateway;
 - `tests/test_sleep.py`: what holds the service awake, the idle interval, the sleep and the stop of the instance, on
   a fake clock and a fake Vast;
+- `tests/test_card.py`: the card's launcher, what it keeps of vLLM's output, and the preparation and onstart scripts,
+  with stand-ins for vLLM, the gateway, pip, curl and flock;
 - `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher.
 
 Three kinds of test stay apart (contract section 14). A client's adapter runs the public steps of the cases in its own
@@ -142,3 +144,33 @@ comes with outside keys. The gateway refuses to start unless `listen.control.hos
 loopback IP addresses, in 127.0.0.0/8 or `::1`; a name, even `localhost`, is refused. vLLM listens on loopback with
 the served model name equal to `alias`, priority scheduling (`--scheduling-policy priority`), prefix caching,
 `--enable-prompt-tokens-details` for cached tokens, and its request logging off (contract section 10).
+
+## The card
+
+`card/` holds what runs on a rented card: `manifest.env` with the pins and parameters, `bootstrap.sh` for the
+preparation, and `onstart.sh`, which runs at every start of the container. The checkout goes to
+`/workspace/simple-serving`, and the card keeps its state in `/workspace/simple-serving-card`: the key hashes, the
+weights, the two venvs and the logs.
+
+The preparation, once per rental and never at a resume:
+
+1. On the owner's machine, export the gateway's lock with its hashes:
+   `uv export --frozen --no-dev --no-emit-project -o card/gateway-requirements.txt`. vLLM's lock,
+   `card/vllm-requirements.txt`, is made with the pin.
+2. Copy the checkout to `/workspace/simple-serving`.
+3. `ssh <card> bash /workspace/simple-serving/card/bootstrap.sh < key-hashes`, where `key-hashes` holds the SHA-256 of
+   the client key and of the control key, one per line.
+
+bootstrap.sh installs each lock into a venv of its own with every hash checked, fetches the weights and the tokenizer
+files at their pinned revisions and checks their hashes, keeps the key hashes in `keys.json`, adds `onstart.sh` to the
+container's `/root/onstart.sh`, and starts the service. It refuses while a pin is empty, as `VLLM_VERSION` is until
+the pin is chosen, and it never replaces the keys the card holds.
+
+At every start of the container `onstart.sh` arms the trial guard, the one of simple-story-chat's
+`gpu/trial-onstart.sh` with the same files, and starts the launcher, `python -m simple_serving.card`. The launcher
+runs vLLM and the gateway once, with no restarts, and when the pair fails it stops the instance; its options and exit
+codes are in `simple_serving/card.py`. The tunnel's remote command waits while the pair runs:
+
+```
+cd /workspace/simple-serving && /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --hold
+```

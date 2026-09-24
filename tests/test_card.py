@@ -1,6 +1,6 @@
-"""The card's launcher (contract section 8, "Starting the card"): one pair with no restarts, how it ends, and what it
-keeps of the output. Stand-ins take the place of vLLM and the gateway; the clock and Vast are fakes, and nothing
-reaches the network."""
+"""The card's launcher and scripts (contract section 8, "Starting the card"): one pair with no restarts, how it ends,
+what it keeps of the output, and a bootstrap and an onstart that change nothing when they run again. Stand-ins take
+the place of vLLM, the gateway, pip, curl and flock; the clock and Vast are fakes, and nothing reaches the network."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -349,3 +350,66 @@ def test_stop_ends_the_launcher(state: Path) -> None:
     process = launcher_stand_in(state)
     assert card.stop_pair(state, lambda _: process.wait()) == 0
     assert process.wait() == -signal.SIGTERM
+
+
+def recorder(path: Path, calls: Path) -> None:
+    """A stand-in command that notes each of its calls in `calls`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'#!/bin/sh\necho "${{0##*/}} $*" >> {calls}\n')
+    path.chmod(0o700)
+
+
+def test_bootstrap_and_onstart_change_nothing_when_they_run_again(tmp_path: Path) -> None:
+    code, state, root, calls = tmp_path / "code", tmp_path / "state", tmp_path / "root", tmp_path / "calls"
+    (code / "card").mkdir(parents=True)
+    root.mkdir()
+    for name in ("bootstrap.sh", "onstart.sh"):
+        shutil.copy(card.CODE / "card" / name, code / "card" / name)
+    manifest = (card.CODE / "card/manifest.env").read_text()
+    (code / "card/manifest.env").write_text(manifest)
+    for name in ("gateway", "vllm"):
+        (code / f"card/{name}-requirements.txt").write_text(f"{name}==0.0.1 \\\n    --hash=sha256:{'0' * 64}\n")
+    weights, tokenizer = b"synthetic weights", b'{"synthetic": true}'
+    model_file = Card.load(code=code, state=state, environ={}, root=root).manifest["MODEL_FILE"]
+    (state / "models").mkdir(parents=True)
+    (state / "models" / model_file).write_bytes(weights)  # in place, so nothing is fetched
+    (state / "tokenizer").mkdir()
+    (state / "tokenizer/tokenizer.json").write_bytes(tokenizer)
+    for path in (state / "gateway/bin/pip", state / "vllm/bin/pip", state / GATEWAY, tmp_path / "bin/curl",
+                 tmp_path / "bin/flock"):  # flock would run the guard, which waits three hours
+        recorder(path, calls)
+    environ = {"PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "SIMPLE_SERVING_CARD_DIR": str(state),
+               "SIMPLE_SERVING_CARD_ROOT": str(root), **CREDENTIAL}
+
+    def bootstrap(stdin: str) -> int:
+        done = subprocess.run(["bash", str(code / "card/bootstrap.sh")], input=stdin, env=environ, capture_output=True,
+                              text=True, timeout=60, check=False)
+        assert CLIENT not in done.stdout + done.stderr and CONTROL not in done.stdout + done.stderr
+        return done.returncode
+
+    keys = f"{CLIENT}\n{CONTROL}\n"
+    assert bootstrap(keys) == 3  # the pins are empty
+    assert not (state / "keys.json").exists()
+    pins = {"VLLM_VERSION": "0.0.1", "MODEL_SHA256": hashlib.sha256(weights).hexdigest(),
+            "TOKENIZER_REPO": "synthetic/tokenizer", "TOKENIZER_REVISION": "0" * 40,
+            "TOKENIZER_FILES": f"tokenizer.json:{hashlib.sha256(tokenizer).hexdigest()}"}
+    (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in pins.items()))
+    assert bootstrap(keys) == 0
+    written = [state / "keys.json", state / "prepared", root / "onstart.sh", *root.glob(".simple-chat-*")]
+    first = {path: (path.read_bytes(), path.stat().st_mode & 0o777) for path in written}
+    assert bootstrap(keys) == 0
+    assert bootstrap("") == 0  # the card holds the keys
+    assert bootstrap(f"{hashlib.sha256(b'other').hexdigest()}\n{CONTROL}\n") == 5
+    assert bootstrap(f"{CLIENT}\n") == 4
+    assert bootstrap(f"{CLIENT}\n{CLIENT}\n") == 4
+    assert {path: (path.read_bytes(), path.stat().st_mode & 0o777) for path in written} == first
+    assert {mode for _, mode in first.values()} == {0o600}
+    assert json.loads((state / "keys.json").read_text()) == {"client": CLIENT, "control": CONTROL}
+    assert (root / "onstart.sh").read_text() == f"bash {code}/card/onstart.sh\n"
+    assert (root / ".simple-chat-instance-id").read_text() == CREDENTIAL["CONTAINER_ID"]
+    eventually(lambda: calls.read_text().count("flock -n ") == 3)  # each start arms the guard under its lock
+    noted = calls.read_text().splitlines()
+    assert noted.count("python -m simple_serving.card") == 3
+    assert not any(line.startswith("curl") for line in noted)
+    assert all("--require-hashes" in line for line in noted if line.startswith("pip"))
+    assert Card.load(code=code, state=state, environ=environ, root=root).prepared()
