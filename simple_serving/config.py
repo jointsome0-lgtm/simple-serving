@@ -8,6 +8,7 @@ cases (`from_service_block`), whose test keys are hashed as they are read.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import math
 import re
@@ -15,6 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
+from urllib.parse import urlsplit
 
 ENV_VAR = "SIMPLE_SERVING_CONFIG"
 # The classes in the order of contract section 2. A freed shared place goes to the first class in this order.
@@ -24,6 +26,7 @@ SHARED = ("agent", "internal", "external")  # the classes that share places; rea
 FIELDS = {"alias", "engine_url", "listen", "context_tokens", "body_limit_bytes", "max_connections", "keys", "limits",
           "count_limits", "engine_priority", "drain_deadline_s", "health_interval_s", "versions"}
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+LOOPBACK_V4, LOOPBACK_V6 = ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_address("::1")
 
 
 class ConfigError(Exception):
@@ -129,9 +132,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
     counts = _fields(data.get("count_limits"), "count_limits", {"active", "per_outside_key"})
     priority = _fields(data.get("engine_priority"), "engine_priority", set(CLASSES))
     listen = _fields(data.get("listen"), "listen", {"public", "control"})
-    engine_url = _string(data.get("engine_url"), "engine_url")
-    if not engine_url.startswith(("http://", "https://")):
-        raise ConfigError("engine_url must be an http URL")
+    engine_url = _engine_url(data.get("engine_url"))
     versions = _object(data.get("versions", {}), "versions")
     if not all(isinstance(value, str) for value in versions.values()):
         raise ConfigError("versions must map names to strings")
@@ -151,7 +152,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
                                           for name in CLASSES}),
         drain_deadline_s=_seconds(data.get("drain_deadline_s"), "drain_deadline_s"),
         public=_listener(listen.get("public"), "listen.public"),
-        control=_listener(listen.get("control"), "listen.control"),
+        control=_listener(listen.get("control"), "listen.control", loopback=True),
         max_connections=_integer(data.get("max_connections", 64), "max_connections", 1),
         health_interval_s=_seconds(data.get("health_interval_s", 5), "health_interval_s"),
         versions=MappingProxyType(dict(versions)),
@@ -186,12 +187,38 @@ def _class_limits(value: Any, path: str) -> ClassLimits:
     )
 
 
-def _listener(value: Any, path: str) -> Listener:
+def _engine_url(value: Any) -> str:
+    """The engine's base URL, on loopback like the engine itself (contract section 1)."""
+    url = _string(value, "engine_url")
+    try:
+        parts = urlsplit(url)
+        loopback = parts.scheme in ("http", "https") and _is_loopback(parts.hostname)
+    except ValueError:  # such as an IPv6 address without its closing bracket
+        loopback = False
+    if not loopback:
+        raise ConfigError("engine_url must be an http URL whose host is a loopback IP address, 127.0.0.0/8 or ::1")
+    return url
+
+
+def _listener(value: Any, path: str, *, loopback: bool = False) -> Listener:
     value = _fields(value, path, {"host", "port"})
+    host = _string(value.get("host"), f"{path}.host")
+    if loopback and not _is_loopback(host):
+        raise ConfigError(f"{path}.host must be a loopback IP address, 127.0.0.0/8 or ::1")
     port = _integer(value.get("port"), f"{path}.port", 0)
     if port > 65535:
         raise ConfigError(f"{path}.port must be at most 65535")
-    return Listener(host=_string(value.get("host"), f"{path}.host"), port=port)
+    return Listener(host=host, port=port)
+
+
+def _is_loopback(host: str | None) -> bool:
+    """Whether a host is a loopback IP address. A name is not, localhost included: what a name stands for is up to
+    the machine's resolver."""
+    try:
+        address = ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    return address in LOOPBACK_V4 or address == LOOPBACK_V6
 
 
 def _object(value: Any, path: str) -> dict[str, Any]:

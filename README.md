@@ -122,6 +122,7 @@ read -rs KEY && printf '%s' "$KEY" | sha256sum && unset KEY
 ```
 
 The public listener sits behind the TLS proxy; the control listener stays on loopback, reached over the SSH tunnel.
-vLLM listens on loopback with the served model name equal to `alias`, priority scheduling
-(`--scheduling-policy priority`), prefix caching, `--enable-prompt-tokens-details` for cached tokens, and its request
-logging off (contract section 10).
+The gateway refuses to start unless `listen.control.host` and the host of `engine_url` are loopback IP addresses, in
+127.0.0.0/8 or `::1`; a name, even `localhost`, is refused. vLLM listens on loopback with the served model name equal
+to `alias`, priority scheduling (`--scheduling-policy priority`), prefix caching, `--enable-prompt-tokens-details` for
+cached tokens, and its request logging off (contract section 10).

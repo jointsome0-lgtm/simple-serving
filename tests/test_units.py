@@ -14,7 +14,7 @@ import pytest
 
 from simple_serving import log
 from simple_serving.admission import Admission, CountPlaces
-from simple_serving.config import ConfigError, from_service_block, load
+from simple_serving.config import ConfigError, Listener, from_service_block, load
 from simple_serving.engine import EngineError, refusal
 from simple_serving.errors import STATUS, ServiceError
 from simple_serving.policy import cache_salt, find_key, resolve
@@ -277,6 +277,23 @@ def test_the_configuration_file_holds_hashes_and_refuses_what_it_does_not_know(t
     with pytest.raises(ConfigError) as caught:
         load(str(path))
     assert MARKER not in str(caught.value)
+
+
+def test_the_control_listener_and_the_engine_are_on_loopback_ip_addresses() -> None:
+    def refused(**options: Any) -> str:
+        with pytest.raises(ConfigError) as caught:
+            from_service_block(service_with(), **{"engine_url": "http://127.0.0.1:8000", **options})
+        return str(caught.value)
+
+    for host in ("0.0.0.0", "::", "localhost", "192.168.1.5", "::ffff:127.0.0.1", "::1%lo"):
+        assert "listen.control.host" in refused(control=Listener(host, 9000)), host
+    for url in ("http://localhost:8000", "http://192.168.1.5:8000", "http://127.0.0.1.nip.io:8000",
+                "http://127.0.0.1@example.com:8000", "http://[::1:8000", "ftp://127.0.0.1:8000"):
+        assert "engine_url" in refused(engine_url=url), url
+    settings = from_service_block(service_with(), engine_url="http://[::1]:8000", public=Listener("0.0.0.0", 443),
+                                  control=Listener("127.0.0.2", 9000))
+    assert (settings.public.host, settings.control.host) == ("0.0.0.0", "127.0.0.2")
+    assert from_service_block(service_with(), engine_url="https://127.8.9.10", control=Listener("::1", 0))
 
 
 # The engine and its stream
