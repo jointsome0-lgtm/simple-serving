@@ -286,6 +286,7 @@ body. FastAPI's default validation answer echoes the input, so it is replaced.
 | 409    | `stale_boot`, `stale_generation`                  | control calls, section 8                     |
 | 413    | `body_too_large`                                  | the body is over 2 000 000 bytes             |
 | 429    | `queue_full`                                      | a cap of section 7                           |
+| 500    | `internal_error`                                  | an error in the gateway itself               |
 | 503    | `starting`, `draining`, `drained`, `engine_unavailable` | the service is not serving             |
 | 504    | `timeout`                                         | the wall time ran out before the stream started |
 
