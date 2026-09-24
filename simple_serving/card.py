@@ -471,11 +471,11 @@ def main(argv: list[str] | None = None) -> int:
     options.add_argument("--dry-run", action="store_true", help="print the two commands and check; start nothing")
     options.add_argument("--run", action="store_true", help=argparse.SUPPRESS)  # the launcher that start() spawns
     args = parser.parse_args(argv)
+    if args.stop:  # before the manifest is read, which ending the pair does not need
+        return stop_pair(STATE)
     card = Card.load()
     if args.hold:
         return hold(card)
-    if args.stop:
-        return stop_pair(card.state)
     if args.run:
         return run(card)
     if args.retry:

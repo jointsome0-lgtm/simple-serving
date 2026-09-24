@@ -401,10 +401,17 @@ def test_hold_lasts_as_long_as_the_launcher(tmp_path: Path, capsys: pytest.Captu
         process.wait()
 
 
-def test_stop_ends_the_launcher(state: Path) -> None:
+def test_stop_ends_the_launcher(state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     process = launcher_stand_in(state)
     assert card.stop_pair(state, lambda _: process.wait()) == 0
     assert process.wait() == -signal.SIGTERM
+
+    def unreadable(*args: Any, **kwargs: Any) -> Card:
+        raise OSError("a checkout whose manifest cannot be read")
+
+    monkeypatch.setattr(Card, "load", unreadable)
+    monkeypatch.setattr(card, "stop_pair", lambda at: 0 if at == card.STATE else 1)
+    assert card.main(["--stop"]) == 0
 
 
 def recorder(path: Path, calls: Path) -> None:
