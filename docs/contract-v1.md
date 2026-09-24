@@ -114,7 +114,8 @@ reads, chunked bodies included, and stops reading past the limit with 413 `body_
 | `chat_template_kwargs` | `{"enable_thinking": boolean}`                   | optional, default `false`          |
 
 Any other field, at any depth, is refused with 400 `unsupported_field`. The rule does not look inside `schema`, which
-the gateway passes on as it is. A value of the wrong type or out of range is refused with 400 `invalid_request`.
+the gateway passes on as it is. A value of the wrong type or out of range is refused with 400 `invalid_request`. So is
+a body whose objects and arrays nest more than 64 deep, counting the body itself and the inside of `schema`.
 
 ### Before the stream starts
 
