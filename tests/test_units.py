@@ -495,3 +495,33 @@ def test_a_stop_needs_the_containers_instance_and_its_key() -> None:
                     {"CONTAINER_ID": "123", "CONTAINER_API_KEY": f"{MARKER}\r\n"}):
         assert vast.from_environment(environ) is vast.unconfigured
     assert vast.from_environment({"CONTAINER_ID": "123", "CONTAINER_API_KEY": MARKER}) is not vast.unconfigured
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("actual", "intended", "state"), [
+    ("running", "running", "running"), ("loading", "running", "starting"), ("exited", "running", "starting"),
+    ("running", "stopped", "stopping"), ("stopped", "stopped", "stopped"), ("exited", "stopped", "stopped"),
+])
+async def test_the_owner_reads_the_instances_state_as_the_bot_does(actual: str, intended: str, state: str) -> None:
+    def answer(request: httpx.Request) -> httpx.Response:
+        assert (request.method, request.headers["authorization"]) == ("GET", f"Bearer {MARKER}")
+        return httpx.Response(200, json={"instances": {"id": 123, "actual_status": actual,
+                                                       "intended_status": intended}})
+
+    assert await vast.show("123", MARKER, transport=httpx.MockTransport(answer)) == state
+
+
+@pytest.mark.anyio
+async def test_the_owner_resumes_with_running_and_never_reads_another_instance() -> None:
+    requests: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "PUT":
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(200, json={"instances": {"id": 124, "actual_status": "running"}})
+
+    await vast.resume("123", MARKER, transport=httpx.MockTransport(answer))
+    assert json.loads(requests[0].content) == {"state": "running"}
+    with pytest.raises(vast.VastError, match="answer"):
+        await vast.show("123", MARKER, transport=httpx.MockTransport(answer))
