@@ -412,8 +412,8 @@ def test_log_rows_keep_named_fields_and_the_class_of_an_exception_only() -> None
     assert MARKER not in json.dumps(row) and "body" not in row
     other = logging.LogRecord("httpx", logging.WARNING, __file__, 1, "sent %s", (MARKER,), exc_info)
     assert MARKER not in json.dumps(formatted(other))
-    server = logging.LogRecord("uvicorn.error", logging.INFO, __file__, 1, "Started server process", None, None)
-    assert formatted(server)["message"] == "Started server process"
+    server = logging.LogRecord("uvicorn.error", logging.ERROR, __file__, 1, "Exception in %s", (MARKER,), None)
+    assert formatted(server) == {"time": formatted(server)["time"], "logger": "uvicorn.error", "level": "ERROR"}
 
 
 def test_request_rows_drop_nothing_but_missing_values() -> None:

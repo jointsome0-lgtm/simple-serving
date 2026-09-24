@@ -3,8 +3,8 @@
 Contract section 10: a row about a request may hold the time, route, key label, class, scope kind, status, error
 code, token counts, the measurements, whether the request was cancelled, and the finish reason. Rows about the service
 itself add its boot, status and ports. A field outside `FIELDS` is dropped. Records of other libraries keep their
-logger, level and the class of an exception only, because their messages and tracebacks may quote a request; uvicorn's
-own messages about the server's life are kept.
+logger, level and the class of an exception only, because their messages and tracebacks may quote a request. That
+includes uvicorn's own: its messages are mostly fixed texts, but nothing checks that each of them is.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ FIELDS = frozenset({
     "input_tokens", "output_tokens", "cached_tokens", "count_matches", "wait_ms", "first_token_ms", "total_ms",
     "exception", "boot_id", "service_status", "drain_generation", "context_tokens", "port",
 })
-SERVER_LOGGERS = ("uvicorn.error",)  # fixed texts about starting and stopping, no request data
 
 
 @dataclass
@@ -66,8 +65,6 @@ class JsonFormatter(logging.Formatter):
             line.update((name, value) for name, value in fields.items() if name in FIELDS)
         else:
             line.update(logger=record.name, level=record.levelname)
-            if record.name in SERVER_LOGGERS:
-                line["message"] = record.getMessage()
         if record.exc_info and record.exc_info[1] is not None:
             line["exception"] = type(record.exc_info[1]).__name__
         return json.dumps(line, ensure_ascii=False)
