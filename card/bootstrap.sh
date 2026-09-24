@@ -8,7 +8,8 @@
 # at their pinned revisions and checks their hashes, keeps the key hashes in keys.json, adds card/onstart.sh to the
 # container's onstart, and then runs it for the first start. A second run changes nothing that is in place, and no run
 # prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed; 3 a pin or a lock is missing;
-# 4 no keys, or not two different SHA-256 digests; 5 the card holds other keys, which stay.
+# 4 no keys, or not two different SHA-256 digests; 5 the card holds other keys, which stay. The last step is the
+# launcher's start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
 # SIMPLE_SERVING_CARD_DIR and SIMPLE_SERVING_CARD_ROOT move the state and /root, for tests.
 set -euo pipefail
 umask 077
