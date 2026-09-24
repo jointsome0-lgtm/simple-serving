@@ -187,13 +187,16 @@ cd /workspace/simple-serving && /workspace/simple-serving-card/gateway/bin/pytho
 
 A load that never becomes ready leaves the file `given-up` in the card's state, and the card has given up. Every
 later start, a resume included, then loads nothing: the launcher waits 13 minutes for the owner's retry and otherwise
-stops the instance again. `up` and `status` say so. The retry, within those 13 minutes, runs the pair, and then `up`
-holds it as usual:
+stops the instance again. `up` and `status` say so. The retry removes the file:
 
 ```
 ssh <card> 'cd /workspace/simple-serving &&
   /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --retry'
 ```
+
+A launcher that still waits looks for that every 2 seconds and runs the pair, so a retry in the last moments may lose
+to the 13 minutes; once the launcher stops the instance, the retry is deferred to the next start. `up` is what
+confirms that the card is ready.
 
 An attempt to stop the instance that fails, the launcher's or the gateway's, leaves the file `stop-unconfirmed` and
 the log row `stop_unconfirmed` until the launcher's next start, and `up`, `sleep` and `status` say that the card's stop

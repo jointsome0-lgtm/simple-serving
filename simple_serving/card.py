@@ -6,24 +6,26 @@ card/onstart.sh runs it from the checkout with the gateway's venv, and card/boot
 rental. Without an option it checks the card, starts the launcher in the background and returns 0, also when one
 already runs. Otherwise it returns 3 when the card is not prepared (bootstrap.sh has not run for this manifest and
 these locks, or the keys or the instance's credential are missing), 6 when the card has given up, and the file
-`given-up` says why, and 7 when a port is taken. `--retry` removes `given-up` and starts. `--stop` ends the pair and
-leaves the instance running. `--hold` prints one line, then waits while the pair runs and returns 0 once it has
-ended, 6 once the card has given up, or 8 once its stop is not confirmed; on such a card, or one that is not
-prepared, it returns 8, 6 or 3 at once and prints nothing. It is the remote command of the tunnel, and it never owns
-the pair. `--dry-run` prints the two commands and checks, and starts nothing.
+`given-up` says why, and 7 when a port is taken. `--retry` removes `given-up` and starts; when a launcher runs already,
+it says that the retry is left to it or deferred to the next start. `--stop` ends the pair and leaves the instance
+running. `--hold` prints one line, then waits while the pair runs and returns 0 once it has ended, 6 once the card has
+given up, or 8 once its stop is not confirmed; on such a card, or one that is not prepared, it returns 8, 6 or 3 at once
+and prints nothing. It is the remote command of the tunnel, and it never owns the pair. `--dry-run` prints the two
+commands and checks, and starts nothing.
 
 The pair runs once, with no restarts. It ends on SIGTERM, when a process exits, or when the gateway is not ready by
 the manifest's load deadline. Unless a signal ended it, the launcher then stops the instance as the gateway does when
 it falls asleep (`vast.py`). When the pair never became ready, it first leaves `given-up`, and the card has given up:
-a later start, a resume included, loads nothing. Its launcher waits the idle interval for the owner's `--retry`, which
-runs the pair, and without one stops the instance again, so that no card stays up with nothing to stop it.
+a later start, a resume included, loads nothing. Its launcher waits the idle interval for the owner's `--retry`, and
+without one stops the instance again, so that no card stays up with nothing to stop it. It looks for the retry every
+POLL_S and then runs the pair; a retry in the interval's last moment may lose to its end, and the next start loads.
 
 An attempt to stop the instance that fails, the launcher's or the gateway's, leaves `stop-unconfirmed` until the
 launcher's next start: costs may go on. The attempts go on too, but they bound nothing while Vast refuses the key.
 
-The logs are in `logs/` of the state directory, each file 0600 with one older file beside it. `card.jsonl` holds the
-launcher's rows and, of vLLM's output, only a few numbers and fixed categories of failure. `gateway.jsonl` holds the
-gateway's rows that pass `gateway_row`.
+The logs are in `logs/` of the state directory, with one older file beside each. The launcher makes a log 0600 when it
+opens it; one that it moves aside keeps its mode. `card.jsonl` holds the launcher's rows and, of vLLM's output, only a
+few numbers and fixed categories of failure. `gateway.jsonl` holds the gateway's rows that pass `gateway_row`.
 """
 
 from __future__ import annotations
@@ -456,7 +458,8 @@ async def first(*awaitables: Awaitable[Any]) -> int:
 
 
 class JsonLines:
-    """A log file of the card, 0600. Before a line would take it past `max_bytes`, it becomes `<name>.1`."""
+    """A log file of the card, 0600 once written to. Before a line would take it past `max_bytes`, it becomes
+    `<name>.1`, whose mode stays as it was."""
 
     def __init__(self, path: Path, max_bytes: int) -> None:
         self.path = path
@@ -502,6 +505,11 @@ def main(argv: list[str] | None = None) -> int:
         return run(card)
     if args.retry:
         (card.state / GIVEN_UP).unlink(missing_ok=True)
+        if launcher(card.state) is not None:
+            print(f"simple-serving card: a launcher runs. If it still waits for a retry, it runs the pair within "
+                  f"{POLL_S} seconds; if it already stops the instance, the retry is deferred to the next start. up "
+                  "tells which.", flush=True)
+            return 0
     return start(card, dry_run=args.dry_run)
 
 

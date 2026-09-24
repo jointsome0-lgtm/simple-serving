@@ -70,8 +70,9 @@ ANSWER_BYTES = 16384  # the most of one answer of the gateway that the command r
 RECONNECTS = 3  # tunnels in a row that may end before the gateway is ready again
 STATUSES = ("starting", "ready", "draining", "drained", "failed")  # contract section 6
 NOT_PREPARED = "the card is not prepared: run its preparation first (README, 'The card')"
-GIVEN_UP = ("the card has given up loading the model and stops itself: to load it again, run the launcher's --retry "
-            f"on the card within {IDLE_TIMEOUT_S // 60} minutes of its start (README, 'The card')")
+GIVEN_UP = (f"the card has given up loading the model and stops itself {IDLE_TIMEOUT_S // 60} minutes after its start. "
+            "The launcher's --retry on the card loads it again, within seconds while the launcher still waits and "
+            "otherwise at the next start (README, 'The card')")
 UNCONFIRMED = ("the card's stop is not confirmed: Vast has not taken it, and costs may go on. Stop or delete the "
                "instance in Vast's console (README, 'The first rental')")
 REFUSALS = {card.NOT_PREPARED: NOT_PREPARED, card.GAVE_UP: GIVEN_UP, card.STOP_UNCONFIRMED: UNCONFIRMED}  # of --hold

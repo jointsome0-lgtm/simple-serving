@@ -411,8 +411,13 @@ def test_hold_lasts_as_long_as_the_launcher(tmp_path: Path, capsys: pytest.Captu
         process.wait()
 
 
-def test_stop_ends_the_launcher(state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    process = launcher_stand_in(state)
+def test_a_retry_leaves_the_pair_to_a_running_launcher_and_stop_ends_it(state: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                         capsys: pytest.CaptureFixture[str]) -> None:
+    loaded, process = card_at(state), launcher_stand_in(state)
+    (state / "given-up").write_text("engine_exit\n")
+    monkeypatch.setattr(Card, "load", lambda: loaded)
+    assert card.main(["--retry"]) == 0 and not (state / "given-up").exists()
+    assert "deferred to the next start" in capsys.readouterr().out  # a 0 that does not read as ready
     assert card.stop_pair(state, lambda _: process.wait()) == 0
     assert process.wait() == -signal.SIGTERM
 

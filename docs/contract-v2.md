@@ -380,7 +380,8 @@ owner's restricted Vast key (section 12) and never the card's.
   load never stays `starting` without end.
 - A start that finds the marker, a resume included, runs no pair. The launcher waits the idle interval for the owner's
   retry, which runs the pair, and without one stops the instance again as a sleep does, so that no card stays up with
-  nothing to stop it. `up` refuses such a card and says why, and `status` says it too.
+  nothing to stop it. A retry that comes too late for the wait takes effect at the next start. `up` refuses such a
+  card and says why, and `status` says it too.
 
 ### Drain and open
 
