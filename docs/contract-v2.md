@@ -674,5 +674,6 @@ GPTQ or NVFP4, a separate configuration, measured again.
   `npm run gpu:rent`, and tells the owner at once when a deletion is not confirmed.
 - 2026-09-25, the owner: on the first rental `vast_api_key` is the card's own container key, which `cli trial` reads
   over SSH and writes into the configuration without printing it. The rental finds out whether that key shows and
-  resumes the instance from outside the card; if it does not, the operator resumes it with the account key through
-  simple-story-chat's `npm run gpu:rent`. A permanent rental keeps the owner's restricted key.
+  resumes the instance from outside the card; if Vast refuses it, the operator deletes the trial as the README's "The
+  first rental" says, since `up` reads the instance with that same key. A permanent rental keeps the owner's
+  restricted key.
