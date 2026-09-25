@@ -1,12 +1,17 @@
 """The smoke probes and the count matrix of the first rental (contract section 15): a client of the gateway.
 
-    python -m simple_serving.smoke [--config PATH] [--only NAME[,NAME]] [--public-port N] [--control-port N] [--fake]
+    python -m simple_serving.smoke [--config PATH] [--only NAME[,NAME]] [--before FILE | --after FILE]
+                                   [--public-port N] [--control-port N] [--fake [--card-dir DIR]]
 
 It calls the gateway through the forward that `cli up` holds, http://127.0.0.1:8080 to the public listener and 8081 to
 the control one, with the client key and the control key of the command's configuration, which `--config` names as it
-does for the command. Every request is of class `internal`. The probes run in this order, each within a time bound of
-its own:
+does for the command. Every request is of class `internal`. What the gateway does not say, the card's own report does
+(`card.py --inspect`), which the smoke runs over SSH as `up` reaches the card, with the configuration's `ssh_host`.
+The probes run in this order, each within a time bound of its own, and the first that fails ends the smoke:
 
+- lifecycle, with --before or --after alone, around the stop and the resume of section 15's step 1: exactly one pair
+  runs, and the trial guard's deadline is there. --before writes the deadline and a hash of the boot into a new file,
+  and --after checks that the boot is new and the deadline unchanged.
 - state: /v1/models and /v1/state serve contract 2, ready, with the manifest's alias and context, and the control key
   sees the pinned versions: the manifest's, and those of the gateway's lock for its packages.
 - completion: one short completion with the least body, and its stream as section 4 has it: the alias in every chunk,
@@ -17,22 +22,28 @@ its own:
 - reasoning: thinking on gives reasoning and an answer, thinking off an answer alone.
 - finish: `length` at a small max_tokens, after exactly that many tokens, and `stop`.
 - refusal: a schema that the engine cannot compile is 400 invalid_request, before any stream.
-- abort: a stream closed after its first event frees its place, and then a drain finds no work of ours left, counts
-  included; the open undoes the drain.
+- abort: a stream too long to end within the probe, closed after its first event, frees its place, and the gateway's
+  log row of it says that it was cancelled. A request that ended by itself shows nothing of the cancel, and fails as
+  inconclusive. Then a drain finds no work of ours left, counts included, and an open undoes it.
 - schemas: the bot's own JSON schemas in strict mode (bot_schemas.json), each answer checked against its schema.
 - counts: the count matrix. For each cell the count, then a generation with a small max_tokens, and the count must
   equal usage.prompt_tokens: plain, system and user, turns, a schema, thinking on and off, and near the context.
+- privacy: one completion whose prompt holds a fresh random marker, which no log that the gateway or the engine's
+  filter writes on the card may hold (section 15, step 2).
 
 Each probe prints one JSON object on a line of its own: its name, `ok`, the gateway's code where one came, the checks
-that failed, and numbers. Strings in it are only names from this file and the bot's schema copy, codes and statuses of
-the contract, finish reasons, versions (the pins of this checkout, and Python's in digits and dots), and the class of
-an error inside the smoke: never a key, a prompt, the model's text or its reasoning. The exit code is 0 when every
-probe that ran passed, 1 when one failed, and 2 when the smoke cannot run.
+that failed, and numbers. A probe of parts stops at its first part that fails. Strings in it are only names from this
+file and the bot's schema copy, codes and statuses of the contract, finish reasons, versions (the pins of this
+checkout, and Python's in digits and dots), and the class of an error inside the smoke: never a key, a prompt, the
+marker, the model's text or its reasoning. The exit code is 0 when every probe passed, 1 when one failed, and 2 when
+the smoke cannot run.
 
-The dry run points it at the dev launcher instead: --public-port and --control-port name its listeners, and --config a
-file with its test keys. --fake is for that run alone. The fake engine cannot answer some checks truthfully: an answer
-that follows a schema, and a count that differs from usage, since it computes both the same way. --fake leaves those
-unchecked and names them in `not_verifiable`, and it refuses the forward's ports, so it never runs against a card.
+The dry run points it at the dev launcher instead: --public-port and --control-port name its listeners, --config a
+file with its test keys, and --card-dir a directory on this machine that stands for the card's state, /root and
+/proc. --fake is for that run alone. The fake engine cannot answer some checks truthfully: an answer that follows a
+schema, and a count that differs from usage, since it computes both the same way. --fake leaves those unchecked and
+names them in `not_verifiable`, it refuses the forward's ports, and it reads the card's files only from --card-dir,
+so it never runs against a card.
 """
 
 from __future__ import annotations
@@ -41,12 +52,15 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import re
+import secrets
 import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -59,15 +73,21 @@ from .service import PINNED_PACKAGES
 CHAT, COUNT = "/v1/chat/completions", "/v1/chat/completions/input_tokens"
 HEADERS = {"X-Simple-Serving-Class": "internal"}  # without a scope header, the class's own cache scope
 # Each probe's time bound on the card, generous: the first requests after a start may wait for kernels to compile.
-BOUND_S = {"state": 30, "completion": 300, "fields": 600, "reasoning": 300, "finish": 180, "refusal": 120,
-           "abort": 120, "schemas": 900, "counts": 900}
+BOUND_S = {"lifecycle": 60, "state": 30, "completion": 300, "fields": 600, "reasoning": 300, "finish": 180,
+           "refusal": 120, "abort": 120, "schemas": 900, "counts": 900, "privacy": 120}
+UNDO_S = {"abort": 30}  # of a probe's bound, what it keeps for undoing its change: three control calls
+CARD_PROBES = ("lifecycle", "abort", "privacy")  # the probes that read the card's report
 # What the fake engine cannot answer truthfully, and --fake leaves unchecked. The seed's repeat is no check anyway.
 NOT_VERIFIABLE = {"fields": ["answer", "seed_repeats"], "schemas": ["answer"], "counts": ["equal"]}
-CALL_S = 10  # a call to the control listener
+CALL_S = 10  # a call to the control listener, from connecting to the end of its answer
 ANSWER_BYTES = 16384  # the most of an answer that is not a stream
 STREAM_BYTES = 2_000_000  # the most of a stream, as the bot reads one
 TEXT_CHARS = 100_000  # the most text of a stream, reasoning included, as the bot reads one
 FREE_S = 10  # after a client left, for the gateway to free its place
+ROWS_S = 10  # after a request ended, for its log row to reach the card's file
+INSPECT = cli.HOLD.removesuffix("--hold") + "--inspect"  # the card's report, run as up runs --hold
+INSPECT_S = 30  # one report of the card, from starting ssh to the end of its line
+REPORT_BYTES = 65536  # the most of a report that the smoke reads
 
 # Synthetic prompts, never printed.
 SYSTEM = "You narrate a short synthetic story about a lighthouse keeper."
@@ -75,6 +95,9 @@ SHORT = "In one sentence, the keeper lights the lamp."
 WORD = "Give one word for the colour of the sea at night."
 QUESTION = "A lighthouse has two towers with three lamps in each. How many lamps are there? Answer with the number."
 LONG = "Tell a long story of the keeper's night, hour by hour."
+COUNTING = "Count from one to ten thousand in words, one number per line, and write nothing else."
+ABORT_TOKENS = 8192  # the internal class's most, so that the count cannot end within the abort probe
+ECHO = "Repeat this code exactly, and nothing else:"  # before the privacy marker
 YES = "Reply with the single word yes."
 TURNS = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "The keeper opens the door."},
          {"role": "assistant", "content": "Wind fills the stairwell."}, {"role": "user", "content": "He climbs up."}]
@@ -103,6 +126,10 @@ SCHEMA_TOKENS = 2048  # the most any bot schema's answer may take here; the bot'
 
 class NoAnswer(Exception):
     """A call to the gateway that got no answer."""
+
+
+class NoReport(Exception):
+    """The card's report did not come, or came in another form."""
 
 
 def user(text: str) -> dict[str, str]:
@@ -293,6 +320,81 @@ async def read_json(response: httpx.Response) -> Any:
         return None
 
 
+@dataclass(frozen=True)
+class CardFiles:
+    """The card's own report (`card.py --inspect`): over SSH as `up` reaches the card, or in the dry run on this
+    machine, over a directory that stands for the card's state, /root and /proc."""
+
+    host: str | None = None
+    directory: Path | None = None
+
+    def command(self) -> tuple[list[str], dict[str, str] | None]:
+        if self.directory is not None:
+            places = {"DIR": self.directory, "ROOT": self.directory, "PROC": self.directory / "proc"}
+            return ([sys.executable, "-m", "simple_serving.card", "--inspect"],
+                    os.environ | {f"SIMPLE_SERVING_CARD_{name}": str(path) for name, path in places.items()})
+        if self.host is None:
+            raise NoReport
+        return [*cli.SSH, self.host, INSPECT], None
+
+    async def inspect(self, marker: str | None = None, since: int | None = None) -> dict[str, Any]:
+        """The report, as a request with `marker` and `since` asks for it: numbers and flags alone, of the form that
+        `card.inspect` gives, or NoReport."""
+        argv, env = self.command()
+        request = {name: value for name, value in (("marker", marker), ("since", since)) if value is not None}
+        process = await asyncio.create_subprocess_exec(*argv, env=env, cwd=card.CODE, stdin=asyncio.subprocess.PIPE,
+                                                       stdout=asyncio.subprocess.PIPE,
+                                                       stderr=asyncio.subprocess.DEVNULL)
+        assert process.stdin is not None and process.stdout is not None
+        out = b""
+        try:
+            async with asyncio.timeout(INSPECT_S):
+                process.stdin.write(json.dumps(request).encode() + b"\n")
+                await process.stdin.drain()
+                process.stdin.close()
+                while len(out) <= REPORT_BYTES and (piece := await process.stdout.read(REPORT_BYTES)):
+                    out += piece
+                code = await process.wait()
+        except (TimeoutError, OSError):
+            raise NoReport from None
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        if code != 0 or len(out) > REPORT_BYTES:
+            raise NoReport
+        return checked_report(out, marker is not None, since is not None)
+
+
+def checked_report(data: bytes, marker: bool, since: bool) -> dict[str, Any]:
+    """A report of the card as `card.inspect` makes it, or NoReport: nothing else of the card is ever read."""
+    try:
+        report = json.loads(data)
+    except ValueError:
+        raise NoReport from None
+    logs = report.get("logs") if isinstance(report, dict) else None
+    entry = {"rows", "found"} if marker else {"rows"}
+    cancelled = report.get("cancelled", []) if isinstance(report, dict) else None
+    if not (isinstance(report, dict) and report.keys() == {"launchers", "children", "deadline", "now", "logs",
+                                                           *(["cancelled"] if since else [])}
+            and all(is_count(report[name]) for name in ("launchers", "children", "now"))
+            and (report["deadline"] is None or is_count(report["deadline"]))
+            and isinstance(logs, dict) and logs.keys() == {*card.LOGS, "other"}
+            and all(isinstance(counts, dict) and counts.keys() == entry and all(map(is_count, counts.values()))
+                    for counts in logs.values())
+            and (cancelled is None or (isinstance(cancelled, list) and all(type(flag) is bool for flag in cancelled)))):
+        raise NoReport
+    return report
+
+
+@dataclass(frozen=True)
+class Record:
+    """The lifecycle's file: --before writes it, and --after reads it into `before`."""
+
+    path: Path
+    before: dict[str, Any] | None = None
+
+
 @dataclass
 class Smoke:
     client: httpx.AsyncClient
@@ -303,6 +405,9 @@ class Smoke:
     alias: str
     context: int
     fake: bool = False
+    card: CardFiles = field(default_factory=CardFiles)
+    record: Record | None = None
+    undo: Callable[[], Awaitable[bool]] | None = None  # what the running probe changed and run() undoes
 
     def headers(self, listener: str) -> dict[str, str]:
         if listener == "control":
@@ -316,10 +421,11 @@ class Smoke:
     async def call(self, listener: str, method: str, path: str, body: Any = None) -> Answer:
         base = self.control if listener == "control" else self.public
         try:
-            async with self.client.stream(method, base + path, json=body, headers=self.headers(listener),
-                                          timeout=CALL_S if listener == "control" else None) as response:
+            # A control call within an absolute deadline of its own; a public one within the probe's bound.
+            async with (asyncio.timeout(CALL_S if listener == "control" else None),
+                        self.client.stream(method, base + path, json=body, headers=self.headers(listener)) as response):
                 return Answer(response.status_code, await read_json(response))
-        except httpx.HTTPError:
+        except (httpx.HTTPError, TimeoutError):
             raise NoAnswer from None
 
     async def view(self) -> dict[str, Any]:
@@ -389,6 +495,42 @@ def locked(names: tuple[str, ...]) -> dict[str, str]:
     return {name: pins[name] for name in names}
 
 
+async def probe_lifecycle(smoke: Smoke) -> dict[str, Any]:
+    if smoke.record is None:
+        raise ValueError("the lifecycle runs with --before or --after")
+    boot_id = (await smoke.view()).get("boot_id")
+    boot = digest(boot_id) if isinstance(boot_id, str) and boot_id else None
+    report = await smoke.card.inspect()
+    failed = []
+    line: dict[str, Any] = {"launchers": report["launchers"], "children": report["children"]}
+    if (report["launchers"], report["children"]) != (1, 2):
+        failed.append("pair")
+    if boot is None:
+        failed.append("boot")
+    deadline = report["deadline"]
+    if deadline is not None:
+        line["deadline_left_s"] = deadline - report["now"]
+    before = smoke.record.before
+    if before is None:
+        if deadline is None:
+            failed.append("deadline")
+        if not failed:
+            write_record(smoke.record.path, {"boot": boot, "deadline": deadline})
+            line["recorded"] = True
+    else:
+        line["boot_new"] = boot is not None and boot != before["boot"]
+        line["deadline_unchanged"] = deadline == before["deadline"]
+        failed += [check for check, name in (("boot", "boot_new"), ("deadline", "deadline_unchanged"))
+                   if not line[name] and check not in failed]
+    return {"ok": not failed, **({"failed": failed} if failed else {}), **line}
+
+
+def write_record(path: Path, record: dict[str, Any]) -> None:
+    """A new file, open to its owner alone."""
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
+        json.dump(record, file)
+
+
 async def probe_state(smoke: Smoke) -> dict[str, Any]:
     failed = []
     models = await smoke.call("public", "GET", "/v1/models")
@@ -451,6 +593,8 @@ async def probe_fields(smoke: Smoke) -> dict[str, Any]:
         if stream.ok and name == "chat_template_kwargs" and stream.reasoning:
             failed.append("reasoning")
         parts[name] = answered(stream, failed, answer)
+        if not parts[name]["ok"]:
+            return combined(parts)
     # An observation, not a check: the engine may batch the two answers differently.
     first, second = [await smoke.generate(smoke.body([user(SHORT)], 32, temperature=0.8, seed=SEED))
                      for _ in range(2)]
@@ -475,6 +619,8 @@ async def probe_reasoning(smoke: Smoke) -> dict[str, Any]:
         if stream.ok and not stream.content:
             failed.append("content")
         parts[name] = verdict(stream, failed, finish=stream.finish)
+        if not parts[name]["ok"]:
+            break
     return combined(parts)
 
 
@@ -485,10 +631,11 @@ async def probe_finish(smoke: Smoke) -> dict[str, Any]:
         failed.append("finish")
     elif cut.ok and cut.usage is not None and cut.usage["completion_tokens"] != 8:
         failed.append("completion_tokens")
-    stop = await smoke.generate(smoke.body([user(YES)], 64))
-    return combined({"length": verdict(cut, failed, finish=cut.finish),
-                     "stop": verdict(stop, ["finish"] if stop.ok and stop.finish != "stop" else [],
-                                     finish=stop.finish)})
+    parts = {"length": verdict(cut, failed, finish=cut.finish)}
+    if parts["length"]["ok"]:
+        stop = await smoke.generate(smoke.body([user(YES)], 64))
+        parts["stop"] = verdict(stop, ["finish"] if stop.ok and stop.finish != "stop" else [], finish=stop.finish)
+    return combined(parts)
 
 
 async def probe_refusal(smoke: Smoke) -> dict[str, Any]:
@@ -506,27 +653,25 @@ async def probe_abort(smoke: Smoke) -> dict[str, Any]:
     before = await smoke.view()
     if before.get("status") != "ready" or total(before.get("active")) is None:
         return {"ok": False, "failed": ["ready"]}
-    failed: list[str] = []
+    since = (await smoke.card.inspect())["logs"]["gateway.jsonl"]["rows"]
     line: dict[str, Any] = {}
+    body = smoke.body([user(COUNTING)], ABORT_TOKENS, chat_template_kwargs={"enable_thinking": False})
     # A client of its own, so that leaving the stream closes its connection, which is how a client cancels (section 9).
     try:
         async with (httpx.AsyncClient(timeout=httpx.Timeout(None, connect=CALL_S), trust_env=False) as own,
-                    own.stream("POST", smoke.public + CHAT, json=smoke.body([user(LONG)], 1024),
-                               headers=smoke.headers("public")) as response):
+                    own.stream("POST", smoke.public + CHAT, json=body, headers=smoke.headers("public")) as response):
             if response.status_code != 200:
                 return {"ok": False, "status": response.status_code,
                         "code": error_code(await read_json(response)), "failed": ["status"]}
-            received = b""
-            async for piece in response.aiter_bytes():
+            # The pieces stay referenced until the leave: a loop left with break would drop them, and the event
+            # loop's finalizer of the dropped iterator would close the connection at a moment of its own.
+            pieces, received = response.aiter_bytes(), b""
+            while b"\n\n" not in received and (piece := await anext(pieces, b"")):
                 received += piece
-                if b"\n\n" in received:
-                    break
             if not received.startswith(b"data: {"):
-                failed.append("first_event")
+                return {"ok": False, "failed": ["first_event"]}
             # While it streams, the request holds a place; without that, the rest of the probe would prove nothing.
             line["held"] = (internal_active(await smoke.view()) or 0) - (internal_active(before) or 0)
-            if line["held"] != 1:
-                failed.append("held")
     except httpx.HTTPError:
         raise NoAnswer from None
     left = time.monotonic()
@@ -536,17 +681,24 @@ async def probe_abort(smoke: Smoke) -> dict[str, Any]:
             line["freed_ms"] = round((time.monotonic() - left) * 1000)
             break
         if time.monotonic() - left > FREE_S:
-            failed.append("freed")
-            break
+            return {"ok": False, "failed": ["freed"], **line}
         await asyncio.sleep(0.05)
-    try:
-        drain = await smoke.call("control", "POST", "/v1/control/drain", {"boot_id": after.get("boot_id")})
-        # With no accepted work left, counts included, a drain is complete before it answers (section 8).
-        if drain.status != 202 or drain.field("status") != "drained":
-            failed.append("drained")
-    finally:
-        failed += await reopen(smoke)
-    return {"ok": not failed, **({"failed": failed} if failed else {}), **line}
+    # The gateway's own row of the request, of which only its cancelled flag is read, tells a cancel from an end: a
+    # request that had ended by itself shows nothing of the cancel, and the probe cannot pass on it.
+    cancelled = (await logged(smoke, since))["cancelled"]
+    if cancelled is None or len(cancelled) != 1:
+        return {"ok": False, "failed": ["unlogged"], **line}
+    line["cancelled"] = cancelled[0]
+    if not cancelled[0]:
+        return {"ok": False, "failed": ["inconclusive"], **line}
+    if line["held"] != 1:
+        return {"ok": False, "failed": ["held"], **line}
+    smoke.undo = partial(reopen, smoke)  # before the drain, which may take effect though its answer is lost
+    drain = await smoke.call("control", "POST", "/v1/control/drain", {"boot_id": after.get("boot_id")})
+    # With no accepted work left, counts included, a drain is complete before it answers (section 8).
+    if drain.status != 202 or drain.field("status") != "drained":
+        return {"ok": False, "failed": ["drained"], **line}
+    return {"ok": True, **line}
 
 
 def internal_active(view: dict[str, Any]) -> int | None:
@@ -556,20 +708,31 @@ def internal_active(view: dict[str, Any]) -> int | None:
     return n if is_count(n) else None
 
 
-async def reopen(smoke: Smoke) -> list[str]:
-    """Undo the probe's drain, whatever became of its answer; a service that is falling asleep stays as it is."""
+async def reopen(smoke: Smoke) -> bool:
+    """Undo the abort probe's drain, whatever became of its answer, and read the state back: True once the service
+    is ready. A service that is falling asleep stays as it is."""
     view = await smoke.view()
     if view.get("status") in ("draining", "drained") and view.get("sleep_requested") is False:
-        opened = await smoke.call("control", "POST", "/v1/control/open", {
-            "boot_id": view.get("boot_id"), "drain_generation": view.get("drain_generation")})
-        if opened.status != 200 or opened.field("status") != "ready":
-            return ["open"]
-    return [] if (await smoke.view()).get("status") == "ready" else ["open"]
+        await smoke.call("control", "POST", "/v1/control/open",
+                         {"boot_id": view.get("boot_id"), "drain_generation": view.get("drain_generation")})
+    return (await smoke.view()).get("status") == "ready"
+
+
+async def logged(smoke: Smoke, since: int, marker: str | None = None) -> dict[str, Any]:
+    """The card's report once gateway.jsonl holds a chat request after its first `since` rows, or ROWS_S later."""
+    loop = asyncio.get_running_loop()
+    until = loop.time() + ROWS_S
+    while True:
+        report = await smoke.card.inspect(marker=marker, since=since)
+        if report["cancelled"] != [] or loop.time() >= until:
+            return report
+        await asyncio.sleep(0.2)
 
 
 async def probe_schemas(smoke: Smoke) -> dict[str, Any]:
     parts = {}
-    for entry in bot_schemas.load():
+    entries = bot_schemas.load()
+    for entry in entries:
         # The bot's body around the schema (local/serving.ts at the copy's commit).
         stream = await smoke.generate(smoke.body(
             [system(entry.system), user(entry.user)], min(entry.bot_max_tokens, SCHEMA_TOKENS),
@@ -583,7 +746,9 @@ async def probe_schemas(smoke: Smoke) -> dict[str, Any]:
         elif stream.ok and not smoke.fake:
             answer = answer_problems(stream.content, entry.schema)
         parts[entry.name] = answered(stream, failed, answer)
-    return combined(parts, passed=sum(part["ok"] for part in parts.values()), of=len(parts))
+        if not parts[entry.name]["ok"]:
+            break
+    return combined(parts, passed=sum(part["ok"] for part in parts.values()), of=len(entries))
 
 
 async def probe_counts(smoke: Smoke) -> dict[str, Any]:
@@ -597,7 +762,11 @@ async def probe_counts(smoke: Smoke) -> dict[str, Any]:
         "thinking_on": smoke.body(pair, CELL_TOKENS, chat_template_kwargs={"enable_thinking": True}),
         "thinking_off": smoke.body(pair, CELL_TOKENS, chat_template_kwargs={"enable_thinking": False}),
     }
-    parts = {name: await count_cell(smoke, body) for name, body in cells.items()}
+    parts = {}
+    for name, body in cells.items():
+        parts[name] = await count_cell(smoke, body)
+        if not parts[name]["ok"]:
+            return combined(parts)
     parts["near_context"] = await near_context(smoke)
     return combined(parts)
 
@@ -646,38 +815,84 @@ async def near_context(smoke: Smoke) -> dict[str, Any]:
     return {"ok": False, "failed": ["near"], "counts": len(counts)}
 
 
+def new_marker() -> str:
+    return secrets.token_hex(16)
+
+
+async def probe_privacy(smoke: Smoke) -> dict[str, Any]:
+    since = (await smoke.card.inspect())["logs"]["gateway.jsonl"]["rows"]
+    marker = new_marker()
+    stream = await smoke.generate(smoke.body([user(f"{ECHO} {marker}")], 64,
+                                             chat_template_kwargs={"enable_thinking": False}))
+    report = await logged(smoke, since, marker)
+    found = {name: counts["found"] for name, counts in report["logs"].items()}
+    line: dict[str, Any] = {"status": stream.status, **({"code": stream.code} if stream.code is not None else {})}
+    failed = [*stream.broken, *(["code"] if stream.code is not None else [])]
+    if not report["cancelled"]:
+        failed.append("unlogged")  # without the request's own row, a log without the marker proves nothing
+    if any(found.values()):
+        failed.append("marker")
+    return {"ok": not failed, **line, **({"failed": failed} if failed else {}), "found": found,
+            "logged": len(report["cancelled"] or []), "echoed": stream.content.count(marker)}
+
+
 PROBES: dict[str, Callable[[Smoke], Awaitable[dict[str, Any]]]] = {
-    "state": probe_state, "completion": probe_completion, "fields": probe_fields, "reasoning": probe_reasoning,
-    "finish": probe_finish, "refusal": probe_refusal, "abort": probe_abort, "schemas": probe_schemas,
-    "counts": probe_counts,
+    "lifecycle": probe_lifecycle, "state": probe_state, "completion": probe_completion, "fields": probe_fields,
+    "reasoning": probe_reasoning, "finish": probe_finish, "refusal": probe_refusal, "abort": probe_abort,
+    "schemas": probe_schemas, "counts": probe_counts, "privacy": probe_privacy,
 }
+CHOSEN = tuple(name for name in PROBES if name != "lifecycle")  # what --only may name; --before and --after add it
 
 
 async def run(smoke: Smoke, names: list[str]) -> int:
-    passed = 0
-    for name in names:
-        try:
-            async with asyncio.timeout(BOUND_S[name]):
-                line = await PROBES[name](smoke)
-        except TimeoutError:
-            line = {"ok": False, "failed": ["time_bound"], "bound_s": BOUND_S[name]}
-        except NoAnswer:
-            line = {"ok": False, "failed": ["no_answer"]}
-        except Exception as error:  # noqa: BLE001 - it fails its probe alone, by its class: a traceback may quote text
-            line = {"ok": False, "failed": ["smoke_error"], "error": type(error).__name__}
+    for index, name in enumerate(names):
+        line = await one(smoke, name)
         if smoke.fake and name in NOT_VERIFIABLE:
             line["not_verifiable"] = NOT_VERIFIABLE[name]
         print(json.dumps({"probe": name, **line}), flush=True)
-        passed += line["ok"]
-    print(f"simple-serving smoke: {passed} of {len(names)} probes passed", file=sys.stderr)
-    return 0 if passed == len(names) else 1
+        if not line["ok"]:
+            print(f"simple-serving smoke: {index} of {len(names)} probes passed; {name} failed, and the smoke stopped "
+                  "there", file=sys.stderr)
+            return 1
+    print(f"simple-serving smoke: {len(names)} of {len(names)} probes passed", file=sys.stderr)
+    return 0
+
+
+async def one(smoke: Smoke, name: str) -> dict[str, Any]:
+    """A probe within its bound, then the undo of what it changed. The bound keeps UNDO_S of its time for the undo,
+    which runs once the probe's own time has closed, so that the bound cannot cut it short, and within a deadline of
+    its own. An undo that is not confirmed fails the probe."""
+    line: dict[str, Any]
+    try:
+        async with asyncio.timeout(BOUND_S[name] - UNDO_S.get(name, 0)):
+            line = await PROBES[name](smoke)
+    except TimeoutError:
+        line = {"ok": False, "failed": ["time_bound"], "bound_s": BOUND_S[name]}
+    except NoAnswer:
+        line = {"ok": False, "failed": ["no_answer"]}
+    except NoReport:
+        line = {"ok": False, "failed": ["no_report"]}
+    except Exception as error:  # noqa: BLE001 - it fails its probe by its class: a traceback may quote text
+        line = {"ok": False, "failed": ["smoke_error"], "error": type(error).__name__}
+    undo, smoke.undo = smoke.undo, None
+    if undo is not None and not await undone(undo, UNDO_S.get(name, CALL_S)):
+        line = {**line, "ok": False, "failed": [*line.get("failed", []), "left_drained"]}
+    return line
+
+
+async def undone(undo: Callable[[], Awaitable[bool]], within_s: float) -> bool:
+    try:
+        async with asyncio.timeout(within_s):
+            return await undo()
+    except Exception:  # noqa: BLE001 - an undo that fails, however, is not confirmed
+        return False
 
 
 def probe_names(text: str) -> list[str]:
     names = text.split(",")
-    if unknown := [name for name in names if name not in PROBES]:
-        raise argparse.ArgumentTypeError(f"no probe {unknown[0]!r}; the probes are {', '.join(PROBES)}")
-    return [name for name in PROBES if name in names]
+    if unknown := [name for name in names if name not in CHOSEN]:
+        raise argparse.ArgumentTypeError(f"no probe {unknown[0]!r}; the probes are {', '.join(CHOSEN)}")
+    return [name for name in CHOSEN if name in names]
 
 
 def port(text: str) -> int:
@@ -689,9 +904,17 @@ def port(text: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m simple_serving.smoke", description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path, default=cli.CONFIG,
-                        help="the command's configuration, with client_key and control_key (default: %(default)s)")
-    parser.add_argument("--only", type=probe_names, default=list(PROBES), metavar="NAME[,NAME]",
-                        help=f"run these probes alone: {', '.join(PROBES)}")
+                        help="the command's configuration, with client_key and control_key, and ssh_host for the "
+                             "card's report (default: %(default)s)")
+    parser.add_argument("--only", type=probe_names, default=list(CHOSEN), metavar="NAME[,NAME]",
+                        help=f"run these probes alone: {', '.join(CHOSEN)}")
+    lifecycle = parser.add_mutually_exclusive_group()
+    lifecycle.add_argument("--before", type=Path, metavar="FILE",
+                           help="before the stop of section 15's step 1: first check the pair and the guard's "
+                                "deadline, and write the deadline and a hash of the boot into FILE, a new file")
+    lifecycle.add_argument("--after", type=Path, metavar="FILE",
+                           help="after the resume: first check the pair, that the boot is new and that the guard's "
+                                "deadline is the one in FILE")
     parser.add_argument("--public-port", type=port, default=cli.LOCAL["public"],
                         help="the public listener on 127.0.0.1 (default: %(default)s, the forward of up)")
     parser.add_argument("--control-port", type=port, default=cli.LOCAL["control"],
@@ -699,27 +922,62 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fake", action="store_true",
                         help="the dry run in front of the dev launcher's fake engine: leave unchecked what it cannot "
                              "answer truthfully")
+    parser.add_argument("--card-dir", type=Path, metavar="DIR",
+                        help="with --fake: a directory on this machine that stands for the card's state, /root and "
+                             "/proc, whose report replaces the card's")
     args = parser.parse_args(argv)
+    names = (["lifecycle"] if args.before or args.after else []) + args.only
+    reading = [name for name in names if name in CARD_PROBES]
     try:
         if args.fake and {args.public_port, args.control_port} & set(cli.LOCAL.values()):
             raise cli.Refusal("--fake is for the dev launcher, never for the forward of up")
+        if args.card_dir is not None and not args.fake:
+            raise cli.Refusal("--card-dir stands for the card in the dry run, with --fake alone")
+        if args.fake and reading and args.card_dir is None:
+            raise cli.Refusal(f"--fake reads the card's files from --card-dir alone, and {', '.join(reading)} "
+                              "read them")
         config = cli.read_config(args.config)
         if missing := [name for name in cli.KEYS if not isinstance(config.get(name), str) or not config[name]]:
             raise cli.Refusal(f"{args.config} has no {', '.join(missing)}")
+        host = config.get("ssh_host")
+        if reading and args.card_dir is None and not (isinstance(host, str) and cli.SSH_HOST.fullmatch(host)):
+            raise cli.Refusal(f"{args.config} has no ssh_host of the right form, and {', '.join(reading)} read the "
+                              "card's files over SSH")
+        record = lifecycle_record(args.before, args.after)
         manifest = card.read_manifest()
     except cli.Refusal as error:
         print(f"simple-serving smoke: {error}", file=sys.stderr)
         return 2
-    return asyncio.run(smoke_run(args, config, manifest))
+    files = CardFiles(host if reading and args.card_dir is None else None, args.card_dir)
+    return asyncio.run(smoke_run(args, config, manifest, files, record, names))
 
 
-async def smoke_run(args: argparse.Namespace, config: dict[str, Any], manifest: dict[str, str]) -> int:
+def lifecycle_record(before: Path | None, after: Path | None) -> Record | None:
+    """The lifecycle's file: one that --before may create, or one that --after reads."""
+    if before is not None:
+        if os.path.lexists(before):
+            raise cli.Refusal(f"{before} exists, and --before writes a new file")
+        return Record(before)
+    if after is None:
+        return None
+    try:
+        written = json.loads(after.read_text())
+    except (OSError, ValueError):
+        raise cli.Refusal(f"cannot read {after}, which --before writes") from None
+    if not (isinstance(written, dict) and written.keys() == {"boot", "deadline"} and isinstance(written["boot"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", written["boot"]) and is_count(written["deadline"])):
+        raise cli.Refusal(f"{after} is not a file of --before")
+    return Record(after, written)
+
+
+async def smoke_run(args: argparse.Namespace, config: dict[str, Any], manifest: dict[str, str], files: CardFiles,
+                    record: Record | None, names: list[str]) -> int:
     # trust_env=False: the keys go to loopback only, never through a proxy of the environment.
     async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=CALL_S), trust_env=False) as client:
         smoke = Smoke(client, f"http://127.0.0.1:{args.public_port}", f"http://127.0.0.1:{args.control_port}",
                       config["client_key"], config["control_key"], manifest["MODEL_ALIAS"],
-                      int(manifest["CONTEXT_TOKENS"]), args.fake)
-        return await run(smoke, args.only)
+                      int(manifest["CONTEXT_TOKENS"]), args.fake, files, record)
+        return await run(smoke, names)
 
 
 if __name__ == "__main__":

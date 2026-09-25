@@ -4,6 +4,7 @@ gives its default answers to any request, at once or paced by its delay options;
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import signal
 import socket
@@ -11,7 +12,8 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import IO, Any
 
 import httpx
 import pytest
@@ -59,16 +61,19 @@ def free_ports(count: int) -> list[int]:
 
 
 @asynccontextmanager
-async def launched(*options: str, config: str = CONFIG) -> AsyncIterator[Launch]:
+async def launched(*options: str, config: str = CONFIG, rows: Path | None = None) -> AsyncIterator[Launch]:
     """The launcher with the cases' service block, or another configuration, and these options, stopped with Ctrl-C,
-    as its banner says. It must exit cleanly, and nothing it printed may hold a key."""
+    as its banner says. It must exit cleanly, and nothing it printed may hold a key. With `rows`, its log rows go to
+    the end of that file, as the card's launcher writes the gateway's rows to its gateway.jsonl."""
     engine, public, control = free_ports(3)
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "simple_serving.dev", "--config", config, "--engine-port", str(engine),
-        "--public-port", str(public), "--control-port", str(control), *options,
-        cwd=ROOT, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    assert process.stdout is not None and process.stderr is not None
-    log = asyncio.ensure_future(process.stderr.read())
+    with contextlib.ExitStack() as files:
+        stderr: int | IO[bytes] = files.enter_context(rows.open("ab")) if rows is not None else asyncio.subprocess.PIPE
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "simple_serving.dev", "--config", config, "--engine-port", str(engine),
+            "--public-port", str(public), "--control-port", str(control), *options,
+            cwd=ROOT, stdout=asyncio.subprocess.PIPE, stderr=stderr)
+    assert process.stdout is not None
+    log = asyncio.ensure_future(process.stderr.read()) if process.stderr is not None else None
     try:
         banner = await asyncio.wait_for(process.stdout.readuntil(b"Ctrl-C stops both.\n"), 15)
         yield Launch(f"http://127.0.0.1:{public}", f"http://127.0.0.1:{control}", banner.decode())
@@ -76,7 +81,9 @@ async def launched(*options: str, config: str = CONFIG) -> AsyncIterator[Launch]
         if process.returncode is None:
             process.send_signal(signal.SIGINT)
         await asyncio.wait_for(process.wait(), 15)
-    printed = banner + await process.stdout.read() + await log
+    printed = banner + await process.stdout.read() + (await log if log is not None else b"")
+    if rows is not None:
+        printed += rows.read_bytes()  # noqa: ASYNC240 - a local file, once the launcher has exited
     assert process.returncode == 0
     for key in (BOT, CONTROL, OUTSIDE_A, OUTSIDE_B):
         assert key.encode() not in printed
