@@ -6,7 +6,8 @@ in a header, never in a URL, an argument or a log. The answer is checked as the 
 simple-chat): a 2xx status, then `"success": true`. Stop, not delete: the disk with the weights stays.
 
 On the owner's machine: the command shows the instance and resumes it, with the owner's key restricted to GET and PUT
-on that instance. It has no stop of its own: only the gateway stops the card, after its drain.
+on that instance, or on the first rental with the card's own key, which `cli trial` copies. It has no stop of its own:
+only the gateway stops the card, after its drain.
 
 A log row about an attempt holds a fixed category and Vast's HTTP status, never Vast's answer.
 """

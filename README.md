@@ -223,7 +223,7 @@ two files, arms no guard and ends with the same line, is decided before permanen
 On the owner's machine, `python -m simple_serving.cli` starts the card, holds the tunnel and asks for sleep:
 
 ```
-uv run python -m simple_serving.cli up | sleep | status | keys
+uv run python -m simple_serving.cli up | sleep | status | keys | trial --ssh-host HOST
 ```
 
 - `up` resumes the instance if it is stopped, waits for the gateway to be ready, and holds the tunnel in the
@@ -235,6 +235,8 @@ uv run python -m simple_serving.cli up | sleep | status | keys
 - `status` shows the instance's state in Vast and, through a forward of its own, the gateway's status, whether it
   serves the manifest's model, and its counts. Nothing of an answer is printed as it came.
 - `keys` makes the two gateway keys once, for the preparation above.
+- `trial --ssh-host HOST` is for the first rental. It reads the card's instance id and its container key over SSH and
+  writes them, with the host, into the configuration, printing none of them.
 
 The configuration is `~/.config/simple-serving/config.json`, open to its owner only, or the file that `--config`
 names:
@@ -244,8 +246,10 @@ names:
 ```
 
 `keys` writes the last two. `vast_api_key` is a Vast key allowed GET and PUT on that instance alone, never the account
-key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. The bot's model profile takes the address
-`http://127.0.0.1:8080` and the client key; it holds neither the control key nor a Vast key.
+key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. On the first rental `trial` writes the first
+three, and the card's own container key, one for that instance alone, stands in for the restricted key. The bot's
+model profile takes the address `http://127.0.0.1:8080` and the client key; it holds neither the control key nor a
+Vast key.
 
 ## The smoke
 
