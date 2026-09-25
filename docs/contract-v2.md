@@ -607,10 +607,14 @@ Before the rental, without a card:
 
 Written: the pins, in `card/manifest.env` and the two locks; the launch script, the card's launcher in
 `simple_serving/card.py`; and the smoke probes with the count matrix, `python -m simple_serving.smoke` (the README's
-"The smoke"), dry-run against the fake engine by `tests/test_smoke.py`. The TLS proxy and the load scenarios stay
-open. The trial needs neither, because it has no outside keys: after step 1 and step 2's privacy check below, it runs
-only the owner's internal work, the texts of simple-story-chat's action measurement, and is then destroyed. Both are
-written before a rental that goes further.
+"The smoke"), dry-run against the fake engine by `tests/test_smoke.py`. Its `privacy` probe stands on the card for
+the check that request and output logging is off: nothing of a request may reach a log, whatever vLLM prints. The
+engine error it brings about is a refusal before the stream: an error in the middle of a stream is not verified on
+the card, and the gateway's side of one is the case `engine-breaks-mid-stream`, against the fake engine. The TLS proxy
+and the load scenarios stay open, and are written before a rental that goes further. The trial needs neither, because
+it has no outside keys. After a smoke that passed, whose last probe is step 2's privacy check, the trial's internal
+work is the texts of simple-story-chat's action measurement alone, and then the operator deletes it with
+`npm run gpu:rent -- --destroy ID` and its read-back: no eval and no other long run.
 
 On the card:
 
@@ -619,8 +623,9 @@ On the card:
    uses with llama.cpp, since no released vLLM loads that GGUF. The time for this is fixed in advance. Once it is
    `ready`, one short completion. Then, before anything long, the stop: `sleep`, and the command reads `stopped` back
    from Vast; then `up` resumes the instance, and the rental's own onstart, with no start over SSH, starts exactly one
-   pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline unchanged. Then the
-   smoke probes and the count matrix run, with the real template. Eval and every other long run come after all this.
+   pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline unchanged, which the
+   smoke checks first. Then the smoke probes and the count matrix run, with the real template. Anything long comes
+   after all this: on the trial, the texts of simple-story-chat's action measurement alone, and no eval.
 
    The attempt, the preparation included, is over by the time the owner chose before creating the instance (the
    README's "The first rental"). If by then the stack or the weights do not work, or are too slow, the attempt stops
@@ -631,7 +636,9 @@ On the card:
    ([NVIDIA](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)), so nothing here
    promises that those pieces work there: the smoke finds out.
 2. Isolation and privacy, before any real story or outside key: a synthetic series checks that cache scopes stay
-   apart, and that the privacy marker shows up in no log of the engine, the proxy or the gateway.
+   apart, and that the privacy marker shows up in no log of the engine, the proxy or the gateway. On the trial, which
+   has one internal client and no proxy, the smoke's `privacy` probe is the marker half, over every log that the
+   gateway and the launcher write on the card; the cache-scope half is not needed there.
 3. llama.cpp with the bot's Q6_K, and vLLM with route A's 4-bit weights. The tokenizer, chat template, thinking,
    sampling, context and cache mode are pinned on each side. Cold and warm runs are measured apart. The two differ in
    engine and in weights at once, so this step measures both together and cannot tell the 4-bit loss from the
