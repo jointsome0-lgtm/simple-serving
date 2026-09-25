@@ -198,6 +198,13 @@ ssh <card> 'cd /workspace/simple-serving &&
 `--stop` ends the tunnel's hold too, and a new `up` confirms that the card is ready. `MTP_SPECULATIVE_TOKENS=0` and the
 same steps turn it off; the drafter's directory stays.
 
+Measured on a 5090 on 2026-09-26, with 3 drafted tokens and the manifest's fp8 cache: the pair was ready in 102 s.
+The weights took 20070 MiB, against 19149 without the drafter, and the cache 6011 MiB, 104492 tokens, against
+126003. Two of simple-story-chat's eval scenarios at once decoded their memory at 123 to 171 tokens a second each,
+against 57 to 67 without the drafter, and vLLM accepted 21718 of 34343 drafted tokens, scenes included. The
+`auto` (bfloat16) cache does not fit at this context: its 7281 MiB hold about 63000 tokens, the engine exits with
+`kv_cache_too_small`, and the launcher gives up and stops the instance at once.
+
 At every later start of the container the rental's own onstart starts the service. Its last line runs the service's
 `onstart.sh` from the persistent disk, once the preparation has put it there:
 
