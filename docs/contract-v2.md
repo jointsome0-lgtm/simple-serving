@@ -537,9 +537,10 @@ Also in simple-story-chat:
   start or pause buttons, no drain and no stop. It starts while the service is down, and a request that finds the
   service unavailable fails with `model_unavailable`.
 - The agent interface calls the service directly with class `agent` (section 2).
-- Over the new adapter the scheduler runs one lane, so the bot's calls stay one at a time. The guarantees built on
-  slots are off. Work marked `sharesPrefix` no longer has a slot where its prefix is sure to be cached, and the engine
-  may evict any prefix. This is a limitation of version 2. Several lanes without placement come later.
+- Over the new adapter the scheduler runs lanes of its own, without placement: `SIMPLE_CHAT_SERVING_LANES` of the
+  bot's calls at once, 2 by default and at most the readers' 4 places of section 7. No slot reaches the gateway, and
+  the bot sizes no call, since admission is the gateway's. The guarantees built on slots are off. Work marked
+  `sharesPrefix` no longer has a slot where its prefix is sure to be cached, and the engine may evict any prefix.
 - `usage.simple_serving` goes into new log fields, added to the whitelist in `local/model-error.ts` as non-negative
   integers. The adapter does not write these numbers into `promptMs` or `predictedMs`.
 - `generateMany` stays on llama.cpp (section 1).
@@ -701,3 +702,5 @@ GPTQ or NVFP4, a separate configuration, measured again.
   hyphens for dashes and fewer «ё». The owner takes that small loss for the throughput: on one 5090, two requests at
   once decoded at 123 to 171 tokens a second each, against the Q6_K's 136 on its one slot. Route B does not follow
   on quality; the entry on llmfan46's repository still holds.
+- 2026-09-26, the owner: the bot sends the gateway two calls at once by default, so that two readers are served
+  together, the reason route A was taken. Section 13's lanes without placement, left for later, are in.
