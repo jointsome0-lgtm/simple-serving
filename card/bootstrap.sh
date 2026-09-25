@@ -58,7 +58,8 @@ fetch() {
     [[ $(sha256sum < "$path") == "${entry#*:}  -" ]] || { rm -f "$path"; exit 1; }
   done
 }
-# vLLM loads every *.safetensors in the model's directory, so it keeps the pinned files alone.
+# vLLM loads every *.safetensors in the model's directory, so the files there that are not pinned go. Hidden ones
+# stay: this glob skips them, and so does vLLM's.
 for path in "$model"/*; do [[ ,$MODEL_FILES == *,"${path##*/}":* ]] || rm -f "$path"; done
 fetch "$MODEL_REPO" "$MODEL_REVISION" "$MODEL_FILES" "$model"
 fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "$TOKENIZER_FILES" "$state/tokenizer"
