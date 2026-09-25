@@ -214,9 +214,9 @@ is not confirmed: costs may go on. The attempts go on every 30 seconds, but whil
 The service stops its card and never deletes it. A disposable trial rental's onstart is simple-story-chat's
 `gpu/trial-onstart.sh` with the line above at its end: it adds the owner's SSH key when one is given, writes the
 instance's id and key, which the first preparation needs, and arms a guard that deletes the instance three hours after
-the first start. The guard deletes with the container's key, as the card stops, so a key that Vast refuses defeats
-both. An onstart for a permanent rental, which writes the two files, arms no guard and ends with the same line, is
-decided before permanent use.
+the first start: rent.mjs's default, `--hours 3`, which the first rental uses. The guard deletes with the container's
+key, as the card stops, so a key that Vast refuses defeats both. An onstart for a permanent rental, which writes the
+two files, arms no guard and ends with the same line, is decided before permanent use.
 
 ## The command
 
@@ -352,11 +352,16 @@ it and the counts the search took. `versions` shows each pin as this checkout ha
 another, and the card's Python. `seed_repeats` passes nothing. No line holds a key, a prompt, an answer or reasoning, so
 the lines may be kept.
 
-Exit 0, with `simple-serving smoke: 9 of 9 probes passed` on standard error, ends step 1: eval and the other long runs
-may follow. A probe that fails, in either run of the smoke, ends the attempt there: `sleep` at once, with its stop
-confirmed from outside as above, or the operator's deletion where it does not come. Nothing is fixed, retried or tuned
-on the paid card. The lines say what failed, and another configuration is measured on a later rental (contract
-section 15). Exit 2 sent nothing to the card; its line on standard error says why.
+Exit 0, with `simple-serving smoke: 9 of 9 probes passed` on standard error, ends step 1. After it, and after step 2's
+privacy check, the trial runs only the owner's internal work, the texts of simple-story-chat's action measurement, and
+then the operator deletes it with `npm run gpu:rent -- --destroy ID`. A probe that fails, in either run of the smoke,
+ends the attempt there: `sleep` at once, with its stop confirmed from outside as above, or the operator's deletion
+where it does not come, and then the trial's deletion. Nothing is fixed, retried or tuned on the paid card. The lines
+say what failed, and another configuration is measured on a later rental (contract section 15). Exit 2 sent nothing to
+the card; its line on standard error says why.
 
 Open, and not built: unattended or permanent use needs an independent budget path, one that bounds the costs without
 the container's key and without an operator watching.
+
+Open as well: the bot's story audit asks for 16384 tokens, and the `internal` class refuses more than 8192 (contract
+section 7). Nothing changes for the first rental, whose `schemas` probe asks each schema for 2048 at most.

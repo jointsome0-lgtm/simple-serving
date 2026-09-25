@@ -174,7 +174,7 @@ may be absent, such as `usage`, `finish_reason` or a field of the delta, null co
 
 - Every chunk has `model` equal to the alias.
 - A chunk has either one choice with `index: 0` or `choices: []`.
-- A choice's `delta` may be empty, may hold only `role`, or may hold `content` or `reasoning_content`. The gateway
+- A choice's `delta` may be empty, or may hold one field: `role`, `content` or `reasoning_content`. The gateway
   renames whatever field the pinned engine uses for reasoning to `reasoning_content`. Reasoning is not part of the
   text.
 - Exactly one chunk has a `finish_reason`, `stop` or `length`. Its delta may be empty.
@@ -561,8 +561,9 @@ Everything below is written and dry-run before the card is rented. The rental ru
 (`docs/gpu.md`, "While the cards are paid for").
 
 The first rental is a disposable trial. Its own onstart, simple-story-chat's `gpu/trial-onstart.sh`, arms a guard
-that deletes the instance three hours after the first start, and writes the instance's id and key, which the first
-preparation needs; its last line runs the card's `onstart.sh` (section 8). The guard deletes with the container's key,
+that deletes the instance three hours after the first start (the first rental uses rent.mjs's default, `--hours 3`),
+and writes the instance's id and key, which the first preparation needs; its last line runs the card's `onstart.sh`
+(section 8). The guard deletes with the container's key,
 the key of the card's stop, so a key that Vast refuses or has revoked defeats both: nothing on the card then bounds
 the costs, and before the launcher runs the card has no stop of its own. The operator is that bound, the Claude
 session that runs the rental, from the moment the instance is created. It reads the instance with the owner's
@@ -602,8 +603,9 @@ Before the rental, without a card:
 Written: the pins, in `card/manifest.env` and the two locks; the launch script, the card's launcher in
 `simple_serving/card.py`; and the smoke probes with the count matrix, `python -m simple_serving.smoke` (the README's
 "The smoke"), dry-run against the fake engine by `tests/test_smoke.py`. The TLS proxy and the load scenarios stay
-open. The trial needs neither, since it has no outside keys and stops after step 1 below; they are written before a
-rental that goes further.
+open. The trial needs neither, because it has no outside keys: after step 1 and step 2's privacy check below, it runs
+only the owner's internal work, the texts of simple-story-chat's action measurement, and is then destroyed. Both are
+written before a rental that goes further.
 
 On the card:
 
