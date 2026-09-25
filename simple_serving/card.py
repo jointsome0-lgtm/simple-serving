@@ -154,8 +154,7 @@ class Card:
                 {"sha256": keys["control"], "label": "control", "classes": [], "default": None, "scopes": False,
                  "control": True},
             ],
-            "versions": {"vllm": m["VLLM_VERSION"], "model_revision": m["MODEL_REVISION"],
-                         "tokenizer_revision": m["TOKENIZER_REVISION"]},
+            "versions": pinned_versions(m),
         }
 
     def prepared(self) -> bool:
@@ -168,6 +167,12 @@ class Card:
                     and vast.from_environment(self.credential) is not vast.unconfigured)
         except OSError:
             return False
+
+
+def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
+    """The engine's pins that the gateway shows the control key in /v1/state, beside its own (contract section 12)."""
+    return {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
+            "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
 
 
 def read_manifest(code: Path = CODE) -> dict[str, str]:
