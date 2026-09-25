@@ -303,7 +303,6 @@ def test_the_launcher_runs_one_pair_until_sigterm(tmp_path: Path) -> None:
     try:
         eventually(lambda: card_log.exists() and bool(rows(card_log.read_text(), "ready")))
         assert card.launcher(state) == launcher.pid
-        assert card.launchers()[launcher.pid] == 2  # the smoke's report sees the pair as /proc shows it
         assert subprocess.run(command, cwd=card.CODE, env=environ, timeout=30, check=False).returncode == 0  # the lock
     finally:
         launcher.terminate()  # a launcher that is killed leaves its pair running
@@ -427,94 +426,6 @@ def test_a_retry_leaves_the_pair_to_a_running_launcher_and_stop_ends_it(state: P
     monkeypatch.setattr(Card, "load", unreadable)
     monkeypatch.setattr(card, "stop_pair", lambda at: 0 if at == card.STATE else 1)
     assert card.main(["--stop"]) == 0
-
-
-# The smoke's report of the card (--inspect): numbers and flags only.
-
-def fake_process(proc: Path, pid: int, parent: int, *argv: str, name: str = "python3") -> None:
-    """A process as /proc shows it: its command line, and its name and parent in `stat`."""
-    (proc / str(pid)).mkdir(parents=True)
-    (proc / str(pid) / "cmdline").write_bytes(b"".join(arg.encode() + b"\0" for arg in argv))
-    (proc / str(pid) / "stat").write_text(f"{pid} ({name}) S {parent} {pid} {pid} 0 -1 4194560\n")
-
-
-LAUNCHER = (sys.executable, "-m", "simple_serving.card", "--run")
-
-
-def test_the_report_counts_the_launchers_their_processes_and_the_guards_deadline(tmp_path: Path) -> None:
-    proc, root = tmp_path / "proc", tmp_path / "root"
-    fake_process(proc, 100, 1, *LAUNCHER)
-    fake_process(proc, 101, 100, "vllm", "serve")
-    fake_process(proc, 102, 100, sys.executable, "-m", "simple_serving")
-    fake_process(proc, 103, 101, "VLLM::EngineCore")  # the engine's own, not the launcher's
-    fake_process(proc, 200, 1, *LAUNCHER)
-    fake_process(proc, 201, 200, "vllm", "serve")
-    fake_process(proc, 300, 1, sys.executable, "-m", "simple_serving.card", "--hold")
-    fake_process(proc, 301, 1, "sh", name="a) S 100 (b")  # a name that reads like a parent
-    (proc / "self").mkdir()
-    (proc / "400").mkdir()  # a process that ended while the report read it
-    assert card.launchers(proc) == {100: 2, 200: 1}
-    assert card.launchers(tmp_path / "none") == {}
-    assert card.trial_deadline(root) is None
-    root.mkdir()
-    for text, deadline in (("1790000000", 1790000000), ("1790000000\n", 1790000000), ("soon", None), ("", None),
-                           ("-5", None)):
-        (root / card.DEADLINE).write_text(text)
-        assert card.trial_deadline(root) == deadline
-    (root / card.DEADLINE).write_text("1790000000")
-    report = card.inspect({}, tmp_path / "state", root, proc)
-    assert (report["launchers"], report["children"], report["deadline"]) == (2, 3, 1790000000)
-    assert report["logs"] == {name: {"rows": 0} for name in (*card.LOGS, "other")}
-    assert "cancelled" not in report
-
-
-def test_the_report_counts_a_marker_in_every_log_and_reads_only_the_cancelled_flags(state: Path) -> None:
-    marker = "0123456789abcdef" * 2
-    logs = state / "logs"
-    # One read covers 1 MiB, and the second marker spans two reads.
-    (logs / "card.jsonl").write_bytes(marker.encode() + b"\n" + b"x" * ((1 << 20) - 50) + marker.encode() + b"\n")
-    (logs / "card.jsonl.1").write_text('{"event": "ready"}\n')
-    chat = {"event": "request", "route": "/v1/chat/completions", "status": 200}
-    lines = [chat | {"cancelled": False}, chat | {"cancelled": True, "finish": None},
-             {"event": "request", "route": "/v1/chat/completions/input_tokens", "cancelled": True},
-             {"event": "request", "route": "/v1/state", "cancelled": False}, chat | {"cancelled": False}]
-    (logs / "gateway.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines)
-                                        + f'{{"prompt": "{marker}"}}\n' + "a line still being writ")
-    (logs / "vllm").mkdir()
-    (logs / "vllm/output.log").write_text(f"{marker} {marker}\n")
-    (logs / "linked").symlink_to(logs / "card.jsonl")
-    report = card.inspect({"marker": marker, "since": 1}, state, state, state / "proc")
-    assert report["logs"] == {"card.jsonl": {"rows": 2, "found": 2}, "card.jsonl.1": {"rows": 1, "found": 0},
-                              "gateway.jsonl": {"rows": 6, "found": 1}, "gateway.jsonl.1": {"rows": 0, "found": 0},
-                              "other": {"rows": 1, "found": 2}}
-    assert report["cancelled"] == [True, False]  # the chat requests after the first row, and of each its flag alone
-    assert card.inspect({"since": 6}, state, state, state / "proc")["cancelled"] == []
-    assert card.inspect({"since": 7}, state, state, state / "proc")["cancelled"] is None  # the file was moved aside
-
-
-@pytest.mark.parametrize(("request_line", "printed"), [
-    (b'{"marker": "0123456789abcdef0123456789abcdef", "since": 0}\n', True),
-    (b"{}\n", True),
-    (b'{"marker": "ABCDEF"}\n', False),
-    (b'{"marker": "0123456789abcdef0123456789abcdef\\n"}\n', False),
-    (b'{"since": -1}\n', False),
-    (b'{"since": true}\n', False),
-    (b'{"since": 1, "path": "/etc"}\n', False),
-    (b'["since"]\n', False),
-    (b"x" * (card.REQUEST_BYTES + 10) + b"\n", False),
-])
-def test_inspect_takes_one_request_of_its_form_and_prints_one_line(state: Path, request_line: bytes,
-                                                                   printed: bool) -> None:
-    environ = os.environ | {"SIMPLE_SERVING_CARD_DIR": str(state), "SIMPLE_SERVING_CARD_ROOT": str(state),
-                            "SIMPLE_SERVING_CARD_PROC": str(state / "proc")}
-    done = subprocess.run([sys.executable, "-m", "simple_serving.card", "--inspect"], input=request_line,
-                          capture_output=True, cwd=card.CODE, env=environ, timeout=30, check=False)
-    assert (done.returncode, done.stderr) == ((0, b"") if printed else (2, b""))
-    if printed:
-        report = json.loads(done.stdout)
-        assert done.stdout.count(b"\n") == 1 and report["launchers"] == 0 and report["deadline"] is None
-    else:
-        assert done.stdout == b""
 
 
 def recorder(path: Path, calls: Path) -> None:

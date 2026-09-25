@@ -43,11 +43,9 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
   with stand-ins for vLLM, the gateway, pip, curl and flock;
 - `tests/test_cli.py`: the command on the owner's machine, against a fake Vast and a fake SSH that forwards to the
   gateway;
-- `tests/test_bot_schemas.py`: the copy of the bot's JSON schemas, and the check of an answer against one;
-- `tests/test_smoke.py`: the first rental's smoke: the reading of a stream, the command line, and the whole smoke
-  through the dev launcher;
-- `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher with its fake engine's
-  default answers.
+- `tests/test_smoke.py`: the first rental's smoke: the privacy probe's verdict, and the whole smoke through the dev
+  launcher, whose output holds no key, no prompt and nothing of the model's text;
+- `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher.
 
 Three kinds of test stay apart (contract section 14). A client's adapter runs the public steps of the cases in its own
 repository. The control routes, the sleep and the card are tested here alone. An opt-in test in simple-story-chat runs
@@ -94,10 +92,10 @@ The fake engine counts a prompt as the characters of all message contents divide
 generation with a fixed synthetic sentence in a few chunks, then `stop` and its usage. With thinking on, a fixed
 thought comes first, in the reasoning field. `max_tokens`, counted the same way, cuts the answer and ends it with
 `length`, and a schema with a `pattern` that is not a regular expression gets 400 before any stream. It answers in
-milliseconds, so requests rarely overlap. `--first-event-delay-ms N` makes it pause N ms before the first event of each generation, as
-for a long prompt, and `--event-delay-ms N` after each event; with them, concurrent requests fill the places and wait.
-Both default to 0. Like the card's, the gateway falls asleep after 780 seconds without a request of ours (contract
-section 8); it has no instance to stop, so it then stays drained until the launcher starts again.
+milliseconds, so requests rarely overlap. `--first-event-delay-ms N` makes it pause N ms before the first event of each
+generation, as for a long prompt, and `--event-delay-ms N` after each event; with them, concurrent requests fill the
+places and wait. Both default to 0. Like the card's, the gateway falls asleep after 780 seconds without a request of
+ours (contract section 8); it has no instance to stop, so it then stays drained until the launcher starts again.
 
 ## Running the gateway
 
@@ -312,11 +310,11 @@ its `proc/` and the guard's deadline file stand for the card's processes and `/r
 three things truthfully: whether an answer follows its schema, whether a count equals the usage, which it computes
 the same way, and whether a seed repeats. `--fake` leaves those unchecked and names them in the line's
 `not_verifiable`, it refuses the forward's ports 8080 and 8081, and it reads the card's report only from `--card-dir`,
-so it never runs against a card. The rest runs as it would on the card. The tests also fail the abort probe as
-`inconclusive` when the gateway never learns that the client left, or when the stream ended first, and fail the
-privacy probe on a marker planted in any log. Whether vLLM thinks, cuts at `max_tokens` and refuses the schema as the
-fake does, only the card shows. By hand, with such a launcher block in `dev.json` and the smoke's two keys in
-`keys.json`, open to its owner only:
+so it never runs against a card. The rest runs as it would on the card. The tests check that nothing the smoke prints
+holds a key, a prompt or the fake's text, and fail the privacy probe on a marker planted in any log and on a request
+that left no row. Whether vLLM thinks, cuts at `max_tokens` and refuses the schema as the fake does, only the card
+shows. By hand, with such a launcher block in `dev.json` and the smoke's two keys in `keys.json`, open to its owner
+only:
 
 ```
 mkdir -p logs/dry-run/logs
