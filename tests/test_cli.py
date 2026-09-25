@@ -221,7 +221,9 @@ import json, os, sys
 with open(os.environ["SSH_ARGS"], "w") as file:
     json.dump(sys.argv[1:], file)
 with open(os.environ["SSH_ANSWER"], "rb") as file:
-    sys.stdout.buffer.write(file.read())
+    answer = file.read()
+sys.stdout.buffer.write(answer)
+sys.stderr.buffer.write(answer)  # as a card whose startup printed the files
 """
 INSTANCE, KEY = "31415926", "synthetic-container-key"
 
@@ -239,7 +241,7 @@ def card_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_trial_writes_the_cards_id_and_key_beside_the_keys_prints_neither_and_a_refusal_changes_nothing(
-        tmp_path: Path, card_answer: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        tmp_path: Path, card_answer: Path, capfd: pytest.CaptureFixture[str]) -> None:
     path = tmp_path / "simple-serving" / "config.json"
     assert cli.main(["--config", str(path), "keys"]) == 0
     before = json.loads(path.read_text())
@@ -251,7 +253,7 @@ def test_trial_writes_the_cards_id_and_key_beside_the_keys_prints_neither_and_a_
     assert json.loads(path.read_text()) == before
     card_answer.write_bytes(f"{INSTANCE}\n{KEY}\n".encode())
     assert cli.main(["--config", str(path), "--ssh-host", "card", "trial"]) == 0
-    printed = capsys.readouterr()
+    printed = capfd.readouterr()
     assert not any(value in printed.out + printed.err for value in (INSTANCE, KEY))
     args = json.loads((tmp_path / "args.json").read_text())
     assert args[-2:] == ["card", cli.READ_TRIAL] and {"BatchMode=yes", "StrictHostKeyChecking=yes"} <= set(args)

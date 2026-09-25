@@ -240,8 +240,9 @@ async def trial(path: Path, host: str) -> int:
     if not SSH_HOST.fullmatch(host):
         raise Refusal("the SSH host has the wrong form")
     config = read_config(path)
+    # Standard error is dropped unread: whatever the card prints there could hold the key.
     process = await asyncio.create_subprocess_exec(*SSH, host, READ_TRIAL, stdin=asyncio.subprocess.DEVNULL,
-                                                   stdout=asyncio.subprocess.PIPE)
+                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     assert process.stdout is not None
     answer = b""
     try:
