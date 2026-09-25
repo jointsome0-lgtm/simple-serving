@@ -150,7 +150,8 @@ comes with outside keys. The gateway refuses to start unless `listen.control.hos
 loopback IP addresses, in 127.0.0.0/8 or `::1`; a name, even `localhost`, is refused. vLLM listens on loopback with
 the served model name equal to `alias`, priority scheduling (`--scheduling-policy priority`), prefix caching,
 `--enable-prompt-tokens-details` for cached tokens, a reasoning parser that puts the model's thinking in a field of its
-own, and its request logging off (contract section 10).
+own, a schema's JSON from xgrammar alone with no whitespace between its tokens, and its request logging off (contract
+section 10).
 
 ## The card
 

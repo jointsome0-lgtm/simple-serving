@@ -590,6 +590,8 @@ Before the rental, without a card:
   - `--scheduling-policy priority`: without it vLLM refuses a non-zero priority, and every `agent`, `internal` and
     `external` request fails;
   - prefix caching with `cache_salt`, and `--enable-prompt-tokens-details` for `cached_tokens`;
+  - `--structured-outputs-config` with the backend `xgrammar` and `disable_any_whitespace`: that backend has no
+    fallback, so every schema in `bot_schemas.json` must compile with the pinned xgrammar;
   - request and output logging off;
   - the name of the reasoning field, the finish reasons, and the shape of an error in the middle of a stream;
   - the model name in every chunk, the usage chunk included: the gateway refuses a chunk that does not name the alias;
@@ -683,3 +685,6 @@ GPTQ or NVFP4, a separate configuration, measured again.
   the owner's machine, so the entry above cannot hold. The owner made a restricted key, which read, confirmed the
   stop of and resumed the next trial from outside. `vast_api_key` is that key on every rental, and `cli trial` writes
   only the instance's id and the SSH host.
+- 2026-09-25, the owner, after the rehearsal's `frame` answer ran out its 900 tokens with 1668 characters: vLLM
+  builds a schema's JSON with xgrammar alone and no whitespace between its tokens. Whitespace as the cause is not
+  measured yet; on an answer cut short the smoke now counts its whitespace and its characters outside ASCII.

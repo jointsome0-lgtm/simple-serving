@@ -138,6 +138,9 @@ class Card:
             "--gpu-memory-utilization", m["GPU_MEMORY_UTILIZATION"], "--kv-cache-dtype", m["KV_CACHE_DTYPE"],
             "--scheduling-policy", "priority", "--enable-prefix-caching", "--enable-prompt-tokens-details",
             "--reasoning-parser", "gemma4",  # the model's thinking in the reasoning field, apart from the answer
+            # A schema's JSON with no whitespace between its tokens, so that no answer spends max_tokens on it. vLLM
+            # allows that only with a named backend, and xgrammar compiles every schema in bot_schemas.json.
+            "--structured-outputs-config", '{"backend": "xgrammar", "disable_any_whitespace": true}',
             "--language-model-only",  # text only: the vision tower stays off the GPU
             # Sampling defaults from vLLM: the model's generation_config.json is pinned for its stop ids alone.
             "--generation-config", "vllm",

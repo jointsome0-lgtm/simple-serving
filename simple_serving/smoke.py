@@ -105,11 +105,10 @@ FILLER = "The keeper climbs the stair, trims the wick and lights the lamp.\n"  #
 ENDING = "How does the night end? One sentence."
 WORD_SCHEMA = {"type": "object", "properties": {"word": {"type": "string", "minLength": 1, "maxLength": 20}},
                "required": ["word"], "additionalProperties": False}
-# The refusal: a pattern with an unclosed group, which no dialect of regular expressions accepts. With its default
-# backend, `auto`, vLLM 0.30.0 builds the grammar with xgrammar (0.2.8 in the card's lock) and, when that fails, with
-# llguidance (1.7.6); both refuse this pattern, as checked with those versions. It builds the grammar only once it has
-# answered 200, so its refusal is the stream's first event, an error whose `code` is 400, and the gateway answers
-# that with 400 invalid_request (section 4).
+# The refusal: a pattern with an unclosed group, which no dialect of regular expressions accepts. The card runs vLLM
+# 0.30.0 with the backend xgrammar alone (0.2.8 in the card's lock), which refuses this pattern, as checked with that
+# version. vLLM checks the schema only once it has answered 200, so its refusal is the stream's first event, an error
+# whose `code` is 400, and the gateway answers that with 400 invalid_request (section 4).
 UNCOMPILABLE = {"type": "object", "properties": {"word": {"type": "string", "pattern": "(unclosed"}},
                 "required": ["word"], "additionalProperties": False}
 FIELDS: dict[str, Any] = {
@@ -740,12 +739,15 @@ async def probe_schemas(smoke: Smoke) -> dict[str, Any]:
             chat_template_kwargs={"enable_thinking": False},
             response_format={"type": "json_schema", "json_schema": {"name": "reply", "strict": True,
                                                                     "schema": entry.schema}}))
-        failed, answer = [], []
+        failed, answer, cut = [], [], {}
         if stream.ok and stream.finish != "stop":
             failed.append("finish")  # an answer cut short cannot follow its schema
+            # What filled it, in counts alone and never its text: whitespace, or characters outside ASCII.
+            cut = {"space_chars": sum(c.isspace() for c in stream.content),
+                   "non_ascii_chars": sum(not c.isascii() for c in stream.content)}
         elif stream.ok and not smoke.fake:
             answer = answer_problems(stream.content, entry.schema)
-        parts[entry.name] = answered(stream, failed, answer)
+        parts[entry.name] = answered(stream, failed, answer) | cut
         if not parts[entry.name]["ok"]:
             break
     return combined(parts, passed=sum(part["ok"] for part in parts.values()), of=len(entries))
