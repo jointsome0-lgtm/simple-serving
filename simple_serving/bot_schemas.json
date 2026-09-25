@@ -1,0 +1,139 @@
+{
+  "about": "The JSON schemas that simple-story-chat sends in response_format, copied for the smoke's probe `schemas` (contract section 15). Each is the schema as the bot builds it at the commit below, in the file and function or line named, with its per-call parts filled in with synthetic values (`filled`). `bot_max_tokens` and `purpose` are the bot's; the bot samples the purpose memory at temperature 0.2 and the rest at 0.8, with top_p 0.95, top_k 64, min_p 0, repetition_penalty 1 and thinking off, and names every schema `reply`, strict (local/serving.ts). The prompts are the smoke's own, synthetic. A copy is replaced as a whole with its new commit, never edited in place.",
+  "repository": "simple-story-chat",
+  "commit": "875f89f382aaa724caf7179623b0dfdbea91f821",
+  "schemas": [
+    {
+      "name": "sheet",
+      "path": "local/illustrate.ts",
+      "where": "sheetRequest",
+      "bot_max_tokens": 900,
+      "purpose": null,
+      "filled": null,
+      "system": "You describe the characters of a scene for an illustrator. Answer with JSON only.",
+      "user": "Scene: Pavel, the old lighthouse keeper, hands Vera the key to the store room. Describe Pavel and Vera: for each the name, the look and the outfit, each in a few words.",
+      "schema": {"type": "object", "additionalProperties": false, "required": ["characters"], "properties": {"characters": {"type": "array", "maxItems": 6, "items": {"type": "object", "additionalProperties": false, "required": ["name", "look", "outfit"], "properties": {"name": {"type": "string"}, "look": {"type": "string"}, "outfit": {"type": "string"}}}}}}
+    },
+    {
+      "name": "frame",
+      "path": "local/illustrate.ts",
+      "where": "frameRequest",
+      "bot_max_tokens": 900,
+      "purpose": null,
+      "filled": null,
+      "system": "You describe one frame of a scene for an illustrator. Answer with JSON only.",
+      "user": "Scene: at dusk Pavel, the old lighthouse keeper, hands Vera the key to the store room at the foot of the tower. Describe the frame, every field in a few words, with Pavel and Vera as the people.",
+      "schema": {"type": "object", "additionalProperties": false, "required": ["moment", "shot", "setting", "objects", "props", "light", "people"], "properties": {"props": {"type": "string"}, "moment": {"type": "string"}, "shot": {"type": "string"}, "setting": {"type": "string"}, "objects": {"type": "string"}, "light": {"type": "string"}, "people": {"type": "array", "maxItems": 4, "items": {"type": "object", "additionalProperties": false, "required": ["who", "look", "clothes", "state", "action"], "properties": {"who": {"type": "string"}, "look": {"type": "string"}, "clothes": {"type": "string"}, "state": {"type": "string"}, "action": {"type": "string"}}}}}}
+    },
+    {
+      "name": "memory_plain",
+      "path": "local/memory.ts",
+      "where": "plainRequest",
+      "bot_max_tokens": 4096,
+      "purpose": "memory",
+      "filled": "the ids of the scenes summarised: n3 and n4",
+      "system": "You keep the memory of an interactive story. Answer with JSON only.",
+      "user": "Scene n3: at 20:00 on 2 August Pavel, the lighthouse keeper, gives Vera the key to the store room. Scene n4: Ilya asks Vera where the key is, and she does not answer. List at most three facts, each in one short sentence, with the scenes it comes from.",
+      "schema": {"type": "object", "required": ["facts"], "additionalProperties": false, "properties": {"facts": {"type": "array", "minItems": 1, "maxItems": 200, "items": {"type": "object", "required": ["kind", "at", "text", "source"], "additionalProperties": false, "properties": {"kind": {"type": "string", "enum": ["event", "state", "knowledge", "relationship", "promise", "directive", "uncertainty"]}, "at": {"type": "string", "minLength": 1, "maxLength": 200}, "text": {"type": "string", "minLength": 1, "maxLength": 4000}, "source": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"type": "string", "enum": ["n3", "n4"]}}}}}}}
+    },
+    {
+      "name": "memory_sgr",
+      "path": "local/memory.ts",
+      "where": "sgrRequest",
+      "bot_max_tokens": 8192,
+      "purpose": "memory",
+      "filled": "the ids of the scenes summarised: n3 and n4",
+      "system": "You keep the memory of an interactive story. Answer with JSON only.",
+      "user": "Scene n3, the player's input: Pavel gives Vera the key. Scene n3, the text: at 20:00 Pavel gives Vera the key to the store room. Scene n4, the text: Ilya asks Vera where the key is. First quote the evidence, one short quote each, with the ids e1, e2 and so on; then no conflicts; then at most two facts, each citing its evidence by id.",
+      "schema": {"type": "object", "properties": {"evidence": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string", "pattern": "^e[1-9][0-9]{0,3}$"}, "scene": {"type": "string", "enum": ["n3", "n4"]}, "part": {"type": "string", "enum": ["input", "text"]}, "quote": {"type": "string", "minLength": 1, "maxLength": 1000}}, "required": ["id", "scene", "part", "quote"], "additionalProperties": false}, "minItems": 1, "maxItems": 400}, "conflicts": {"type": "array", "items": {"type": "object", "properties": {"input": {"type": "string", "pattern": "^e[1-9][0-9]{0,3}$"}, "text": {"type": "string", "pattern": "^e[1-9][0-9]{0,3}$"}, "resolution": {"type": "string", "enum": ["author_priority", "unresolved"]}}, "required": ["input", "text", "resolution"], "additionalProperties": false}, "minItems": 0, "maxItems": 100}, "facts": {"type": "array", "items": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["event", "state", "knowledge", "relationship", "promise", "directive", "uncertainty"]}, "at": {"type": "string", "minLength": 1, "maxLength": 200}, "status": {"type": "string", "enum": ["actual", "planned", "cancelled", "uncertain"]}, "text": {"type": "string", "minLength": 1, "maxLength": 4000}, "evidence": {"type": "array", "items": {"type": "string", "pattern": "^e[1-9][0-9]{0,3}$"}, "minItems": 1, "maxItems": 40}}, "required": ["kind", "at", "status", "text", "evidence"], "additionalProperties": false}, "minItems": 1, "maxItems": 200}}, "required": ["evidence", "conflicts", "facts"], "additionalProperties": false}
+    },
+    {
+      "name": "walk_judge",
+      "path": "local/walk-panel.ts",
+      "where": "judgeRequest",
+      "bot_max_tokens": 8192,
+      "purpose": "memory",
+      "filled": null,
+      "system": "You check a step of a story against the steps before it. Answer with JSON only.",
+      "user": "Before: the lamp at the top of the tower is red. Now: Pavel climbs the tower and sees the green lamp. Is the new step consistent with what came before? Name each contradiction briefly.",
+      "schema": {"type": "object", "required": ["verdict", "contradictions"], "additionalProperties": false, "properties": {"verdict": {"type": "string", "enum": ["consistent", "inconsistent"]}, "contradictions": {"type": "array", "maxItems": 20, "items": {"type": "object", "required": ["now", "before", "where", "kind"], "additionalProperties": false, "properties": {"now": {"type": "string", "maxLength": 400}, "before": {"type": "string", "maxLength": 400}, "where": {"type": "string", "maxLength": 60}, "kind": {"type": "string", "enum": ["number", "item", "place", "person", "knowledge", "time", "author_step", "other"]}}}}}}
+    },
+    {
+      "name": "walk_cross",
+      "path": "local/walk-panel.ts",
+      "where": "crossRequest",
+      "bot_max_tokens": 8192,
+      "purpose": "memory",
+      "filled": "two findings to check",
+      "system": "You check findings about a story. Answer with JSON only.",
+      "user": "Story: the lamp is red; later Pavel sees a green lamp. Findings: 1. The lamp changes colour without a reason. 2. Pavel is not on the island. Check each finding against the story, with a short note.",
+      "schema": {"type": "object", "required": ["checks"], "additionalProperties": false, "properties": {"checks": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "object", "required": ["finding", "confirmed", "note"], "additionalProperties": false, "properties": {"finding": {"type": "integer", "minimum": 1, "maximum": 2}, "confirmed": {"type": "boolean"}, "note": {"type": "string", "maxLength": 300}}}}}}
+    },
+    {
+      "name": "seed_audit",
+      "path": "local/walk-panel.ts",
+      "where": "seedAuditRequest",
+      "bot_max_tokens": 8192,
+      "purpose": "memory",
+      "filled": null,
+      "system": "You audit the seed of a story for contradictions and ambiguities. Answer with JSON only.",
+      "user": "Seed: Pavel keeps the lighthouse alone. Pavel and his brother keep the lighthouse together. The key hangs by the door. Quote each problem briefly and explain it in one sentence.",
+      "schema": {"type": "object", "required": ["issues"], "additionalProperties": false, "properties": {"issues": {"type": "array", "maxItems": 20, "items": {"type": "object", "required": ["kind", "quote", "note"], "additionalProperties": false, "properties": {"kind": {"type": "string", "enum": ["contradiction", "ambiguity"]}, "quote": {"type": "string", "maxLength": 300}, "note": {"type": "string", "maxLength": 400}}}}}}
+    },
+    {
+      "name": "story_audit",
+      "path": "local/walk-panel.ts",
+      "where": "storyAuditRequest",
+      "bot_max_tokens": 16384,
+      "purpose": "memory",
+      "filled": null,
+      "system": "You audit a story for contradictions and ambiguities. Answer with JSON only.",
+      "user": "Seed: the lamp is red. Scene 1: Pavel lights the red lamp. Scene 2: Pavel sees that the lamp is green. List each problem with its scene number, a short quote and a one-sentence note.",
+      "schema": {"type": "object", "required": ["issues"], "additionalProperties": false, "properties": {"issues": {"type": "array", "maxItems": 40, "items": {"type": "object", "required": ["kind", "scene", "quote", "note"], "additionalProperties": false, "properties": {"kind": {"type": "string", "enum": ["contradiction", "ambiguity"]}, "scene": {"type": "integer", "minimum": 1}, "quote": {"type": "string", "maxLength": 300}, "note": {"type": "string", "maxLength": 400}}}}}}
+    },
+    {
+      "name": "model_probe",
+      "path": "local/model-probe.ts",
+      "where": "line 80",
+      "bot_max_tokens": 192,
+      "purpose": null,
+      "filled": null,
+      "system": "A synthetic check of the answer's format.",
+      "user": "Answer with one plain word, without JSON or braces.",
+      "schema": {"type": "object", "properties": {"schema_check": {"const": "ok"}}, "required": ["schema_check"], "additionalProperties": false}
+    },
+    {
+      "name": "memory_recall",
+      "path": "local/memory-probe.ts",
+      "where": "line 240",
+      "bot_max_tokens": 8192,
+      "purpose": "memory",
+      "filled": "two questions, keeper and time",
+      "system": "Answer the check questions from the story alone, in the format given.",
+      "user": "Story: at 20:00 Pavel gives Vera the key to the store room. Questions: keeper: who gives the key? time: at what time? Answer each by its key.",
+      "schema": {"type": "object", "required": ["answers"], "additionalProperties": false, "properties": {"answers": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "object", "required": ["key", "value"], "additionalProperties": false, "properties": {"key": {"type": "string", "enum": ["keeper", "time"]}, "value": {"type": "string"}}}}}}
+    },
+    {
+      "name": "scene_judge",
+      "path": "local/scene-judge.ts",
+      "where": "line 44",
+      "bot_max_tokens": 512,
+      "purpose": "memory",
+      "filled": "two questions, given and locked",
+      "system": "You judge a scene against the established facts. Answer each question yes or no.",
+      "user": "Facts: Pavel has the key. Scene: Pavel gives Vera the key, and she opens the store room. Questions: given: did Pavel give the key away? locked: is the store room still locked?",
+      "schema": {"type": "object", "required": ["answers"], "additionalProperties": false, "properties": {"answers": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "object", "required": ["key", "value"], "additionalProperties": false, "properties": {"key": {"type": "string", "enum": ["given", "locked"]}, "value": {"type": "string", "enum": ["yes", "no"]}}}}}}
+    },
+    {
+      "name": "judge_extract",
+      "path": "local/judge-extract-probe.ts",
+      "where": "extractionRequest",
+      "bot_max_tokens": 1792,
+      "purpose": "memory",
+      "filled": "two slots, give_key and open_door",
+      "system": "You read one scene and fill a card for each item: its status, the actor, the object, a number in digits if the scene names one or else an empty string, and a verbatim quote from the scene.",
+      "user": "Scene: Pavel gives Vera the key to the store room. Vera tries the door, but it does not open. Items: give_key: Pavel gives the key. open_door: Vera opens the door.",
+      "schema": {"type": "object", "properties": {"items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "object", "properties": {"key": {"type": "string", "enum": ["give_key", "open_door"]}, "status": {"type": "string", "enum": ["completed", "attempted", "refused", "proposed", "absent", "ambiguous"]}, "actor": {"type": "string", "maxLength": 200}, "object": {"type": "string", "maxLength": 200}, "number": {"type": "string", "maxLength": 20}, "quote": {"type": "string", "maxLength": 200}}, "required": ["key", "status", "actor", "object", "number", "quote"], "additionalProperties": false}}}, "required": ["items"], "additionalProperties": false}
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 """simple-serving's command on the owner's machine: it starts the card, holds the tunnel and asks for sleep
 (contract section 8).
 
-    python -m simple_serving.cli [--config PATH] up | sleep | status | keys
+    python -m simple_serving.cli [--config PATH] up | sleep | status | keys | trial --ssh-host HOST
 
 `up` waits out a stop in flight, resumes the instance once if it is stopped, and waits for it to run. Then it opens
 the tunnel, local 8080 to the gateway's public listener and 8081 to its control listener, waits for the gateway to be
@@ -21,6 +21,10 @@ The configuration is the owner's alone: a JSON object in `~/.config/simple-servi
 `--config` names, open to its owner only. `keys` writes `client_key` and `control_key` into it. The owner adds
 `instance_id`, `vast_api_key`, a Vast key allowed GET and PUT on that instance alone, and `ssh_host`, a host of
 ~/.ssh/config whose host key is known. The owner copies the client key into the bot's model profile.
+
+On the first rental, `trial` writes those three instead: it reads the card's instance id and container key over SSH
+from the files card/onstart.sh keeps, checks their form, and writes them with the host it read them through. It
+prints none of them.
 """
 
 from __future__ import annotations
@@ -57,6 +61,10 @@ SSH = ("ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "Exi
        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=yes",
        "-o", "ControlPath=none")
 HOLD = "cd /workspace/simple-serving && /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --hold"
+# Prints the instance's id and key, which card/onstart.sh keeps in two files without a newline, one line apiece.
+READ_TRIAL = ('for f in /root/.simple-chat-instance-id /root/.simple-chat-instance-api-key; '
+              'do cat "$f" || exit 3; echo; done')
+TRIAL_BYTES = 4096  # the most of the card's answer to READ_TRIAL that `trial` reads
 SSH_FAILED = 255  # ssh's own exit code; any other before the first line comes from the card's shell
 POLL_S = 10  # between two reads of Vast, and two tries of SSH
 STOP_WAIT_S = 600  # for a stop in flight to end: a drain of 120 seconds at most, then Vast's own time
@@ -73,8 +81,8 @@ NOT_PREPARED = "the card is not prepared: run its preparation first (README, 'Th
 GIVEN_UP = (f"the card has given up loading the model and stops itself {IDLE_TIMEOUT_S // 60} minutes after its start. "
             "The launcher's --retry on the card loads it again, within seconds while the launcher still waits and "
             "otherwise at the next start (README, 'The card')")
-UNCONFIRMED = ("the card's stop is not confirmed: Vast has not taken it, and costs may go on. Stop or delete the "
-               "instance in Vast's console (README, 'The first rental')")
+UNCONFIRMED = ("the card's stop is not confirmed: Vast has not taken it, and costs may go on. Delete the trial "
+               "instance with simple-story-chat's npm run gpu:rent -- --destroy ID (README, 'The first rental')")
 REFUSALS = {card.NOT_PREPARED: NOT_PREPARED, card.GAVE_UP: GIVEN_UP, card.STOP_UNCONFIRMED: UNCONFIRMED}  # of --hold
 
 now = time.monotonic  # the command's own clock, which the tests replace
@@ -200,6 +208,16 @@ def read_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def write_config(path: Path, config: Mapping[str, Any]) -> None:
+    """Replace the configuration in one step, open to its owner only."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    new = path.with_name(path.name + ".new")
+    new.unlink(missing_ok=True)
+    with os.fdopen(os.open(new, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
+        json.dump(config, file, indent=2)
+    new.replace(path)
+
+
 def keys(path: Path) -> int:
     """Create the keys that are missing, keep the others, and print the SHA-256 of each."""
     config = read_config(path)
@@ -209,14 +227,44 @@ def keys(path: Path) -> int:
     if not all(isinstance(config[name], str) and config[name] for name in KEYS):
         raise Refusal(f"{path} has a client_key or control_key that is not a string")
     if created:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        new = path.with_name(path.name + ".new")
-        new.unlink(missing_ok=True)
-        with os.fdopen(os.open(new, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
-            json.dump(config, file, indent=2)
-        new.replace(path)
+        write_config(path, config)
     print(*(hashlib.sha256(config[name].encode()).hexdigest() for name in KEYS), sep="\n")
     print(f"keys: {' and '.join(created) + ' created' if created else 'both kept'} in {path}", file=sys.stderr)
+    return 0
+
+
+async def trial(path: Path, host: str) -> int:
+    """Write the trial instance's id and its container key, which card/onstart.sh keeps on the card, and the SSH host
+    they were read from into the configuration, keeping what else it holds. Nothing read from the card is printed,
+    not even when it is refused."""
+    if not SSH_HOST.fullmatch(host):
+        raise Refusal("the SSH host has the wrong form")
+    config = read_config(path)
+    # Standard error is dropped unread: whatever the card prints there could hold the key.
+    process = await asyncio.create_subprocess_exec(*SSH, host, READ_TRIAL, stdin=asyncio.subprocess.DEVNULL,
+                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    assert process.stdout is not None
+    answer = b""
+    try:
+        async with asyncio.timeout(CONNECT_S):
+            while len(answer) <= TRIAL_BYTES and (chunk := await process.stdout.read(TRIAL_BYTES)):
+                answer += chunk
+            code = await process.wait() if len(answer) <= TRIAL_BYTES else None
+    except TimeoutError:
+        await Tunnel(process).close()
+        raise Refusal(f"the card did not give the instance's id and key within {CONNECT_S} seconds") from None
+    if code is None:  # an answer longer than an id and a key
+        await Tunnel(process).close()
+    elif code:
+        raise Refusal(f"could not read the instance's id and key from the card: ssh ended with {code}")
+    try:
+        instance, key, rest = answer.decode().split("\n")
+    except ValueError:  # a byte that is not UTF-8, or other than two lines
+        instance, key, rest = "", "", "?"
+    if code is None or rest or not vast.INSTANCE.fullmatch(instance) or not key or "\r" in key:
+        raise Refusal("the card's instance id or key is missing or of the wrong form")
+    write_config(path, config | {"instance_id": instance, "vast_api_key": key, "ssh_host": host})
+    say(f"trial: the instance's id and key, and the SSH host, are in {path}")
     return 0
 
 
@@ -467,12 +515,17 @@ def say(text: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m simple_serving.cli", description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path, default=CONFIG, help="the configuration file (default: %(default)s)")
-    parser.add_argument("command", choices=("up", "sleep", "status", "keys"))
+    parser.add_argument("--ssh-host", help="trial's card: a host of ~/.ssh/config whose host key is known")
+    parser.add_argument("command", choices=("up", "sleep", "status", "keys", "trial"))
     args = parser.parse_args(argv)
+    if (args.command == "trial") != (args.ssh_host is not None):
+        parser.error("--ssh-host goes with trial, and trial needs it")
     commands = {"up": up, "sleep": sleep, "status": status}
     try:
         if args.command == "keys":
             return keys(args.config)
+        if args.command == "trial":
+            return asyncio.run(trial(args.config, args.ssh_host))
         return asyncio.run(commands[args.command](load(args.config)))
     except Refusal as error:
         print(f"simple-serving: {error}", file=sys.stderr)

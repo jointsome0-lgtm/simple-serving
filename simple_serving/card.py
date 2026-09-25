@@ -1,6 +1,6 @@
 """The card's launcher: vLLM and the gateway as one pair, started at every start of the container (contract section 8).
 
-    python -m simple_serving.card [--hold | --stop | --retry | --dry-run]
+    python -m simple_serving.card [--hold | --stop | --retry | --dry-run | --inspect]
 
 card/onstart.sh runs it from the checkout with the gateway's venv, and card/bootstrap.sh prepares the card once per
 rental. Without an option it checks the card, starts the launcher in the background and returns 0, also when one
@@ -11,7 +11,8 @@ it says that the retry is left to it or deferred to the next start. `--stop` end
 running. `--hold` prints one line, then waits while the pair runs and returns 0 once it has ended, 6 once the card has
 given up, or 8 once its stop is not confirmed; on such a card, or one that is not prepared, it returns 8, 6 or 3 at once
 and prints nothing. It is the remote command of the tunnel, and it never owns the pair. `--dry-run` prints the two
-commands and checks, and starts nothing.
+commands and checks, and starts nothing. `--inspect` is the smoke's report of the card (`smoke.py`): it reads one JSON
+request on standard input and prints one line of numbers and flags, or returns 2 and prints nothing.
 
 The pair runs once, with no restarts. It ends on SIGTERM, when a process exits, or when the gateway is not ready by
 the manifest's load deadline. Unless a signal ended it, the launcher then stops the instance as the gateway does when
@@ -58,6 +59,12 @@ from .config import IDLE_TIMEOUT_S, PROVISIONAL
 CODE = Path(__file__).resolve().parent.parent  # the checkout
 STATE = Path(os.environ.get("SIMPLE_SERVING_CARD_DIR", "/workspace/simple-serving-card"))
 ROOT = Path(os.environ.get("SIMPLE_SERVING_CARD_ROOT", "/root"))  # where onstart.sh keeps the instance's id and key
+PROC = Path(os.environ.get("SIMPLE_SERVING_CARD_PROC", "/proc"))  # the processes, moved for tests as the two above
+RUNNING = b"simple_serving.card\0--run"  # in the command line of a launcher
+DEADLINE = ".simple-chat-trial-deadline"  # in ROOT: the trial guard's time, which trial-onstart.sh writes once
+LOGS = ("card.jsonl", "card.jsonl.1", "gateway.jsonl", "gateway.jsonl.1")  # in the state's logs/
+MARKER = re.compile(r"[0-9a-f]{32}")  # the smoke's privacy marker
+REQUEST_BYTES = 4096  # the most of a request to --inspect
 STAMPED = ("manifest.env", "gateway-requirements.txt", "vllm-requirements.txt")  # the files in card/ that were prepared
 NOT_PREPARED, GAVE_UP, PORT_TAKEN, STOP_UNCONFIRMED = 3, 6, 7, 8
 GIVEN_UP, UNCONFIRMED = "given-up", "stop-unconfirmed"  # the card's markers
@@ -154,8 +161,7 @@ class Card:
                 {"sha256": keys["control"], "label": "control", "classes": [], "default": None, "scopes": False,
                  "control": True},
             ],
-            "versions": {"vllm": m["VLLM_VERSION"], "model_revision": m["MODEL_REVISION"],
-                         "tokenizer_revision": m["TOKENIZER_REVISION"]},
+            "versions": pinned_versions(m),
         }
 
     def prepared(self) -> bool:
@@ -168,6 +174,12 @@ class Card:
                     and vast.from_environment(self.credential) is not vast.unconfigured)
         except OSError:
             return False
+
+
+def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
+    """The engine's pins that the gateway shows the control key in /v1/state, beside its own (contract section 12)."""
+    return {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
+            "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
 
 
 def read_manifest(code: Path = CODE) -> dict[str, str]:
@@ -191,7 +203,7 @@ def launcher(state: Path) -> int | None:
     """The pid of the running launcher, if one runs."""
     try:
         pid = int((state / "launcher.pid").read_text())
-        running = b"simple_serving.card\0--run" in Path(f"/proc/{pid}/cmdline").read_bytes()
+        running = RUNNING in Path(f"/proc/{pid}/cmdline").read_bytes()
     except (OSError, ValueError):
         return None
     return pid if running else None
@@ -501,6 +513,99 @@ def private(path: Path, flags: int) -> int:
     return descriptor
 
 
+def inspect(request: Mapping[str, Any], state: Path = STATE, root: Path = ROOT, proc: Path = PROC) -> dict[str, Any]:
+    """The smoke's report of the card: how many launchers run and how many processes they started, the trial guard's
+    deadline, and of each log its rows and, for a `marker`, the times it occurs. With `since`, also the cancelled flag
+    of each chat request that gateway.jsonl logged after its first `since` rows. No line of a log leaves the card."""
+    marker = request.get("marker")
+    started = launchers(proc)
+    logs = {name: {"rows": 0, **({"found": 0} if marker else {})} for name in (*LOGS, "other")}
+    for path in sorted((state / "logs").rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            rows, found = scan(path, marker)
+            entry = logs[path.name if path.parent == state / "logs" and path.name in LOGS else "other"]
+            entry["rows"] += rows
+            if marker:
+                entry["found"] += found
+    report: dict[str, Any] = {"launchers": len(started), "children": sum(started.values()),
+                              "deadline": trial_deadline(root), "now": int(time.time()), "logs": logs}
+    if "since" in request:
+        report["cancelled"] = cancelled_after(state / "logs/gateway.jsonl", request["since"])
+    return report
+
+
+def launchers(proc: Path = PROC) -> dict[int, int]:
+    """The launchers that run, each with the number of its processes that run: the pair's two."""
+    found: dict[int, int] = {}
+    parents: dict[int, int] = {}
+    entries = []
+    with contextlib.suppress(OSError):
+        entries = list(proc.iterdir())
+    for entry in entries:
+        if entry.name.isdigit():
+            with contextlib.suppress(OSError, ValueError, IndexError):  # a process that ended while it was read
+                if RUNNING in (entry / "cmdline").read_bytes():
+                    found[int(entry.name)] = 0
+                # The name in parentheses may hold spaces and parentheses; the parent is the second field after it.
+                parents[int(entry.name)] = int((entry / "stat").read_bytes().rsplit(b")", 1)[1].split()[1])
+    for parent in parents.values():
+        if parent in found:
+            found[parent] += 1
+    return found
+
+
+def trial_deadline(root: Path = ROOT) -> int | None:
+    """The trial guard's deadline in seconds since the epoch, as trial-onstart.sh wrote it, or None."""
+    try:
+        text = (root / DEADLINE).read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return int(text) if re.fullmatch(r"[1-9][0-9]{0,11}", text) else None
+
+
+def scan(path: Path, marker: str | None) -> tuple[int, int]:
+    """The lines of a file, and the times `marker` occurs in it, one piece at a time."""
+    needle, tail, rows, found = (marker or "").encode(), b"", 0, 0
+    with contextlib.suppress(OSError), path.open("rb") as file:
+        while piece := file.read(1 << 20):
+            rows += piece.count(b"\n")
+            if needle:
+                found += (tail + piece).count(needle)  # the tail is too short to hold the marker whole
+                tail = (tail + piece)[1 - len(needle):]
+    return rows, found
+
+
+def cancelled_after(path: Path, since: int) -> list[bool] | None:
+    """The cancelled flag of each chat request that the gateway logged after the file's first `since` rows, and
+    nothing else of the row; None when the file has fewer rows, since it was moved aside."""
+    try:
+        lines = path.read_bytes().split(b"\n")[:-1]  # without a last line that is still being written
+    except FileNotFoundError:
+        lines = []
+    if len(lines) < since:
+        return None
+    rows = (gateway_row(line) for line in lines[since:])
+    return [row.get("cancelled") is True for row in rows
+            if row is not None and row.get("event") == "request" and row.get("route") == "/v1/chat/completions"]
+
+
+def inspect_command() -> int:
+    """--inspect: one request on standard input, `{"marker": ..., "since": ...}` with either or neither, and one line
+    of report on standard output."""
+    try:
+        request = json.loads(sys.stdin.buffer.readline(REQUEST_BYTES))
+    except (ValueError, RecursionError):
+        return 2
+    if not isinstance(request, dict) or not request.keys() <= {"marker", "since"}:
+        return 2
+    marker, since = request.get("marker"), request.get("since", 0)
+    if (marker is not None and not (isinstance(marker, str) and MARKER.fullmatch(marker))) or type(since) is not int \
+            or since < 0:
+        return 2
+    print(json.dumps(inspect(request)), flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m simple_serving.card", description=__doc__.split("\n\n")[0])
     options = parser.add_mutually_exclusive_group()
@@ -508,10 +613,14 @@ def main(argv: list[str] | None = None) -> int:
     options.add_argument("--stop", action="store_true", help="end the pair, and leave the instance running")
     options.add_argument("--retry", action="store_true", help="remove given-up and start")
     options.add_argument("--dry-run", action="store_true", help="print the two commands and check; start nothing")
+    options.add_argument("--inspect", action="store_true",
+                         help="the smoke's report: one JSON request on standard input, one line of numbers and flags")
     options.add_argument("--run", action="store_true", help=argparse.SUPPRESS)  # the launcher that start() spawns
     args = parser.parse_args(argv)
     if args.stop:  # before the manifest is read, which ending the pair does not need
         return stop_pair(STATE)
+    if args.inspect:  # as well
+        return inspect_command()
     card = Card.load()
     if args.hold:
         return hold(card)

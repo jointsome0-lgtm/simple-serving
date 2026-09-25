@@ -174,7 +174,7 @@ may be absent, such as `usage`, `finish_reason` or a field of the delta, null co
 
 - Every chunk has `model` equal to the alias.
 - A chunk has either one choice with `index: 0` or `choices: []`.
-- A choice's `delta` may be empty, may hold only `role`, or may hold `content` or `reasoning_content`. The gateway
+- A choice's `delta` may be empty, or may hold one field: `role`, `content` or `reasoning_content`. The gateway
   renames whatever field the pinned engine uses for reasoning to `reasoning_content`. Reasoning is not part of the
   text.
 - Exactly one chunk has a `finish_reason`, `stop` or `length`. Its delta may be empty.
@@ -343,7 +343,8 @@ request that fails to end when the drain cancels it. An idle sleep has no work o
 - A failed attempt, the gateway's or the launcher's, leaves the card's marker `stop-unconfirmed` and the log row
   `stop_unconfirmed` with the failure's category and status, until the launcher's next start: the stop is not
   confirmed, and costs may go on. `up`, `sleep` and `status` say so. The attempts go on, but while Vast refuses the
-  container's key they bound nothing, and the owner stops the instance in Vast's console (section 15).
+  container's key they bound nothing, and on the first rental the operator deletes the instance with the owner's
+  account key (section 15).
 - Stop, not delete: the disk with the weights stays, and Vast bills for it while the card is stopped.
 - The gateway cannot see its own stop complete, since the stop ends it. Until then admission stays closed and it
   never reports `ready`. Its status is `drained`, or, after a stop that did not wait for the drain, `draining` until
@@ -352,7 +353,8 @@ request that fails to end when the drain cancels it. An idle sleep has no work o
 ### The command
 
 simple-serving's command on the owner's machine starts the card, holds the tunnel and asks for sleep. It uses the
-owner's restricted Vast key (section 12) and never the card's.
+owner's restricted Vast key (section 12) and never the card's, except on the first rental, where `trial` writes the
+card's own key in its place (Decided, 2026-09-25).
 
 - `up` reads the instance's state in Vast. It waits for a stop in flight to end rather than start against it, resumes
   the instance once if it is stopped, and waits for it to run and for SSH. It opens the tunnel, checks the gateway's
@@ -368,6 +370,9 @@ owner's restricted Vast key (section 12) and never the card's.
   are the expected ones.
 - `keys` makes the client key and the control key once, and prints only the SHA-256 of each, which the card's
   preparation reads (section 12).
+- `trial`, on the first rental only, reads the card's instance id and container key over SSH from the files the
+  card's `onstart.sh` keeps, checks their form, and writes them with the SSH host into the configuration. It prints
+  none of them.
 
 ### Starting the card
 
@@ -493,10 +498,11 @@ the control key. A change to any of them makes a new configuration, which is mea
 
 Configuration and keys live in simple-serving. The owner's machine keeps one private configuration of the command,
 with the owner's restricted Vast key, allowed GET and PUT on the chosen instance only, and two gateway keys: a
-client key and a control key. The card gets only the SHA-256 of each, once, through the stdin of SSH during the
-preparation. The owner copies the client key and the address into the bot's model profile, so simple-story-chat holds
-neither a Vast key nor the control key. The bot, its agent interface, eval and the probes share the client key for
-now; their classes still differ (section 2).
+client key and a control key. On the first rental the card's own container key, one for that instance alone, stands
+in for the restricted key (Decided, 2026-09-25). The card gets only the SHA-256 of each gateway key, once, through
+the stdin of SSH during the preparation. The owner copies the client key and the address into the bot's model
+profile, so simple-story-chat holds neither a Vast key nor the control key. The bot, its agent interface, eval and
+the probes share the client key for now; their classes still differ (section 2).
 
 ## 13. What changes in simple-story-chat
 
@@ -560,14 +566,20 @@ Everything below is written and dry-run before the card is rented. The rental ru
 (`docs/gpu.md`, "While the cards are paid for").
 
 The first rental is a disposable trial. Its own onstart, simple-story-chat's `gpu/trial-onstart.sh`, arms a guard
-that deletes the instance three hours after the first start, and writes the instance's id and key, which the first
-preparation needs; its last line runs the card's `onstart.sh` (section 8). The guard deletes with the container's key,
+that deletes the instance three hours after the first start (the first rental uses rent.mjs's default, `--hours 3`),
+and writes the instance's id and key, which the first preparation needs; its last line runs the card's `onstart.sh`
+(section 8). The guard deletes with the container's key,
 the key of the card's stop, so a key that Vast refuses or has revoked defeats both: nothing on the card then bounds
-the costs, and before the launcher runs the card has no stop of its own. The owner is that bound from the moment the
-instance is created, with the readback, the deadlines and the console action of the README's "The first rental",
-approved in advance. The service never deletes its card, and its `onstart.sh` arms no guard. An onstart for a
-permanent rental, which writes the two files and ends with the same line but arms no guard, is decided before
-permanent use. Unattended or permanent use also needs an independent budget path, which is open and not built.
+the costs, and before the launcher runs the card has no stop of its own. The operator is that bound, the Claude
+session that runs the rental, from the moment the instance is created. It reads the instance with the owner's
+account key through simple-story-chat's `npm run gpu:rent -- --show ID`, and in each case the README's "The first
+rental" lists, approved in advance, it deletes the instance with `npm run gpu:rent -- --destroy ID`, which uses the
+same key and reads the instance back until it is gone. When that read-back does not confirm the deletion, it tells the
+owner at once. Every stop is confirmed from outside with the owner's own key: the account key in simple-story-chat's
+`.env.gpu`, which rent.mjs uses and which is never copied into simple-serving's configuration. The service never
+deletes its card, and its `onstart.sh` arms no guard. An onstart for a permanent rental, which writes the two files and
+ends with the same line but arms no guard, is decided before permanent use. Unattended or permanent use also needs an
+independent budget path, which is open and not built.
 
 Before the rental, without a card:
 
@@ -593,6 +605,17 @@ Before the rental, without a card:
   headers and bodies, a connection limit. Check it in front of the fake engine with a slow client.
 - Write the load scenarios and what counts as a pass. Only their numbers are measured on the card.
 
+Written: the pins, in `card/manifest.env` and the two locks; the launch script, the card's launcher in
+`simple_serving/card.py`; and the smoke probes with the count matrix, `python -m simple_serving.smoke` (the README's
+"The smoke"), dry-run against the fake engine by `tests/test_smoke.py`. Its `privacy` probe stands on the card for
+the check that request and output logging is off: nothing of a request may reach a log, whatever vLLM prints. The
+engine error it brings about is a refusal before the stream: an error in the middle of a stream is not verified on
+the card, and the gateway's side of one is the case `engine-breaks-mid-stream`, against the fake engine. The TLS proxy
+and the load scenarios stay open, and are written before a rental that goes further. The trial needs neither, because
+it has no outside keys. After a smoke that passed, whose last probe is step 2's privacy check, the trial's internal
+work is the texts of simple-story-chat's action measurement alone, and then the operator deletes it with
+`npm run gpu:rent -- --destroy ID` and its read-back: no eval and no other long run.
+
 On the card:
 
 1. Smoke, in this order. The preparation's `pip check` passes in both venvs (section 12). The start imports vLLM,
@@ -600,8 +623,9 @@ On the card:
    uses with llama.cpp, since no released vLLM loads that GGUF. The time for this is fixed in advance. Once it is
    `ready`, one short completion. Then, before anything long, the stop: `sleep`, and the command reads `stopped` back
    from Vast; then `up` resumes the instance, and the rental's own onstart, with no start over SSH, starts exactly one
-   pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline unchanged. Then the
-   smoke probes and the count matrix run, with the real template. Eval and every other long run come after all this.
+   pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline unchanged, which the
+   smoke checks first. Then the smoke probes and the count matrix run, with the real template. Anything long comes
+   after all this: on the trial, the texts of simple-story-chat's action measurement alone, and no eval.
 
    The attempt, the preparation included, is over by the time the owner chose before creating the instance (the
    README's "The first rental"). If by then the stack or the weights do not work, or are too slow, the attempt stops
@@ -612,7 +636,9 @@ On the card:
    ([NVIDIA](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)), so nothing here
    promises that those pieces work there: the smoke finds out.
 2. Isolation and privacy, before any real story or outside key: a synthetic series checks that cache scopes stay
-   apart, and that the privacy marker shows up in no log of the engine, the proxy or the gateway.
+   apart, and that the privacy marker shows up in no log of the engine, the proxy or the gateway. On the trial, which
+   has one internal client and no proxy, the smoke's `privacy` probe is the marker half, over every log that the
+   gateway and the launcher write on the card; the cache-scope half is not needed there.
 3. llama.cpp with the bot's Q6_K, and vLLM with route A's 4-bit weights. The tokenizer, chat template, thinking,
    sampling, context and cache mode are pinned on each side. Cold and warm runs are measured apart. The two differ in
    engine and in weights at once, so this step measures both together and cannot tell the 4-bit loss from the
@@ -643,3 +669,11 @@ GPTQ or NVFP4, a separate configuration, measured again.
   tree. Route B, our own conversion, follows only if eval finds A's quality short.
 - 2026-09-25, the owner: route A's weights get no mirror or copy, so if llmfan46's NVFP4 repository disappears,
   route B, our own conversion of the heretic's bfloat16 weights, follows as well.
+- 2026-09-25, the owner: the first rental's bound is the operator, the Claude session that runs it, not the owner at
+  Vast's console. It reads and deletes the instance with the owner's account key through simple-story-chat's
+  `npm run gpu:rent`, and tells the owner at once when a deletion is not confirmed.
+- 2026-09-25, the owner: on the first rental `vast_api_key` is the card's own container key, which `cli trial` reads
+  over SSH and writes into the configuration without printing it. The rental finds out whether that key shows and
+  resumes the instance from outside the card; if Vast refuses it, the operator deletes the trial as the README's "The
+  first rental" says, since `up` reads the instance with that same key. A permanent rental keeps the owner's
+  restricted key.

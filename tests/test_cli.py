@@ -214,6 +214,53 @@ def test_the_configuration_names_the_instance_its_key_and_the_host(tmp_path: Pat
     assert "synthetic-vast-key" not in repr(setup)
 
 
+# trial
+
+TRIAL_STAND_IN = """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["SSH_ARGS"], "w") as file:
+    json.dump(sys.argv[1:], file)
+with open(os.environ["SSH_ANSWER"], "rb") as file:
+    answer = file.read()
+sys.stdout.buffer.write(answer)
+sys.stderr.buffer.write(answer)  # as a card whose startup printed the files
+"""
+INSTANCE, KEY = "31415926", "synthetic-container-key"
+
+
+@pytest.fixture
+def card_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The file whose bytes a stand-in for ssh prints as the card's answer; it keeps its arguments in args.json."""
+    ssh = tmp_path / "ssh"
+    ssh.write_text(TRIAL_STAND_IN)
+    ssh.chmod(0o700)
+    monkeypatch.setattr(cli, "SSH", (str(ssh), *cli.SSH[1:]))
+    monkeypatch.setenv("SSH_ARGS", str(tmp_path / "args.json"))
+    monkeypatch.setenv("SSH_ANSWER", str(tmp_path / "answer"))
+    return tmp_path / "answer"
+
+
+def test_trial_writes_the_cards_id_and_key_beside_the_keys_prints_neither_and_a_refusal_changes_nothing(
+        tmp_path: Path, card_answer: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "simple-serving" / "config.json"
+    assert cli.main(["--config", str(path), "keys"]) == 0
+    before = json.loads(path.read_text())
+    card_answer.write_bytes(f"{INSTANCE}\n{KEY}\n".encode())
+    assert cli.main(["--config", str(path), "--ssh-host=-oProxyCommand=x", "trial"]) == 1  # an option to ssh
+    assert not (tmp_path / "args.json").exists()
+    card_answer.write_bytes(f"{INSTANCE}\n{KEY}\r\n".encode())
+    assert cli.main(["--config", str(path), "--ssh-host", "card", "trial"]) == 1
+    assert json.loads(path.read_text()) == before
+    card_answer.write_bytes(f"{INSTANCE}\n{KEY}\n".encode())
+    assert cli.main(["--config", str(path), "--ssh-host", "card", "trial"]) == 0
+    printed = capfd.readouterr()
+    assert not any(value in printed.out + printed.err for value in (INSTANCE, KEY))
+    args = json.loads((tmp_path / "args.json").read_text())
+    assert args[-2:] == ["card", cli.READ_TRIAL] and {"BatchMode=yes", "StrictHostKeyChecking=yes"} <= set(args)
+    assert json.loads(path.read_text()) == before | {"instance_id": INSTANCE, "vast_api_key": KEY, "ssh_host": "card"}
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and KEY not in repr(cli.load(path))
+
+
 # up
 
 @pytest.mark.anyio
