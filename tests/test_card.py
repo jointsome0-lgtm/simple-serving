@@ -133,8 +133,8 @@ async def test_a_signal_ends_the_pair_and_leaves_the_instance_running(state: Pat
 
 
 def test_multi_token_prediction_adds_the_drafter_to_vllm_and_the_pins_only_when_on(state: Path) -> None:
-    off, on = card_at(state), card_at(state, MTP_SPECULATIVE_TOKENS="3")
-    assert off.manifest["MTP_SPECULATIVE_TOKENS"] == "0"  # a card prepared before it starts as it did
+    off, on = card_at(state, MTP_SPECULATIVE_TOKENS="0"), card_at(state)
+    assert on.manifest["MTP_SPECULATIVE_TOKENS"] == "3"  # on by default since the owner's choice of 2026-09-26
     assert "--speculative-config" not in off.engine().argv
     drafter = state / "drafters" / on.manifest["DRAFTER_REVISION"]
     assert on.engine().argv == [*off.engine().argv, "--speculative-config",
@@ -505,7 +505,8 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
         older.write_text(text + "\n")  # left wide, as by another hand
         older.chmod(0o644)
     pins = {"VLLM_VERSION": "0.0.1", "MODEL_FILES": f"model.safetensors:{hashlib.sha256(weights).hexdigest()}",
-            "TOKENIZER_FILES": f"tokenizer.json:{hashlib.sha256(tokenizer).hexdigest()}"}
+            "TOKENIZER_FILES": f"tokenizer.json:{hashlib.sha256(tokenizer).hexdigest()}",
+            "MTP_SPECULATIVE_TOKENS": "0"}  # the drafter's fetch has a test of its own
     (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in pins.items()))
     assert bootstrap(keys) == 0
     assert [path.name for path in model.iterdir()] == ["model.safetensors"]  # vLLM would load any other

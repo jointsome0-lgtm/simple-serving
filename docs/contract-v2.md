@@ -695,3 +695,9 @@ GPTQ or NVFP4, a separate configuration, measured again.
   not sealed, asked again from the same excerpts with whitespace allowed, gave 4, 6, 4 and 4 people, twice each, and
   no answer ran to its limit. The runaway the ban was for, E2B's `frame`, is met as the bot meets it, by the 900-token
   limit and one retry; the smoke still fails an answer cut short.
+- 2026-09-26, the owner, after route A's second eval against the llama.cpp Q6_K, with the texts kept and three
+  judges: route A stays, with multi-token prediction on, 3 drafted tokens. Both held the same facts in their memory.
+  Route A's scenes lost count of a stock more often and refuted a false premise less firmly, and its memory writes
+  hyphens for dashes and fewer «ё». The owner takes that small loss for the throughput: on one 5090, two requests at
+  once decoded at 123 to 171 tokens a second each, against the Q6_K's 136 on its one slot. Route B does not follow
+  on quality; the entry on llmfan46's repository still holds.
