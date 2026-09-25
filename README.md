@@ -4,8 +4,8 @@ Text model serving for [simple-story-chat](https://github.com/jointsome0-lgtm/si
 front of vLLM, run on rented GPUs. The bot calls it over HTTP. Outside clients with a key may call it too.
 
 Status: the gateway of contract v2 is written and tested against a fake engine. It has not run in front of vLLM yet;
-that happens on the first rental (contract section 15). The API is in [docs/contract-v2.md](docs/contract-v2.md), the
-shared cases in [contract/](contract/README.md).
+that happens on the first rental (contract section 15), whose smoke is written and dry-run against the fake engine.
+The API is in [docs/contract-v2.md](docs/contract-v2.md), the shared cases in [contract/](contract/README.md).
 
 Version 2 serves one text model. Pictures stay in simple-story-chat for now.
 
@@ -247,6 +247,58 @@ names:
 key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. The bot's model profile takes the address
 `http://127.0.0.1:8080` and the client key; it holds neither the control key nor a Vast key.
 
+## The smoke
+
+`python -m simple_serving.smoke` is the first rental's smoke (contract section 15): the smoke probes and the count
+matrix. It is a client of the gateway through `up`'s forward, with the client key and the control key of the
+command's configuration, or of the file that `--config` names. Every request is of class `internal`.
+
+```
+uv run python -m simple_serving.smoke [--only NAME[,NAME]]
+```
+
+The probes run in this order, each within a time bound of its own:
+
+- `state`: `/v1/models` and `/v1/state` serve contract 2, `ready`, with the manifest's alias and context, and the
+  control key sees the manifest's pins and the versions of the gateway's lock.
+- `completion`: one short completion, and its stream as section 4 has it: the alias in every chunk, one finish, one
+  usage chunk, then `[DONE]`.
+- `fields`: each optional field of section 4 alone, at a legal value, and the answer with `response_format` follows
+  its schema. Beside them, two answers with one seed at temperature 0.8, compared by hash: an observation, which
+  passes nothing.
+- `reasoning`: thinking on gives reasoning and an answer, thinking off an answer alone.
+- `finish`: `length` after exactly 8 tokens, and `stop`.
+- `refusal`: a schema whose `pattern` does not compile is 400 `invalid_request`, before any stream. The comment at
+  `UNCOMPILABLE` in `simple_serving/smoke.py` says why vLLM 0.30.0 refuses it.
+- `abort`: a stream closed after its first event frees its place. A drain then finds no work of ours left, counts
+  included, and an open undoes it.
+- `schemas`: the bot's own JSON schemas in strict mode, each with a synthetic prompt of the smoke's, and each answer
+  checked against its schema, `minLength`, `maxLength`, `minItems`, `maxItems` and `pattern` included.
+  `simple_serving/bot_schemas.json` copies them with the commit and the file of each in simple-story-chat.
+- `counts`: the count matrix. For plain text, a system and a user turn, system, user, assistant and user turns, a
+  schema, thinking on, thinking off, and a prompt just below the context, found by counting: the count, then a
+  generation of a few tokens, whose `usage.prompt_tokens` must equal the count.
+
+On a card that works the whole smoke should take minutes; its bounds add up to just under an hour. It prints one JSON
+object per probe, read as "The first rental" below says, and ends with 0 when every probe passed, 1 when one failed,
+and 2 when it could not run, before it sent anything.
+
+The dry run is `tests/test_smoke.py`. It starts the dev launcher configured as the card's gateway, with the manifest's
+alias, context and pins and the cases' test keys, and runs the whole smoke through it with `--fake`. The fake engine
+cannot answer three things truthfully: whether an answer follows its schema, whether a count equals the usage, which
+it computes the same way, and whether a seed repeats. `--fake` leaves those unchecked and names them in the line's
+`not_verifiable`, and it refuses the forward's ports 8080 and 8081, so it never runs against a card. The rest runs as
+it would on the card. Whether vLLM thinks, cuts at `max_tokens` and refuses the schema as the fake does, only the card
+shows. By hand, with such a launcher block in `dev.json` and the smoke's two keys in `keys.json`, open to its owner
+only:
+
+```
+uv run python -m simple_serving.dev --config dev.json --engine-port 8200 --public-port 8201 --control-port 8202 --event-delay-ms 40
+uv run python -m simple_serving.smoke --config keys.json --public-port 8201 --control-port 8202 --fake
+```
+
+The pause after each event holds a stream open while the abort probe looks for it.
+
 ## The first rental
 
 The card stops itself with the container's key, and the trial's guard deletes with the same key, so a key that Vast
@@ -266,6 +318,40 @@ that bound, watching from the moment the instance is created:
    card's stop is not confirmed, when `sleep` ends without `vast: stopped`, or when Vast refuses a key with 401 or
    403, the owner stops the instance in Vast's console, or deletes a trial instance, and checks there that it is
    stopped or gone.
+
+Step 1 of contract section 15 runs in two terminals on the owner's machine, from the repository, once the preparation
+of "The card" above has started the service:
+
+1. First terminal: `uv run python -m simple_serving.cli up`, until it says `ready`.
+2. Second terminal: `uv run python -m simple_serving.smoke --only state,completion`: the gateway's state and pins,
+   and one short completion.
+3. `uv run python -m simple_serving.cli sleep`, which must end with `vast: stopped`; `up` in the first terminal ends
+   too. `uv run python -m simple_serving.cli status` then prints `vast: stopped`, and Vast's console shows the instance
+   stopped.
+4. First terminal: `uv run python -m simple_serving.cli up` again. It resumes the instance, and the card boots anew and
+   runs one pair, which `up` reports ready.
+5. Second terminal: `mkdir -p logs && uv run python -m simple_serving.smoke | tee logs/smoke.jsonl`, the whole smoke
+   with the real template.
+
+Each line of the smoke is one probe: `probe`, `ok`, the gateway's HTTP `status` and the contract's `code` where one
+came, `failed` with the names of what broke, and numbers. `fields`, `reasoning`, `finish`, `schemas` and `counts` hold
+an object per part, each with its own `ok`, and pass when every part passes. A name in `failed` is a rule of section 4's
+stream, such as `model` for a chunk without the alias or `done` for a stream without `[DONE]`, or a check of the probe:
+`equal` for a count that differs from `usage.prompt_tokens`, `answer` for an answer that breaks its schema, whose field
+`answer` lists the keywords it breaks, or `json` for one that is not JSON, and `held`, `freed`, `drained` or `open` in
+the abort. `no_answer` means that the gateway did not answer, `time_bound` that the probe ran past its bound, and
+`smoke_error` an error in the smoke itself, whose class `error` names. The numbers are the stream's chunks, the lengths
+of the answer and of the reasoning in characters, the usage, and the gateway's `wait_ms`, `first_token_ms` and
+`total_ms`; in the count matrix `input_tokens` beside `prompt_tokens`, and near the context the `max_tokens` that fills
+it and the counts the search took. `versions` shows each pin as this checkout has it, or `false` where the card shows
+another, and the card's Python. `seed_repeats` passes nothing. No line holds a key, a prompt, an answer or reasoning, so
+the lines may be kept.
+
+Exit 0, with `simple-serving smoke: 9 of 9 probes passed` on standard error, ends step 1: eval and the other long runs
+may follow. A probe that fails, in either run of the smoke, ends the attempt there: `sleep` at once, with its stop
+confirmed from outside as above, or the console where it does not come. Nothing is fixed, retried or tuned on the paid
+card. The lines say what failed, and another configuration is measured on a later rental (contract section 15). Exit 2
+sent nothing to the card; its line on standard error says why.
 
 Open, and not built: unattended or permanent use needs an independent budget path, one that bounds the costs without
 the container's key and without the owner at the console.
