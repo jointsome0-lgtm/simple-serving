@@ -43,6 +43,7 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
   with stand-ins for vLLM, the gateway, pip, curl and flock;
 - `tests/test_cli.py`: the command on the owner's machine, against a fake Vast and a fake SSH that forwards to the
   gateway;
+- `tests/test_bot_schemas.py`: the copy of the bot's JSON schemas, and the check of an answer against one;
 - `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher with its fake engine's
   default answers.
 
