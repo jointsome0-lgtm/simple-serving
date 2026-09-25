@@ -132,6 +132,17 @@ async def test_a_signal_ends_the_pair_and_leaves_the_instance_running(state: Pat
     assert {"CONTAINER_ID", "CONTAINER_API_KEY", "SIMPLE_SERVING_CONFIG"} <= set(gateway["env"])
 
 
+def test_multi_token_prediction_adds_the_drafter_to_vllm_and_the_pins_only_when_on(state: Path) -> None:
+    off, on = card_at(state), card_at(state, MTP_SPECULATIVE_TOKENS="3")
+    assert off.manifest["MTP_SPECULATIVE_TOKENS"] == "0"  # a card prepared before it starts as it did
+    assert "--speculative-config" not in off.engine().argv
+    drafter = state / "drafters" / on.manifest["DRAFTER_REVISION"]
+    assert on.engine().argv == [*off.engine().argv, "--speculative-config",
+                                f'{{"method": "mtp", "model": "{drafter}", "num_speculative_tokens": 3}}']
+    assert card.pinned_versions(on.manifest) == card.pinned_versions(off.manifest) | {
+        "drafter_revision": on.manifest["DRAFTER_REVISION"], "mtp_speculative_tokens": "3"}
+
+
 FAILED_LOAD = ("Traceback (most recent call last):", f'  File "{SECRET}.py", line 1, in load',
                "x" * 3 * card.LINE_BYTES + SECRET, f"torch.OutOfMemoryError: CUDA out of memory. {SECRET}")
 WAITS = ((), None)  # a stand-in that prints nothing and waits to be ended
@@ -519,3 +530,58 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     assert all("--require-hashes --only-binary :all:" in line for line in noted if line.startswith("pip install"))
     assert noted.count("pip check") == 6  # both venvs at each preparation
     assert Card.load(code=code, state=state, environ=environ, root=root).prepared()
+
+
+def test_bootstrap_fetches_the_pinned_drafter_with_mtp_on_and_keeps_a_file_only_with_its_hash(tmp_path: Path) -> None:
+    code, state, root, hub, calls = (tmp_path / name for name in ("code", "state", "root", "hub", "calls"))
+    for path in (code / "card", root, hub, tmp_path / "bin"):
+        path.mkdir(parents=True)
+    for name in ("bootstrap.sh", "onstart.sh"):
+        shutil.copy(card.CODE / "card" / name, code / "card" / name)
+    for name in ("gateway", "vllm"):
+        (code / f"card/{name}-requirements.txt").write_text(f"{name}==0.0.1 \\\n    --hash=sha256:{'0' * 64}\n")
+    manifest = (card.CODE / "card/manifest.env").read_text()
+    loaded = Card.load(state=state, environ={}, root=root).manifest
+    model, drafter = state / "models" / loaded["MODEL_REVISION"], state / "drafters" / loaded["DRAFTER_REVISION"]
+    for directory, name, data in ((model, "model.safetensors", b"synthetic weights"),  # in place, so not fetched
+                                  (state / "tokenizer", "tokenizer.json", b"{}"), (drafter, "other.safetensors", b""),
+                                  (hub, "model.safetensors", b"synthetic drafter"), (hub, "config.json", b"{}")):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_bytes(data)
+    (state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL}) + "\n")
+    for path in (state / "gateway/bin/pip", state / "vllm/bin/pip", state / GATEWAY):
+        recorder(path, calls)
+    aria2c = tmp_path / "bin/aria2c"  # notes its call and fetches the file of its URL from `hub`
+    aria2c.write_text(f'#!/bin/sh\necho "aria2c $*" >> {calls}\nfor arg; do case $arg in --dir=*) dir=${{arg#*=}};; '
+                      f'--out=*) out=${{arg#*=}};; esac; url=$arg; done\ncp "{hub}/${{url##*/}}" "$dir/$out"\n')
+    aria2c.chmod(0o700)
+    environ = {"PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "SIMPLE_SERVING_CARD_DIR": str(state),
+               "SIMPLE_SERVING_CARD_ROOT": str(root), **CREDENTIAL}
+    pins = {name: ",".join(f"{path.name}:{hashlib.sha256(path.read_bytes()).hexdigest()}" for path in files)
+            for name, files in (("MODEL_FILES", [model / "model.safetensors"]),
+                                ("TOKENIZER_FILES", [state / "tokenizer/tokenizer.json"]),
+                                ("DRAFTER_FILES", [hub / "model.safetensors", hub / "config.json"]))}
+
+    def bootstrap(tokens: str) -> int:
+        lines = {"VLLM_VERSION": "0.0.1", "MTP_SPECULATIVE_TOKENS": tokens, **pins}.items()
+        (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in lines))
+        return subprocess.run(["bash", str(code / "card/bootstrap.sh")], stdin=subprocess.DEVNULL, env=environ,
+                              capture_output=True, timeout=60, check=False).returncode
+
+    def fetched() -> list[str]:
+        return [line.rsplit(" ", 1)[1] for line in calls.read_text().splitlines() if line.startswith("aria2c")]
+
+    assert bootstrap("03") == 3 and bootstrap("x") == 3 and not calls.exists()  # a leading 0 is octal to bash
+    assert bootstrap("0") == 0 and fetched() == []  # off: the drafter's directory stays as it was
+    assert [path.name for path in drafter.iterdir()] == ["other.safetensors"]
+    assert bootstrap("3") == 0
+    assert fetched() == [f"https://huggingface.co/{loaded['DRAFTER_REPO']}/resolve/{loaded['DRAFTER_REVISION']}/{name}"
+                         for name in ("model.safetensors", "config.json")]
+    # vLLM would load any other *.safetensors
+    assert sorted(path.name for path in drafter.iterdir()) == ["config.json", "model.safetensors"]
+    assert (drafter / "model.safetensors").read_bytes() == b"synthetic drafter"
+    assert bootstrap("3") == 0 and len(fetched()) == 2  # nothing more to fetch
+    (drafter / "config.json").unlink()
+    (hub / "config.json").write_bytes(b'{"other": true}')
+    assert bootstrap("3") == 1  # the hub's bytes are not the pinned ones
+    assert [path.name for path in drafter.iterdir()] == ["model.safetensors"]  # and no part of them stays

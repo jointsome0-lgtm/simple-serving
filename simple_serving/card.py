@@ -146,7 +146,18 @@ class Card:
             # Sampling defaults from vLLM: the model's generation_config.json is pinned for its stop ids alone.
             "--generation-config", "vllm",
             "--disable-uvicorn-access-log", "--uvicorn-log-level", "warning",
+            *self.speculation(),
         ], {name: value for name, value in os.environ.items() if name != "CONTAINER_API_KEY"} | ENGINE_ENV)
+
+    def speculation(self) -> list[str]:
+        """vLLM's arguments for Gemma 4's multi-token prediction, and none while MTP_SPECULATIVE_TOKENS is 0: the
+        drafter that bootstrap.sh fetched drafts that many tokens a step, and the heretic verifies each."""
+        tokens = int(self.manifest["MTP_SPECULATIVE_TOKENS"])
+        if not tokens:
+            return []
+        drafter = self.state / "drafters" / self.manifest["DRAFTER_REVISION"]
+        return ["--speculative-config",
+                json.dumps({"method": "mtp", "model": str(drafter), "num_speculative_tokens": tokens})]
 
     def gateway(self) -> Command:
         return Command([str(self.state / "gateway/bin/python"), "-m", "simple_serving"],
@@ -184,9 +195,14 @@ class Card:
 
 
 def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
-    """The engine's pins that the gateway shows the control key in /v1/state, beside its own (contract section 12)."""
-    return {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
+    """The engine's pins that the gateway shows the control key in /v1/state, beside its own (contract section 12).
+    With multi-token prediction on they name the drafter and its tokens too, so that a record says which it measured."""
+    pins = {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
             "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
+    if int(manifest["MTP_SPECULATIVE_TOKENS"]):
+        pins |= {"drafter_revision": manifest["DRAFTER_REVISION"],
+                 "mtp_speculative_tokens": manifest["MTP_SPECULATIVE_TOKENS"]}
+    return pins
 
 
 def read_manifest(code: Path = CODE) -> dict[str, str]:

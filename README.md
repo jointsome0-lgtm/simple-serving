@@ -175,6 +175,29 @@ The locks, `card/gateway-requirements.txt` and `card/vllm-requirements.txt`, eac
 that made them: the gateway's is exported from `uv.lock`, and vLLM's is resolved for the pinned version. A change of
 `uv.lock` or of the pin needs a new lock.
 
+Speculative decoding is off until `MTP_SPECULATIVE_TOKENS` in `card/manifest.env` is above 0. Then vLLM runs Gemma 4's
+multi-token prediction, `--speculative-config` with method `mtp`: Google's assistant for the 31B, pinned in the
+manifest as the weights are, drafts that many tokens a step, and the heretic verifies every drafted token in one pass
+and keeps each only as its own sampling would, so the distribution of the answers does not change, only their speed.
+The drafter reads the heretic's KV cache and keeps none of its own; its 0.9 GB of weights come out of the cache's
+share of the memory. `/v1/state` then names the drafter's revision and the count among the versions, and so does the
+smoke's record.
+
+To turn it on for a card that is already prepared, set `MTP_SPECULATIVE_TOKENS=3` in the checkout, copy the checkout
+to the card again, and run the preparation again with nothing on stdin, since the card holds the keys. It fetches the
+drafter into `drafters/<revision>` of the card's state and checks every hash again, while the pair it started before
+serves on. Then end that pair and start the card, which loads the heretic with the drafter:
+
+```
+ssh <card> bash /workspace/simple-serving/card/bootstrap.sh < /dev/null
+ssh <card> 'cd /workspace/simple-serving &&
+  /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --stop &&
+  /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card'
+```
+
+`--stop` ends the tunnel's hold too, and a new `up` confirms that the card is ready. `MTP_SPECULATIVE_TOKENS=0` and the
+same steps turn it off; the drafter's directory stays.
+
 At every later start of the container the rental's own onstart starts the service. Its last line runs the service's
 `onstart.sh` from the persistent disk, once the preparation has put it there:
 

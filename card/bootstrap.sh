@@ -4,13 +4,14 @@
 #
 #   uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh
 #
-# It installs each lock into a venv of its own with every hash checked, fetches the weights and the tokenizer files
-# at their pinned revisions and checks their hashes, keeps the key hashes in keys.json, and then runs card/onstart.sh
-# for the first start. At every later start the rental's own onstart runs it (README, "The card"): the preparation
-# changes no onstart, which the platform may restore at a start. A second run changes nothing that is in place, and no
-# run prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed; 3 a pin or a lock is missing;
-# 4 no keys, or not two different SHA-256 digests; 5 the card holds other keys, which stay. The last step is the
-# launcher's start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
+# It installs each lock into a venv of its own with every hash checked, fetches the weights and the tokenizer files,
+# and the drafter's while MTP_SPECULATIVE_TOKENS is above 0, at their pinned revisions and checks their hashes, keeps
+# the key hashes in keys.json, and then runs card/onstart.sh for the first start. At every later start the rental's
+# own onstart runs it (README, "The card"): the preparation changes no onstart, which the platform may restore at a
+# start. A second run changes nothing that is in place, and no run prints a hash. Exit codes: 0 prepared and started;
+# 1 a download or a check failed; 3 a pin or a lock is missing, or MTP_SPECULATIVE_TOKENS is not a count; 4 no keys,
+# or not two different SHA-256 digests; 5 the card holds other keys, which stay. The last step is the launcher's
+# start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
 # SIMPLE_SERVING_CARD_DIR and SIMPLE_SERVING_CARD_ROOT move the state and /root, for tests.
 set -euo pipefail
 umask 077
@@ -23,6 +24,11 @@ for pin in VLLM_VERSION MODEL_REPO MODEL_REVISION MODEL_FILES TOKENIZER_REPO TOK
   [[ -n ${!pin} ]] || exit 3
 done
 for file in "${stamped[@]}"; do [[ -s $file ]] || exit 3; done
+# A count of drafted tokens, where bash would read a leading 0 as octal, and 0 alone for off.
+[[ ${MTP_SPECULATIVE_TOKENS:-} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3
+if [[ $MTP_SPECULATIVE_TOKENS != 0 ]]; then
+  for pin in DRAFTER_REPO DRAFTER_REVISION DRAFTER_FILES; do [[ -n ${!pin:-} ]] || exit 3; done
+fi
 grep -Fq "vllm==$VLLM_VERSION " "$code/card/vllm-requirements.txt" || exit 3
 model=$state/models/$MODEL_REVISION
 mkdir -p "$model" "$state/tokenizer"
@@ -77,6 +83,14 @@ fetch() {
 for path in "$model"/*; do [[ ,$MODEL_FILES == *,"${path##*/}":* ]] || rm -f "$path"; done
 fetch "$MODEL_REPO" "$MODEL_REVISION" "$MODEL_FILES" "$model"
 fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "$TOKENIZER_FILES" "$state/tokenizer"
+# The drafter in a directory of its own, since the loop above empties the weights' of all it does not pin, and vLLM
+# loads every *.safetensors in each. Off, nothing of it is fetched or removed.
+if [[ $MTP_SPECULATIVE_TOKENS != 0 ]]; then
+  drafter=$state/drafters/$DRAFTER_REVISION
+  mkdir -p "$drafter"
+  for path in "$drafter"/*; do [[ ,$DRAFTER_FILES == *,"${path##*/}":* ]] || rm -f "$path"; done
+  fetch "$DRAFTER_REPO" "$DRAFTER_REVISION" "$DRAFTER_FILES" "$drafter"
+fi
 
 cat "${stamped[@]}" | sha256sum | cut -d ' ' -f 1 > "$state/prepared"
 exec bash "$code/card/onstart.sh"

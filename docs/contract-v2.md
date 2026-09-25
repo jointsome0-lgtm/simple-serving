@@ -492,7 +492,8 @@ Before any contract run on the card, this repository pins:
 - vLLM, in a lock with hashes;
 - FastAPI, Starlette, the ASGI server and the rest of the gateway, in `uv.lock`;
 - the model's files at one revision, each with its hash;
-- the revision of the tokenizer and the chat template.
+- the revision of the tokenizer and the chat template;
+- the files of the drafter for speculative decoding at one revision, each with its hash, fetched only when it is on.
 
 `card/manifest.env` holds the card's pins and parameters. The card's preparation installs each lock into a venv of its
 own, checks every hash and runs `pip check`, once per rental and never at a resume. `/v1/state` shows the versions to
