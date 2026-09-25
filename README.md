@@ -356,8 +356,12 @@ simple-story-chat's `.env.gpu`, which rent.mjs reads, and is never copied into t
 Step 1 of contract section 15 runs in two terminals on the owner's machine, from the repository, once the preparation
 of "The card" above has started the service:
 
-1. First terminal: `uv run python -m simple_serving.cli up`, until it says `ready`.
-2. Second terminal:
+1. Once SSH to the card works, and before the first `up`: `uv run python -m simple_serving.cli trial --ssh-host HOST`,
+   where `HOST` is a host of `~/.ssh/config` whose host key is known. It writes the card's instance id, its
+   container key and the host into the configuration, printing none of them, whether or not `keys` has run, and
+   keeps what the file already holds. The smoke reaches the card's report with that host.
+2. First terminal: `uv run python -m simple_serving.cli up`, until it says `ready`.
+3. Second terminal:
 
    ```
    mkdir -p logs && uv run python -m simple_serving.smoke --only state,completion --before logs/lifecycle.json
@@ -365,12 +369,12 @@ of "The card" above has started the service:
 
    One pair and the guard's deadline, which it writes with a hash of the boot into that new file, then the gateway's
    state and pins, and one short completion. `--before` refuses a file that exists.
-3. `uv run python -m simple_serving.cli sleep`, which must end with `vast: stopped`; `up` in the first terminal ends
+4. `uv run python -m simple_serving.cli sleep`, which must end with `vast: stopped`; `up` in the first terminal ends
    too. `uv run python -m simple_serving.cli status` then prints `vast: stopped`, and `npm run gpu:rent -- --show ID`
    in simple-story-chat reads the instance stopped.
-4. First terminal: `uv run python -m simple_serving.cli up` again. It resumes the instance, and the card boots anew and
+5. First terminal: `uv run python -m simple_serving.cli up` again. It resumes the instance, and the card boots anew and
    runs one pair, which `up` reports ready.
-5. Second terminal:
+6. Second terminal:
 
    ```
    set -o pipefail; uv run python -m simple_serving.smoke --after logs/lifecycle.json | tee logs/smoke.jsonl
@@ -386,26 +390,26 @@ stream, such as `model` for a chunk without the alias or `done` for a stream wit
 `equal` for a count that differs from `usage.prompt_tokens`, `answer` for an answer that breaks its schema, whose field
 `answer` lists the keywords it breaks, or `json` for one that is not JSON; `pair`, `boot` or `deadline` in the
 lifecycle; `ready`, `status`, `first_event`, `held`, `freed`, `unlogged`, `inconclusive` or `drained` in the abort; and
-`code`, `unlogged` or `marker` in the privacy probe. `left_drained` means that the open undoing the abort's drain was not read
-back as `ready`, so the gateway may be left drained; `no_answer` that the gateway did not answer, `no_report` that the
-card's report did not come or came in another form, `time_bound` that the probe ran past its bound, and `smoke_error`
-an error in the smoke itself, whose class `error` names. The numbers are the stream's chunks, the lengths of the
-answer and of the reasoning in characters, the usage, and the gateway's `wait_ms`, `first_token_ms` and `total_ms`; in
-the count matrix `input_tokens` beside `prompt_tokens`, and near the context the `max_tokens` that fills it and the
-counts the search took; in the lifecycle the `launchers`, their `children` and the seconds left to the guard's
-deadline; in the abort `held`, `freed_ms` and `cancelled`; in the privacy probe the marker's count in each log under
-`found`, the request's rows under `logged`, and `echoed`, the times the answer repeated the marker, which passes
-nothing. `versions` shows each pin as this checkout has it, or `false` where the card shows another, and the card's
-Python. `seed_repeats` passes nothing. No line holds a key, a prompt, the marker, an answer or reasoning, so the lines
-may be kept.
+`code`, `unlogged` or `marker` in the privacy probe. `left_drained` means that the open undoing the abort's drain was
+not read back as `ready`, so the gateway may be left drained; `no_answer` that the gateway did not answer,
+`no_report` that the card's report did not come or came in another form, `time_bound` that the probe ran past its
+bound, and `smoke_error` an error in the smoke itself, whose class `error` names. The numbers are the stream's chunks,
+the lengths of the answer and of the reasoning in characters, the usage, and the gateway's `wait_ms`,
+`first_token_ms` and `total_ms`; in the count matrix `input_tokens` beside `prompt_tokens`, and near the context the
+`max_tokens` that fills it and the counts the search took; in the lifecycle the `launchers`, their `children` and the
+seconds left to the guard's deadline; in the abort `held`, `freed_ms` and `cancelled`; in the privacy probe the
+marker's count in each log under `found`, the request's rows under `logged`, and `echoed`, the times the answer
+repeated the marker, which passes nothing. `versions` shows each pin as this checkout has it, or `false` where the
+card shows another, and the card's Python. `seed_repeats` passes nothing. No line holds a key, a prompt, the marker,
+an answer or reasoning, so the lines may be kept.
 
-Exit 0, with `simple-serving smoke: 11 of 11 probes passed` on standard error, ends step 1, and its last probe,
-`privacy`, is the marker half of step 2. After it the trial's internal work is the texts of simple-story-chat's action
-measurement alone, and then the operator deletes it with `npm run gpu:rent -- --destroy ID` and its read-back: no eval
-and no other long run. A probe that fails, in either run of the smoke, ends the smoke and the attempt there, and the
-operator deletes the trial as rule 4 says. Nothing is fixed, retried or tuned on the paid card. The lines say what
-failed, and another configuration is measured on a later rental (contract section 15). Exit 2 sent nothing to the
-card; its line on standard error says why.
+Exit 0, with `simple-serving smoke: 11 of 11 probes passed` on standard error, ends section 15's step 1, and its last
+probe, `privacy`, is the marker half of its step 2. After it the trial's internal work is the texts of
+simple-story-chat's action measurement alone, and then the operator deletes it with
+`npm run gpu:rent -- --destroy ID` and its read-back: no eval and no other long run. A probe that fails, in either run
+of the smoke, ends the smoke and the attempt there, and the operator deletes the trial as rule 4 says. Nothing is
+fixed, retried or tuned on the paid card. The lines say what failed, and another configuration is measured on a later
+rental (contract section 15). Exit 2 sent nothing to the card; its line on standard error says why.
 
 Open, and not built: unattended or permanent use needs an independent budget path, one that bounds the costs without
 the container's key and without an operator watching.
