@@ -1,5 +1,5 @@
-# card/gateway-requirements.txt, proposed. It does not exist on phase2 (4214273), and bootstrap.sh cannot run
-# without it: the file is one of the three it stamps and installs.
+# card/gateway-requirements.txt: the gateway's dependencies, each with its hashes. bootstrap.sh installs them, and
+# the file is one of the three it stamps.
 #
 # Exported, not re-resolved, from phase2's own uv.lock (the versions its tests ran with), dev group left out:
 #   git show phase2:pyproject.toml > pyproject.toml; git show phase2:uv.lock > uv.lock

@@ -1,4 +1,4 @@
-# card/vllm-requirements.txt, proposed: vLLM 0.30.0 and every dependency, each with its hashes, for
+# card/vllm-requirements.txt: vLLM 0.30.0 and every dependency, each with its hashes, for
 # pip install --no-deps --require-hashes on Linux x86_64 with the image's Python 3.12 (glibc 2.39, Ubuntu 24.04).
 #
 # Resolved from PyPI metadata only, nothing installed, on 2026-09-25 with uv 0.12.7:
@@ -13,7 +13,7 @@
 # driver 580.142. No extra index is needed.
 #
 # A line lists the hashes of all of a version's files, the sdist's among them (vllm's own line has the sdist
-# 5f8f4e89... next to the x86_64 wheel ef52ee58...). Adding --only-binary :all: to bootstrap.sh's pip install keeps
+# 5f8f4e89... next to the x86_64 wheel ef52ee58...). bootstrap.sh's pip install has --only-binary :all:, which keeps
 # pip from ever building one of them on the card.
 #
 # The GGUF loader is not in this file: vLLM 0.30.0 has none in tree, and no released vllm-gguf-plugin loads
