@@ -1,5 +1,5 @@
 """The dev launcher as the integration run starts it: a child process with the cases' service block, whose fake engine
-gives its default answers to any request, at once or paced by its delay options."""
+gives its default answers to any request, at once or paced by its delay options; and those default answers."""
 
 from __future__ import annotations
 
@@ -11,14 +11,16 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 import pytest
 
 from simple_serving import dev
-from simple_serving.fake_engine import SENTENCE
+from simple_serving.fake_engine import SENTENCE, THOUGHT, FakeEngine
 
 from .support import (
+    ALIAS,
     BOT,
     CONTROL,
     OUTSIDE_A,
@@ -28,7 +30,9 @@ from .support import (
     Answer,
     call,
     chat_body,
+    generate,
     reader,
+    running,
 )
 
 pytestmark = pytest.mark.anyio
@@ -131,3 +135,45 @@ def test_a_delay_is_a_whole_number_of_milliseconds(value: str, capsys: pytest.Ca
                   "--event-delay-ms", value])
     assert exit_.value.code == 2
     assert "--event-delay-ms" in capsys.readouterr().err
+
+
+# The fake engine's default answers that the smoke's dry run needs: finish length at max_tokens, reasoning when
+# thinking is on, and a refusal of a schema it cannot compile, before any stream.
+
+def text_of(answer: Any, field: str) -> str:
+    return "".join(event["choices"][0]["delta"].get(field, "") for event in answer.events()[:-1]
+                   if isinstance(event, dict) and event["choices"])
+
+
+async def test_the_fake_engine_cuts_at_max_tokens_and_thinks_when_asked() -> None:
+    async with running() as stack, httpx.AsyncClient(timeout=10) as client:
+        cut = await generate(client, stack, chat_body(max_tokens=4))
+        thinking = await generate(client, stack, chat_body(chat_template_kwargs={"enable_thinking": True}))
+        both_cut = await generate(client, stack,
+                                  chat_body(max_tokens=5, chat_template_kwargs={"enable_thinking": True}))
+    assert text_of(cut, "content") == "".join(SENTENCE)[:16]
+    assert cut.events()[-2]["usage"]["completion_tokens"] == 4
+    assert [event["choices"][0]["finish_reason"] for event in cut.events()[:-2]][-1] == "length"
+    assert (text_of(thinking, "reasoning_content"), text_of(thinking, "content")) == ("".join(THOUGHT),
+                                                                                     "".join(SENTENCE))
+    assert thinking.events()[-2]["usage"]["completion_tokens"] == 24  # the thought's 41 characters and the sentence's
+    assert (text_of(both_cut, "reasoning_content"), text_of(both_cut, "content")) == ("".join(THOUGHT)[:20], "")
+
+
+async def test_the_fake_engine_refuses_a_pattern_that_does_not_compile_before_any_stream() -> None:
+    def body(pattern: str) -> dict[str, Any]:
+        schema = {"type": "object", "properties": {"id": {"type": "string", "pattern": pattern}}}
+        return chat_body(response_format={"type": "json_schema",
+                                          "json_schema": {"name": "id", "strict": True, "schema": schema}})
+
+    async with running() as stack, httpx.AsyncClient(timeout=10) as client:
+        refused = await generate(client, stack, body("(unclosed"))
+        served = await generate(client, stack, body("^e[1-9][0-9]{0,3}$"))
+    assert (refused.status, refused.json()) == (400, {"error": {"code": "invalid_request"}})
+    assert served.done
+
+
+def test_a_fake_engine_without_a_limit_or_thinking_gives_the_whole_sentence() -> None:
+    events = FakeEngine(ALIAS, 4096)._default_events({"messages": []})
+    assert [event.get("content") for event in events[1:-1]] == list(SENTENCE)
+    assert events[-1] == {"finish_reason": "stop"}

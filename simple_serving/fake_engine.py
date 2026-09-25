@@ -3,8 +3,11 @@
 It answers GET /health, GET /v1/models, POST /tokenize and POST /v1/chat/completions the way vLLM does: the status and
 headers of a generation go out at once, its first event after the prompt is read. A test scripts it per step from the
 `engine` block of a case, with gates and delays for the scenarios. Without a script it gives default answers: the count
-is ceil(characters of all message contents / 4), and a generation streams a fixed synthetic sentence and stops. It
-records every call with its body and headers, and the moment it noticed that its client left.
+is ceil(characters of all message contents / 4), and a generation streams a fixed synthetic sentence and stops. As in
+vLLM, a request that asks for thinking gets a fixed thought first, in the reasoning field, and `max_tokens`, counted
+as characters / 4 too, cuts the answer and finishes it with `length`. A schema that holds a pattern which is not a
+regular expression is refused with 400 before the stream, as vLLM refuses a schema it cannot compile. It records every
+call with its body and headers, and the moment it noticed that its client left.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -20,6 +24,7 @@ from typing import Any
 from starlette.types import Message, Receive, Scope, Send
 
 SENTENCE = ("The keeper ", "lights the lamp ", "and watches ", "the grey sea.")
+THOUGHT = ("The sea is calm, ", "so the lamp comes first.")  # the default reasoning, when a request asks for it
 ROUTES = {("GET", "/health"): "health", ("GET", "/v1/models"): "models", ("POST", "/tokenize"): "tokenize",
           ("POST", "/v1/chat/completions"): "generate"}
 
@@ -113,11 +118,13 @@ class FakeEngine:
         script = self._script(call.body)
         if script.hold_headers is not None:
             await _hold(script.hold_headers, call)
-        if script.generate_status is not None:
+        status = script.generate_status
+        if status is None and _uncompilable(call.body):
+            status = 400
+        if status is not None:
             # Engines may quote the prompt in their errors, so this one does; the gateway must never pass it on.
-            await _respond_json(send, script.generate_status, {"error": {
-                "message": "cannot serve: " + _prompt_text(call.body), "type": "BadRequestError",
-                "code": script.generate_status}})
+            await _respond_json(send, status, {"error": {
+                "message": "cannot serve: " + _prompt_text(call.body), "type": "BadRequestError", "code": status}})
             return
         if call.client_left.is_set():
             return
@@ -127,7 +134,7 @@ class FakeEngine:
             await _hold(script.hold_first, call)
         if script.first_delay_s:
             await _hold(asyncio.Event(), call, timeout=script.first_delay_s)
-        events = script.events if script.events is not None else self._default_events()
+        events = script.events if script.events is not None else self._default_events(call.body)
         for event in events:
             if call.client_left.is_set():
                 return
@@ -163,8 +170,21 @@ class FakeEngine:
             return script.input_tokens
         return max(1, math.ceil(len(_prompt_text(body)) / 4))
 
-    def _default_events(self) -> list[dict[str, Any]]:
-        return [{"role": "assistant"}, *({"content": part} for part in SENTENCE), {"finish_reason": "stop"}]
+    def _default_events(self, body: Any) -> list[dict[str, Any]]:
+        """The thought when the request asks for thinking, then the sentence, cut where `max_tokens` runs out."""
+        kwargs = body.get("chat_template_kwargs") if isinstance(body, dict) else None
+        thinking = isinstance(kwargs, dict) and kwargs.get("enable_thinking") is True
+        parts = [*(("reasoning", part) for part in THOUGHT if thinking), *(("content", part) for part in SENTENCE)]
+        limit = body.get("max_tokens") if isinstance(body, dict) else None
+        room = limit * 4 if type(limit) is int else sum(len(part) for _, part in parts)
+        events: list[dict[str, Any]] = [{"role": "assistant"}]
+        for name, part in parts:
+            if room < len(part):
+                events += [{name: part[:room]}] if room else []
+                return [*events, {"finish_reason": "length"}]
+            events.append({name: part})
+            room -= len(part)
+        return [*events, {"finish_reason": "stop"}]
 
     def _chunk(self, event: dict[str, Any]) -> dict[str, Any]:
         delta: dict[str, Any] = {}
@@ -185,7 +205,8 @@ class FakeEngine:
         prompt = given.get("prompt_tokens", self._count(script, body))
         completion = given.get("completion_tokens")
         if completion is None:
-            completion = max(1, math.ceil(sum(len(event.get("content", "")) for event in events) / 4))
+            generated = sum(len(event.get("reasoning", "")) + len(event.get("content", "")) for event in events)
+            completion = max(1, math.ceil(generated / 4))
         usage: dict[str, Any] = {"prompt_tokens": prompt, "total_tokens": prompt + completion,
                                  "completion_tokens": completion}
         if given.get("cached_tokens") is not None:
@@ -243,6 +264,25 @@ def _prompt_text(body: Any) -> str:
     if not isinstance(messages, list):
         return ""
     return "".join(m["content"] for m in messages if isinstance(m, dict) and isinstance(m.get("content"), str))
+
+
+def _uncompilable(body: Any) -> bool:
+    """Whether the request's schema holds a `pattern` that is not a regular expression, which vLLM cannot compile."""
+    fmt = body.get("response_format") if isinstance(body, dict) else None
+    spec = fmt.get("json_schema") if isinstance(fmt, dict) else None
+    pending = [spec.get("schema") if isinstance(spec, dict) else None]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            if isinstance(node.get("pattern"), str):
+                try:
+                    re.compile(node["pattern"])
+                except re.error:
+                    return True
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
+    return False
 
 
 async def _respond(send: Send, status: int, body: bytes, content_type: bytes = b"text/plain") -> None:
