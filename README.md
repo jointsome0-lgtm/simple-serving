@@ -150,8 +150,7 @@ comes with outside keys. The gateway refuses to start unless `listen.control.hos
 loopback IP addresses, in 127.0.0.0/8 or `::1`; a name, even `localhost`, is refused. vLLM listens on loopback with
 the served model name equal to `alias`, priority scheduling (`--scheduling-policy priority`), prefix caching,
 `--enable-prompt-tokens-details` for cached tokens, a reasoning parser that puts the model's thinking in a field of its
-own, a schema's JSON from xgrammar alone with no whitespace between its tokens, and its request logging off (contract
-section 10).
+own, a schema's JSON from xgrammar alone, and its request logging off (contract section 10).
 
 ## The card
 
@@ -393,7 +392,9 @@ lifecycle; `ready`, `status`, `first_event`, `held`, `freed`, `unlogged`, `incon
 `code`, `unlogged` or `marker` in the privacy probe. `left_drained` means that the open undoing the abort's drain was
 not read back as `ready`, so the gateway may be left drained; `no_answer` that the gateway did not answer,
 `no_report` that the card's report did not come or came in another form, `time_bound` that the probe ran past its
-bound, and `smoke_error` an error in the smoke itself, whose class `error` names. The numbers are the stream's chunks,
+bound, and `smoke_error` an error in the smoke itself, whose class `error` names. With `no_report`, `report` says
+how: `timeout`, `pipe`, `exit` with the command's code in `exit` (255 is ssh's own), `size`, `json`, `shape` or
+`no_host`, and `call` names the request: `plain`, `marker` or `since`. The numbers are the stream's chunks,
 the lengths of the answer and of the reasoning in characters, the usage, and the gateway's `wait_ms`,
 `first_token_ms` and `total_ms`; in the count matrix `input_tokens` beside `prompt_tokens`, and near the context the
 `max_tokens` that fills it and the counts the search took; in the lifecycle the `launchers`, their `children` and the

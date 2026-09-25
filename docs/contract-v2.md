@@ -590,8 +590,8 @@ Before the rental, without a card:
   - `--scheduling-policy priority`: without it vLLM refuses a non-zero priority, and every `agent`, `internal` and
     `external` request fails;
   - prefix caching with `cache_salt`, and `--enable-prompt-tokens-details` for `cached_tokens`;
-  - `--structured-outputs-config` with the backend `xgrammar` and `disable_any_whitespace`: that backend has no
-    fallback, so every schema in `bot_schemas.json` must compile with the pinned xgrammar;
+  - `--structured-outputs-config` with the backend `xgrammar` alone: it has no fallback, so every schema in
+    `bot_schemas.json` must compile with the pinned xgrammar;
   - request and output logging off;
   - the name of the reasoning field, the finish reasons, and the shape of an error in the middle of a stream;
   - the model name in every chunk, the usage chunk included: the gateway refuses a chunk that does not name the alias;
@@ -688,3 +688,9 @@ GPTQ or NVFP4, a separate configuration, measured again.
 - 2026-09-25, the owner, after the rehearsal's `frame` answer ran out its 900 tokens with 1668 characters: vLLM
   builds a schema's JSON with xgrammar alone and no whitespace between its tokens. Whitespace as the cause is not
   measured yet; on an answer cut short the smoke now counts its whitespace and its characters outside ASCII.
+- 2026-09-25, the owner, after the action measurement's texts on a 5090: whitespace between a schema's tokens is
+  allowed again, and xgrammar stays the one backend. With the ban, 5 of the 18 stories got a sheet with nobody on it,
+  in 7 tokens that ended on `stop`, and so did the marker story on one card of two. The four of those five that are
+  not sealed, asked again from the same excerpts with whitespace allowed, gave 4, 6, 4 and 4 people, twice each, and
+  no answer ran to its limit. The runaway the ban was for, E2B's `frame`, is met as the bot meets it, by the 900-token
+  limit and one retry; the smoke still fails an answer cut short.

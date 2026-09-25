@@ -128,7 +128,12 @@ class NoAnswer(Exception):
 
 
 class NoReport(Exception):
-    """The card's report did not come, or came in another form."""
+    """The card's report did not come, or came in another form. `cause` says which, `code` is the exit code of the
+    command that was to give it, and `call` the kind of request: fixed words and a number, nothing the card wrote."""
+
+    def __init__(self, cause: str, code: int | None = None) -> None:
+        super().__init__(cause)
+        self.cause, self.code, self.call = cause, code, ""
 
 
 def user(text: str) -> dict[str, str]:
@@ -333,12 +338,19 @@ class CardFiles:
             return ([sys.executable, "-m", "simple_serving.card", "--inspect"],
                     os.environ | {f"SIMPLE_SERVING_CARD_{name}": str(path) for name, path in places.items()})
         if self.host is None:
-            raise NoReport
+            raise NoReport("no_host")
         return [*cli.SSH, self.host, INSPECT], None
 
     async def inspect(self, marker: str | None = None, since: int | None = None) -> dict[str, Any]:
         """The report, as a request with `marker` and `since` asks for it: numbers and flags alone, of the form that
         `card.inspect` gives, or NoReport."""
+        try:
+            return await self.report(marker, since)
+        except NoReport as error:
+            error.call = "since" if since is not None else "marker" if marker is not None else "plain"
+            raise
+
+    async def report(self, marker: str | None, since: int | None) -> dict[str, Any]:
         argv, env = self.command()
         request = {name: value for name, value in (("marker", marker), ("since", since)) if value is not None}
         process = await asyncio.create_subprocess_exec(*argv, env=env, cwd=card.CODE, stdin=asyncio.subprocess.PIPE,
@@ -354,14 +366,18 @@ class CardFiles:
                 while len(out) <= REPORT_BYTES and (piece := await process.stdout.read(REPORT_BYTES)):
                     out += piece
                 code = await process.wait()
-        except (TimeoutError, OSError):
-            raise NoReport from None
+        except TimeoutError:
+            raise NoReport("timeout") from None
+        except OSError:
+            raise NoReport("pipe") from None
         finally:
             if process.returncode is None:
                 process.kill()
                 await process.wait()
-        if code != 0 or len(out) > REPORT_BYTES:
-            raise NoReport
+        if code != 0:
+            raise NoReport("exit", code)
+        if len(out) > REPORT_BYTES:
+            raise NoReport("size")
         return checked_report(out, marker is not None, since is not None)
 
 
@@ -370,7 +386,7 @@ def checked_report(data: bytes, marker: bool, since: bool) -> dict[str, Any]:
     try:
         report = json.loads(data)
     except ValueError:
-        raise NoReport from None
+        raise NoReport("json") from None
     logs = report.get("logs") if isinstance(report, dict) else None
     entry = {"rows", "found"} if marker else {"rows"}
     cancelled = report.get("cancelled", []) if isinstance(report, dict) else None
@@ -382,7 +398,7 @@ def checked_report(data: bytes, marker: bool, since: bool) -> dict[str, Any]:
             and all(isinstance(counts, dict) and counts.keys() == entry and all(map(is_count, counts.values()))
                     for counts in logs.values())
             and (cancelled is None or (isinstance(cancelled, list) and all(type(flag) is bool for flag in cancelled)))):
-        raise NoReport
+        raise NoReport("shape")
     return report
 
 
@@ -872,8 +888,9 @@ async def one(smoke: Smoke, name: str) -> dict[str, Any]:
         line = {"ok": False, "failed": ["time_bound"], "bound_s": BOUND_S[name]}
     except NoAnswer:
         line = {"ok": False, "failed": ["no_answer"]}
-    except NoReport:
-        line = {"ok": False, "failed": ["no_report"]}
+    except NoReport as error:
+        line = {"ok": False, "failed": ["no_report"], "report": error.cause, "call": error.call,
+                **({"exit": error.code} if error.code is not None else {})}
     except Exception as error:  # noqa: BLE001 - it fails its probe by its class: a traceback may quote text
         line = {"ok": False, "failed": ["smoke_error"], "error": type(error).__name__}
     undo, smoke.undo = smoke.undo, None
