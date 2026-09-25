@@ -233,8 +233,8 @@ uv run python -m simple_serving.cli up | sleep | status | keys | trial --ssh-hos
 - `status` shows the instance's state in Vast and, through a forward of its own, the gateway's status, whether it
   serves the manifest's model, and its counts. Nothing of an answer is printed as it came.
 - `keys` makes the two gateway keys once, for the preparation above.
-- `trial --ssh-host HOST` is for the first rental. It reads the card's instance id and its container key over SSH and
-  writes them, with the host, into the configuration, printing none of them.
+- `trial --ssh-host HOST` is for a trial rental. It reads the card's instance id over SSH and writes it, with the
+  host, into the configuration, printing neither.
 
 The configuration is `~/.config/simple-serving/config.json`, open to its owner only, or the file that `--config`
 names:
@@ -244,10 +244,10 @@ names:
 ```
 
 `keys` writes the last two. `vast_api_key` is a Vast key allowed GET and PUT on that instance alone, never the account
-key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. On the first rental `trial` writes the first
-three, and the card's own container key, one for that instance alone, stands in for the restricted key. The bot's
-model profile takes the address `http://127.0.0.1:8080` and the client key; it holds neither the control key nor a
-Vast key.
+key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. On a trial rental `trial` writes `instance_id`
+and `ssh_host`, and `vast_api_key` stays the owner's key: Vast answers the card's own container key on the card, and
+refuses it from the owner's machine with 401 (measured 2026-09-25). The bot's model profile takes the address
+`http://127.0.0.1:8080` and the client key; it holds neither the control key nor a Vast key.
 
 ## The smoke
 
@@ -355,9 +355,9 @@ Step 1 of contract section 15 runs in two terminals on the owner's machine, from
 of "The card" above has started the service:
 
 1. Once SSH to the card works, and before the first `up`: `uv run python -m simple_serving.cli trial --ssh-host HOST`,
-   where `HOST` is a host of `~/.ssh/config` whose host key is known. It writes the card's instance id, its
-   container key and the host into the configuration, printing none of them, whether or not `keys` has run, and
-   keeps what the file already holds. The smoke reaches the card's report with that host.
+   where `HOST` is a host of `~/.ssh/config` whose host key is known. It writes the card's instance id and the host
+   into the configuration, whether or not `keys` has run, and keeps what the file already holds, the owner's
+   `vast_api_key` included. The smoke reaches the card's report with that host.
 2. First terminal: `uv run python -m simple_serving.cli up`, until it says `ready`.
 3. Second terminal:
 

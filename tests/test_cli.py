@@ -225,7 +225,7 @@ with open(os.environ["SSH_ANSWER"], "rb") as file:
 sys.stdout.buffer.write(answer)
 sys.stderr.buffer.write(answer)  # as a card whose startup printed the files
 """
-INSTANCE, KEY = "31415926", "synthetic-container-key"
+INSTANCE, KEY = "31415926", "synthetic-owner-key"
 
 
 @pytest.fixture
@@ -240,24 +240,23 @@ def card_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path / "answer"
 
 
-def test_trial_writes_the_cards_id_and_key_beside_the_keys_prints_neither_and_a_refusal_changes_nothing(
-        tmp_path: Path, card_answer: Path, capfd: pytest.CaptureFixture[str]) -> None:
+def test_trial_writes_the_cards_id_and_the_host_keeps_the_owners_key_and_a_refusal_changes_nothing(
+        tmp_path: Path, card_answer: Path) -> None:
     path = tmp_path / "simple-serving" / "config.json"
     assert cli.main(["--config", str(path), "keys"]) == 0
+    cli.write_config(path, json.loads(path.read_text()) | {"vast_api_key": KEY})
     before = json.loads(path.read_text())
-    card_answer.write_bytes(f"{INSTANCE}\n{KEY}\n".encode())
+    card_answer.write_bytes(f"{INSTANCE}\n".encode())
     assert cli.main(["--config", str(path), "--ssh-host=-oProxyCommand=x", "trial"]) == 1  # an option to ssh
     assert not (tmp_path / "args.json").exists()
-    card_answer.write_bytes(f"{INSTANCE}\n{KEY}\r\n".encode())
+    card_answer.write_bytes(f"{INSTANCE}\nsynthetic-container-key\n".encode())  # a card that also gives its key
     assert cli.main(["--config", str(path), "--ssh-host", "card", "trial"]) == 1
     assert json.loads(path.read_text()) == before
-    card_answer.write_bytes(f"{INSTANCE}\n{KEY}\n".encode())
+    card_answer.write_bytes(f"{INSTANCE}\n".encode())
     assert cli.main(["--config", str(path), "--ssh-host", "card", "trial"]) == 0
-    printed = capfd.readouterr()
-    assert not any(value in printed.out + printed.err for value in (INSTANCE, KEY))
     args = json.loads((tmp_path / "args.json").read_text())
     assert args[-2:] == ["card", cli.READ_TRIAL] and {"BatchMode=yes", "StrictHostKeyChecking=yes"} <= set(args)
-    assert json.loads(path.read_text()) == before | {"instance_id": INSTANCE, "vast_api_key": KEY, "ssh_host": "card"}
+    assert json.loads(path.read_text()) == before | {"instance_id": INSTANCE, "ssh_host": "card"}
     assert stat.S_IMODE(path.stat().st_mode) == 0o600 and KEY not in repr(cli.load(path))
 
 

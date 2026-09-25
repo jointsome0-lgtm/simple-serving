@@ -22,9 +22,9 @@ The configuration is the owner's alone: a JSON object in `~/.config/simple-servi
 `instance_id`, `vast_api_key`, a Vast key allowed GET and PUT on that instance alone, and `ssh_host`, a host of
 ~/.ssh/config whose host key is known. The owner copies the client key into the bot's model profile.
 
-On the first rental, `trial` writes those three instead: it reads the card's instance id and container key over SSH
-from the files card/onstart.sh keeps, checks their form, and writes them with the host it read them through. It
-prints none of them.
+On a trial rental, `trial` writes the id and the host instead: it reads the card's instance id over SSH from the file
+card/onstart.sh keeps, checks its form, and writes it with the host it read it through. The key stays the owner's:
+Vast refuses the card's own key from outside the card.
 """
 
 from __future__ import annotations
@@ -61,9 +61,8 @@ SSH = ("ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "Exi
        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=yes",
        "-o", "ControlPath=none")
 HOLD = "cd /workspace/simple-serving && /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --hold"
-# Prints the instance's id and key, which card/onstart.sh keeps in two files without a newline, one line apiece.
-READ_TRIAL = ('for f in /root/.simple-chat-instance-id /root/.simple-chat-instance-api-key; '
-              'do cat "$f" || exit 3; echo; done')
+# Prints the instance's id, which card/onstart.sh keeps in a file without a newline, as one line.
+READ_TRIAL = "cat /root/.simple-chat-instance-id || exit 3; echo"
 TRIAL_BYTES = 4096  # the most of the card's answer to READ_TRIAL that `trial` reads
 SSH_FAILED = 255  # ssh's own exit code; any other before the first line comes from the card's shell
 POLL_S = 10  # between two reads of Vast, and two tries of SSH
@@ -234,13 +233,13 @@ def keys(path: Path) -> int:
 
 
 async def trial(path: Path, host: str) -> int:
-    """Write the trial instance's id and its container key, which card/onstart.sh keeps on the card, and the SSH host
-    they were read from into the configuration, keeping what else it holds. Nothing read from the card is printed,
-    not even when it is refused."""
+    """Write the trial instance's id, which card/onstart.sh keeps on the card, and the SSH host it was read from into
+    the configuration, keeping what else it holds, `vast_api_key` included. Nothing read from the card is printed, not
+    even when it is refused."""
     if not SSH_HOST.fullmatch(host):
         raise Refusal("the SSH host has the wrong form")
     config = read_config(path)
-    # Standard error is dropped unread: whatever the card prints there could hold the key.
+    # Standard error is dropped unread: whatever the card prints there could hold its key.
     process = await asyncio.create_subprocess_exec(*SSH, host, READ_TRIAL, stdin=asyncio.subprocess.DEVNULL,
                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     assert process.stdout is not None
@@ -252,19 +251,19 @@ async def trial(path: Path, host: str) -> int:
             code = await process.wait() if len(answer) <= TRIAL_BYTES else None
     except TimeoutError:
         await Tunnel(process).close()
-        raise Refusal(f"the card did not give the instance's id and key within {CONNECT_S} seconds") from None
-    if code is None:  # an answer longer than an id and a key
+        raise Refusal(f"the card did not give the instance's id within {CONNECT_S} seconds") from None
+    if code is None:  # an answer longer than an id
         await Tunnel(process).close()
     elif code:
-        raise Refusal(f"could not read the instance's id and key from the card: ssh ended with {code}")
+        raise Refusal(f"could not read the instance's id from the card: ssh ended with {code}")
     try:
-        instance, key, rest = answer.decode().split("\n")
-    except ValueError:  # a byte that is not UTF-8, or other than two lines
-        instance, key, rest = "", "", "?"
-    if code is None or rest or not vast.INSTANCE.fullmatch(instance) or not key or "\r" in key:
-        raise Refusal("the card's instance id or key is missing or of the wrong form")
-    write_config(path, config | {"instance_id": instance, "vast_api_key": key, "ssh_host": host})
-    say(f"trial: the instance's id and key, and the SSH host, are in {path}")
+        instance, rest = answer.decode().split("\n")
+    except ValueError:  # a byte that is not UTF-8, or other than one line
+        instance, rest = "", "?"
+    if code is None or rest or not vast.INSTANCE.fullmatch(instance):
+        raise Refusal("the card's instance id is missing or of the wrong form")
+    write_config(path, config | {"instance_id": instance, "ssh_host": host})
+    say(f"trial: the instance's id and the SSH host are in {path}")
     return 0
 
 

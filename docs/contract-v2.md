@@ -355,8 +355,8 @@ request that fails to end when the drain cancels it. An idle sleep has no work o
 ### The command
 
 simple-serving's command on the owner's machine starts the card, holds the tunnel and asks for sleep. It uses the
-owner's restricted Vast key (section 12) and never the card's, except on the first rental, where `trial` writes the
-card's own key in its place (Decided, 2026-09-25).
+owner's restricted Vast key (section 12) and never the card's, which Vast refuses from outside the card (Decided,
+2026-09-25, as measured).
 
 - `up` reads the instance's state in Vast. It waits for a stop in flight to end rather than start against it, resumes
   the instance once if it is stopped, and waits for it to run and for SSH. It opens the tunnel, checks the gateway's
@@ -372,9 +372,9 @@ card's own key in its place (Decided, 2026-09-25).
   are the expected ones.
 - `keys` makes the client key and the control key once, and prints only the SHA-256 of each, which the card's
   preparation reads (section 12).
-- `trial`, on the first rental only, reads the card's instance id and container key over SSH from the files the
-  card's `onstart.sh` keeps, checks their form, and writes them with the SSH host into the configuration. It prints
-  none of them.
+- `trial`, on a trial rental, reads the card's instance id over SSH from the file the card's `onstart.sh` keeps,
+  checks its form, and writes it with the SSH host into the configuration, keeping the owner's key there. It prints
+  neither.
 
 ### Starting the card
 
@@ -500,11 +500,11 @@ the control key. A change to any of them makes a new configuration, which is mea
 
 Configuration and keys live in simple-serving. The owner's machine keeps one private configuration of the command,
 with the owner's restricted Vast key, allowed GET and PUT on the chosen instance only, and two gateway keys: a
-client key and a control key. On the first rental the card's own container key, one for that instance alone, stands
-in for the restricted key (Decided, 2026-09-25). The card gets only the SHA-256 of each gateway key, once, through
-the stdin of SSH during the preparation. The owner copies the client key and the address into the bot's model
-profile, so simple-story-chat holds neither a Vast key nor the control key. The bot, its agent interface, eval and
-the probes share the client key for now; their classes still differ (section 2).
+client key and a control key. The card's own container key cannot stand in for the restricted key: Vast refuses it
+from outside the card (Decided, 2026-09-25, as measured). The card gets only the SHA-256 of each gateway key, once,
+through the stdin of SSH during the preparation. The owner copies the client key and the address into the bot's
+model profile, so simple-story-chat holds neither a Vast key nor the control key. The bot, its agent interface, eval
+and the probes share the client key for now; their classes still differ (section 2).
 
 ## 13. What changes in simple-story-chat
 
@@ -679,3 +679,7 @@ GPTQ or NVFP4, a separate configuration, measured again.
   resumes the instance from outside the card; if Vast refuses it, the operator deletes the trial as the README's "The
   first rental" says, since `up` reads the instance with that same key. A permanent rental keeps the owner's
   restricted key.
+- 2026-09-25, measured on the first rentals: Vast answers the card's own key with 200 on the card and with 401 from
+  the owner's machine, so the entry above cannot hold. The owner made a restricted key, which read, confirmed the
+  stop of and resumed the next trial from outside. `vast_api_key` is that key on every rental, and `cli trial` writes
+  only the instance's id and the SSH host.
