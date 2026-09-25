@@ -595,13 +595,22 @@ Before the rental, without a card:
 
 On the card:
 
-1. Smoke: vLLM loads the weights of the manifest, route A: a 4-bit NVFP4 conversion of the heretic whose Q6_K GGUF
-   the bot uses with llama.cpp, since no released vLLM loads that GGUF. The time for this is fixed in advance. If the
-   weights do not load or are too slow, nobody fixes that on the paid card, and other weights are measured later as a
-   separate configuration. Once it is `ready`, before anything long, the stop: `sleep`, and the command reads
-   `stopped` back from Vast; then `up` resumes the instance, and the rental's own onstart, with no start over SSH,
-   starts exactly one pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline
-   unchanged. Then the smoke probes and the count matrix run, with the real template.
+1. Smoke, in this order. The preparation's `pip check` passes in both venvs (section 12). The start imports vLLM,
+   which loads the weights of the manifest, route A: a 4-bit NVFP4 conversion of the heretic whose Q6_K GGUF the bot
+   uses with llama.cpp, since no released vLLM loads that GGUF. The time for this is fixed in advance. Once it is
+   `ready`, one short completion. Then, before anything long, the stop: `sleep`, and the command reads `stopped` back
+   from Vast; then `up` resumes the instance, and the rental's own onstart, with no start over SSH, starts exactly one
+   pair with a new boot, the pins, keys and weights still in place, and the trial guard's deadline unchanged. Then the
+   smoke probes and the count matrix run, with the real template. Eval and every other long run come after all this.
+
+   The attempt, the preparation included, is over by the time the owner chose before creating the instance (the
+   README's "The first rental"). If by then the stack or the weights do not work, or are too slow, the attempt stops
+   there: nobody fixes that on the paid card, and another configuration is measured later. Installing wheels only
+   keeps pip from building anything, but FlashInfer and Triton still compile kernels at run time, and vLLM's lock
+   brings CUDA 13.4's compiler pieces (nvcc, nvJitLink, NVVM). On a 580 driver, as the last rental had, CUDA 13.x
+   runs by minor-version compatibility, which limits PTX JIT on an older driver
+   ([NVIDIA](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)), so nothing here
+   promises that those pieces work there: the smoke finds out.
 2. Isolation and privacy, before any real story or outside key: a synthetic series checks that cache scopes stay
    apart, and that the privacy marker shows up in no log of the engine, the proxy or the gateway.
 3. llama.cpp with the bot's Q6_K, and vLLM with route A's 4-bit weights. The tokenizer, chat template, thinking,
