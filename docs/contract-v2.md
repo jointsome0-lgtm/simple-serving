@@ -641,3 +641,5 @@ GPTQ or NVFP4, a separate configuration, measured again.
   simple-serving.
 - 2026-09-25, the owner: the trial serves route A, a ready 4-bit NVFP4 conversion of the heretic that vLLM loads in
   tree. Route B, our own conversion, follows only if eval finds A's quality short.
+- 2026-09-25, the owner: route A's weights get no mirror or copy, so if llmfan46's NVFP4 repository disappears,
+  route B, our own conversion of the heretic's bfloat16 weights, follows as well.
