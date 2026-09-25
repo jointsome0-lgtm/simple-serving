@@ -343,7 +343,8 @@ request that fails to end when the drain cancels it. An idle sleep has no work o
 - A failed attempt, the gateway's or the launcher's, leaves the card's marker `stop-unconfirmed` and the log row
   `stop_unconfirmed` with the failure's category and status, until the launcher's next start: the stop is not
   confirmed, and costs may go on. `up`, `sleep` and `status` say so. The attempts go on, but while Vast refuses the
-  container's key they bound nothing, and the owner stops the instance in Vast's console (section 15).
+  container's key they bound nothing, and on the first rental the operator deletes the instance with the owner's
+  account key (section 15).
 - Stop, not delete: the disk with the weights stays, and Vast bills for it while the card is stopped.
 - The gateway cannot see its own stop complete, since the stop ends it. Until then admission stays closed and it
   never reports `ready`. Its status is `drained`, or, after a stop that did not wait for the drain, `draining` until
@@ -563,11 +564,16 @@ The first rental is a disposable trial. Its own onstart, simple-story-chat's `gp
 that deletes the instance three hours after the first start, and writes the instance's id and key, which the first
 preparation needs; its last line runs the card's `onstart.sh` (section 8). The guard deletes with the container's key,
 the key of the card's stop, so a key that Vast refuses or has revoked defeats both: nothing on the card then bounds
-the costs, and before the launcher runs the card has no stop of its own. The owner is that bound from the moment the
-instance is created, with the readback, the deadlines and the console action of the README's "The first rental",
-approved in advance. The service never deletes its card, and its `onstart.sh` arms no guard. An onstart for a
-permanent rental, which writes the two files and ends with the same line but arms no guard, is decided before
-permanent use. Unattended or permanent use also needs an independent budget path, which is open and not built.
+the costs, and before the launcher runs the card has no stop of its own. The operator is that bound, the Claude
+session that runs the rental, from the moment the instance is created. It reads the instance with the owner's
+account key through simple-story-chat's `npm run gpu:rent -- --show ID`, and in each case the README's "The first
+rental" lists, approved in advance, it deletes the instance with `npm run gpu:rent -- --destroy ID`, which uses the
+same key and reads the instance back until it is gone. When that read-back does not confirm the deletion, it tells the
+owner at once. Every stop is confirmed from outside with the owner's own key: the account key in simple-story-chat's
+`.env.gpu`, which rent.mjs uses and which is never copied into simple-serving's configuration. The service never
+deletes its card, and its `onstart.sh` arms no guard. An onstart for a permanent rental, which writes the two files and
+ends with the same line but arms no guard, is decided before permanent use. Unattended or permanent use also needs an
+independent budget path, which is open and not built.
 
 Before the rental, without a card:
 
@@ -649,3 +655,6 @@ GPTQ or NVFP4, a separate configuration, measured again.
   tree. Route B, our own conversion, follows only if eval finds A's quality short.
 - 2026-09-25, the owner: route A's weights get no mirror or copy, so if llmfan46's NVFP4 repository disappears,
   route B, our own conversion of the heretic's bfloat16 weights, follows as well.
+- 2026-09-25, the owner: the first rental's bound is the operator, the Claude session that runs it, not the owner at
+  Vast's console. It reads and deletes the instance with the owner's account key through simple-story-chat's
+  `npm run gpu:rent`, and tells the owner at once when a deletion is not confirmed.

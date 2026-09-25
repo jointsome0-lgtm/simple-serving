@@ -73,8 +73,8 @@ NOT_PREPARED = "the card is not prepared: run its preparation first (README, 'Th
 GIVEN_UP = (f"the card has given up loading the model and stops itself {IDLE_TIMEOUT_S // 60} minutes after its start. "
             "The launcher's --retry on the card loads it again, within seconds while the launcher still waits and "
             "otherwise at the next start (README, 'The card')")
-UNCONFIRMED = ("the card's stop is not confirmed: Vast has not taken it, and costs may go on. Stop or delete the "
-               "instance in Vast's console (README, 'The first rental')")
+UNCONFIRMED = ("the card's stop is not confirmed: Vast has not taken it, and costs may go on. Delete the trial "
+               "instance with simple-story-chat's npm run gpu:rent -- --destroy ID (README, 'The first rental')")
 REFUSALS = {card.NOT_PREPARED: NOT_PREPARED, card.GAVE_UP: GIVEN_UP, card.STOP_UNCONFIRMED: UNCONFIRMED}  # of --hold
 
 now = time.monotonic  # the command's own clock, which the tests replace

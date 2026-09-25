@@ -303,21 +303,26 @@ The pause after each event holds a stream open while the abort probe looks for i
 
 The card stops itself with the container's key, and the trial's guard deletes with the same key, so a key that Vast
 refuses leaves nothing on the card that bounds the costs. Before the launcher runs, the card has not even its own
-stop: SSH may not answer, and bootstrap.sh may hang in pip or curl, or end with 1. On the first rental the owner is
-that bound, watching from the moment the instance is created:
+stop: SSH may not answer, and bootstrap.sh may hang in pip or curl, or end with 1. On the first rental the operator
+is that bound: the Claude session that runs the rental, from the moment the instance is created. It reaches the
+instance with the owner's account key alone, through simple-story-chat's rent tool, where `ID` is the instance's id:
+`npm run gpu:rent -- --show ID` reads it once, and `npm run gpu:rent -- --destroy ID` deletes it and reads it back
+until it is gone, or says within five minutes that it could not confirm that. The account key stays in
+simple-story-chat's `.env.gpu`, which rent.mjs reads, and is never copied into this repository's configuration.
 
 1. Before the instance is created, the owner chooses the time of day by which the first attempt, the preparation
    included, is over. This README sets none.
 2. Before anything long, once the prepared card is ready: `sleep`, which must end with `vast: stopped`. Then `up`,
    a resume with no start over SSH: the card boots anew and runs one pair, which `up` reports ready.
-3. Every stop is confirmed from outside, with the owner's own key: `status` prints `vast: stopped`, and Vast's console
-   shows the instance stopped. `sleep` waits 10 minutes for that. After the last request of an idle card, `stopped`
-   must come within 25 minutes: 13 to fall asleep, 2 for the drain, 10 for the stop.
+3. Every stop is confirmed from outside, with the owner's own key: `status` prints `vast: stopped`, and
+   `npm run gpu:rent -- --show ID` reads the instance with `intended` `stopped` and `actual` `stopped` or `exited`.
+   `sleep` waits 10 minutes for that. After the last request of an idle card, `stopped` must come within 25 minutes:
+   13 to fall asleep, 2 for the drain, 10 for the stop.
 4. Approved in advance, and done at once: when the preparation fails, when SSH or a command stops answering, when
    the attempt's deadline passes, when `stopped` does not come within those 25 minutes, when a command says that the
    card's stop is not confirmed, when `sleep` ends without `vast: stopped`, or when Vast refuses a key with 401 or
-   403, the owner stops the instance in Vast's console, or deletes a trial instance, and checks there that it is
-   stopped or gone.
+   403, the operator deletes the trial instance with `npm run gpu:rent -- --destroy ID`. When that read-back does not
+   confirm the deletion, the operator tells the owner at once.
 
 Step 1 of contract section 15 runs in two terminals on the owner's machine, from the repository, once the preparation
 of "The card" above has started the service:
@@ -326,8 +331,8 @@ of "The card" above has started the service:
 2. Second terminal: `uv run python -m simple_serving.smoke --only state,completion`: the gateway's state and pins,
    and one short completion.
 3. `uv run python -m simple_serving.cli sleep`, which must end with `vast: stopped`; `up` in the first terminal ends
-   too. `uv run python -m simple_serving.cli status` then prints `vast: stopped`, and Vast's console shows the instance
-   stopped.
+   too. `uv run python -m simple_serving.cli status` then prints `vast: stopped`, and `npm run gpu:rent -- --show ID`
+   in simple-story-chat reads the instance stopped.
 4. First terminal: `uv run python -m simple_serving.cli up` again. It resumes the instance, and the card boots anew and
    runs one pair, which `up` reports ready.
 5. Second terminal: `mkdir -p logs && uv run python -m simple_serving.smoke | tee logs/smoke.jsonl`, the whole smoke
@@ -349,9 +354,9 @@ the lines may be kept.
 
 Exit 0, with `simple-serving smoke: 9 of 9 probes passed` on standard error, ends step 1: eval and the other long runs
 may follow. A probe that fails, in either run of the smoke, ends the attempt there: `sleep` at once, with its stop
-confirmed from outside as above, or the console where it does not come. Nothing is fixed, retried or tuned on the paid
-card. The lines say what failed, and another configuration is measured on a later rental (contract section 15). Exit 2
-sent nothing to the card; its line on standard error says why.
+confirmed from outside as above, or the operator's deletion where it does not come. Nothing is fixed, retried or tuned
+on the paid card. The lines say what failed, and another configuration is measured on a later rental (contract
+section 15). Exit 2 sent nothing to the card; its line on standard error says why.
 
 Open, and not built: unattended or permanent use needs an independent budget path, one that bounds the costs without
-the container's key and without the owner at the console.
+the container's key and without an operator watching.
