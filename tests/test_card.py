@@ -503,5 +503,6 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     assert noted.count("python -m simple_serving.card") == 4  # the three preparations, then the resume
     assert not any(line.startswith(("curl", "flock")) for line in noted)  # nothing to fetch, and no guard
     assert not list(root.glob(".simple-chat-trial-*"))
-    assert all("--require-hashes --only-binary :all:" in line for line in noted if line.startswith("pip"))
+    assert all("--require-hashes --only-binary :all:" in line for line in noted if line.startswith("pip install"))
+    assert noted.count("pip check") == 6  # both venvs at each preparation
     assert Card.load(code=code, state=state, environ=environ, root=root).prepared()

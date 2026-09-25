@@ -42,6 +42,7 @@ for venv in gateway vllm; do
   [[ -x $state/$venv/bin/pip ]] || python3 -m venv "$state/$venv"
   "$state/$venv/bin/pip" install --quiet --no-cache-dir --no-deps --require-hashes --only-binary :all: \
     -r "$code/card/$venv-requirements.txt"
+  "$state/$venv/bin/pip" check  # --no-deps trusts the lock to hold every requirement; this checks that it does
 done
 
 # fetch <repo> <revision> <files> <directory>: each name:sha256 of the comma-separated files, from the Hugging Face

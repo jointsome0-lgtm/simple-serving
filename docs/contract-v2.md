@@ -488,8 +488,8 @@ Before any contract run on the card, this repository pins:
 - the revision of the tokenizer and the chat template.
 
 `card/manifest.env` holds the card's pins and parameters. The card's preparation installs each lock into a venv of its
-own and checks every hash, once per rental and never at a resume. `/v1/state` shows the versions to the control key.
-A change to any of them makes a new configuration, which is measured again.
+own, checks every hash and runs `pip check`, once per rental and never at a resume. `/v1/state` shows the versions to
+the control key. A change to any of them makes a new configuration, which is measured again.
 
 Configuration and keys live in simple-serving. The owner's machine keeps one private configuration of the command,
 with the owner's restricted Vast key, allowed GET and PUT on the chosen instance only, and two gateway keys: a

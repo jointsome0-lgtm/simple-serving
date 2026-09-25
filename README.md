@@ -161,10 +161,10 @@ The preparation, once per rental and never at a resume:
 2. `uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh`. `keys`
    makes the client key and the control key once, and prints only the SHA-256 of each, one per line.
 
-bootstrap.sh installs each lock into a venv of its own, wheels only and every hash checked, fetches the weights and
-the tokenizer files at their pinned revisions and checks their hashes, keeps the key hashes in `keys.json`, and
-starts the service. It refuses while a pin or a lock is missing, or when vLLM's lock is for another version than the
-pin, and it never replaces the keys the card holds.
+bootstrap.sh installs each lock into a venv of its own, wheels only and every hash checked, and runs `pip check`
+there. It fetches the weights and the tokenizer files at their pinned revisions and checks their hashes, keeps the
+key hashes in `keys.json`, and starts the service. It refuses while a pin or a lock is missing, or when vLLM's lock
+is for another version than the pin, and it never replaces the keys the card holds.
 
 The locks, `card/gateway-requirements.txt` and `card/vllm-requirements.txt`, each name in their header the command
 that made them: the gateway's is exported from `uv.lock`, and vLLM's is resolved for the pinned version. A change of
