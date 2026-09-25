@@ -40,7 +40,7 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
 - `tests/test_sleep.py`: what holds the service awake, the idle interval, the sleep and the stop of the instance, on
   a fake clock and a fake Vast;
 - `tests/test_card.py`: the card's launcher, what it keeps of vLLM's output, and the preparation and onstart scripts,
-  with stand-ins for vLLM, the gateway, pip, curl and flock;
+  with stand-ins for vLLM, the gateway, pip, aria2c, curl and flock;
 - `tests/test_cli.py`: the command on the owner's machine, against a fake Vast and a fake SSH that forwards to the
   gateway;
 - `tests/test_smoke.py`: the first rental's smoke: the privacy probe's verdict, and the whole smoke through the dev
@@ -167,9 +167,10 @@ The preparation, once per rental and never at a resume:
    makes the client key and the control key once, and prints only the SHA-256 of each, one per line.
 
 bootstrap.sh installs each lock into a venv of its own, wheels only and every hash checked, and runs `pip check`
-there. It fetches the weights and the tokenizer files at their pinned revisions and checks their hashes, keeps the
-key hashes in `keys.json`, and starts the service. It refuses while a pin or a lock is missing, or when vLLM's lock
-is for another version than the pin, and it never replaces the keys the card holds.
+there. It fetches the weights and the tokenizer files at their pinned revisions over 16 connections with aria2c,
+which it installs with apt-get when the card lacks it, and checks their hashes. It keeps the key hashes in
+`keys.json` and starts the service. It refuses while a pin or a lock is missing, or when vLLM's lock is for another
+version than the pin, and it never replaces the keys the card holds.
 
 The locks, `card/gateway-requirements.txt` and `card/vllm-requirements.txt`, each name in their header the command
 that made them: the gateway's is exported from `uv.lock`, and vLLM's is resolved for the pinned version. A change of
@@ -329,7 +330,7 @@ The pause after each event holds a stream open while the abort probe looks for i
 
 The card stops itself with the container's key, and the trial's guard deletes with the same key, so a key that Vast
 refuses leaves nothing on the card that bounds the costs. Before the launcher runs, the card has not even its own
-stop: SSH may not answer, and bootstrap.sh may hang in pip or curl, or end with 1. On the first rental the operator
+stop: SSH may not answer, and bootstrap.sh may hang in a download, or end with 1. On the first rental the operator
 is that bound: the Claude session that runs the rental, from the moment the instance is created. It reaches the
 instance with the owner's account key alone, through simple-story-chat's rent tool, where `ID` is the instance's id:
 `npm run gpu:rent -- --show ID` reads it once, and `npm run gpu:rent -- --destroy ID` deletes it and reads it back

@@ -46,16 +46,30 @@ for venv in gateway vllm; do
 done
 
 # fetch <repo> <revision> <files> <directory>: each name:sha256 of the comma-separated files, from the Hugging Face
-# hub, kept only with its hash.
+# hub, kept only with its hash. A file arrives under a hidden name, with aria2's control file beside it, and takes its
+# own name once its hash is checked. It comes over 16 connections: one gave the 5090 of 2026-09-25 about 10 MB/s, and
+# 16 gave it 110 MiB/s. aria2 is the distribution's own, unpinned, as the hash checks what it fetched; without it the
+# file comes over one connection.
 fetch() {
-  local entries entry path
+  local entries entry path part url
   IFS=, read -ra entries <<< "$3"
   for entry in "${entries[@]}"; do
     path=$4/${entry%%:*}
     [[ $(sha256sum 2>/dev/null < "$path") == "${entry#*:}  -" ]] && continue
-    curl --fail --location --silent --show-error --retry 5 --retry-all-errors --continue-at - --output "$path" \
-      "https://huggingface.co/$1/resolve/$2/${entry%%:*}" || exit 1
-    [[ $(sha256sum < "$path") == "${entry#*:}  -" ]] || { rm -f "$path"; exit 1; }
+    part=$4/.${entry%%:*}.part
+    url=https://huggingface.co/$1/resolve/$2/${entry%%:*}
+    command -v aria2c > /dev/null ||
+      { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq aria2; } > /dev/null 2>&1 || true
+    if command -v aria2c > /dev/null; then
+      aria2c --continue=true --max-connection-per-server=16 --split=16 --min-split-size=64M --file-allocation=none \
+        --max-tries=5 --retry-wait=5 --console-log-level=error --summary-interval=0 --show-console-readout=false \
+        --download-result=hide --dir="$4" --out="${part##*/}" "$url" || exit 1
+    else
+      curl --fail --location --silent --show-error --retry 5 --retry-all-errors --continue-at - --output "$part" \
+        "$url" || exit 1
+    fi
+    [[ $(sha256sum < "$part") == "${entry#*:}  -" ]] || { rm -f "$part" "$part.aria2"; exit 1; }
+    mv "$part" "$path"
   done
 }
 # vLLM loads every *.safetensors in the model's directory, so the files there that are not pinned go. Hidden ones

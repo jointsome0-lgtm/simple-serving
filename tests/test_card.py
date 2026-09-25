@@ -1,6 +1,7 @@
 """The card's launcher and scripts (contract section 8, "Starting the card"): one pair with no restarts, how it ends,
 what it keeps of the output, and a bootstrap and an onstart that change nothing when they run again. Stand-ins take
-the place of vLLM, the gateway, pip, curl and flock; the clock and Vast are fakes, and nothing reaches the network."""
+the place of vLLM, the gateway, pip, aria2c, curl and flock; the clock and Vast are fakes, and nothing reaches the
+network."""
 
 from __future__ import annotations
 
@@ -462,8 +463,8 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
         (model / name).write_bytes(weights)
     (state / "tokenizer").mkdir()
     (state / "tokenizer/tokenizer.json").write_bytes(tokenizer)
-    for path in (state / "gateway/bin/pip", state / "vllm/bin/pip", state / GATEWAY, tmp_path / "bin/curl",
-                 tmp_path / "bin/flock"):
+    for path in (state / "gateway/bin/pip", state / "vllm/bin/pip", state / GATEWAY, tmp_path / "bin/aria2c",
+                 tmp_path / "bin/curl", tmp_path / "bin/flock"):
         recorder(path, calls)
 
     def bootstrap(stdin: str) -> int:
@@ -513,7 +514,7 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     assert start_container() == 0  # a resume: the rental's own onstart, as it was, starts the card
     noted = calls.read_text().splitlines()
     assert noted.count("python -m simple_serving.card") == 4  # the three preparations, then the resume
-    assert not any(line.startswith(("curl", "flock")) for line in noted)  # nothing to fetch, and no guard
+    assert not any(line.startswith(("aria2c", "curl", "flock")) for line in noted)  # nothing to fetch, and no guard
     assert not list(root.glob(".simple-chat-trial-*"))
     assert all("--require-hashes --only-binary :all:" in line for line in noted if line.startswith("pip install"))
     assert noted.count("pip check") == 6  # both venvs at each preparation
