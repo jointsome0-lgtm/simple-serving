@@ -59,12 +59,12 @@ def free_ports(count: int) -> list[int]:
 
 
 @asynccontextmanager
-async def launched(*options: str) -> AsyncIterator[Launch]:
-    """The launcher with the cases' service block and these options, stopped with Ctrl-C, as its banner says. It must
-    exit cleanly, and nothing it printed may hold a key."""
+async def launched(*options: str, config: str = CONFIG) -> AsyncIterator[Launch]:
+    """The launcher with the cases' service block, or another configuration, and these options, stopped with Ctrl-C,
+    as its banner says. It must exit cleanly, and nothing it printed may hold a key."""
     engine, public, control = free_ports(3)
     process = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "simple_serving.dev", "--config", CONFIG, "--engine-port", str(engine),
+        sys.executable, "-m", "simple_serving.dev", "--config", config, "--engine-port", str(engine),
         "--public-port", str(public), "--control-port", str(control), *options,
         cwd=ROOT, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
