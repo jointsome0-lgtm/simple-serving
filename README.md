@@ -244,16 +244,22 @@ key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. The bot's
 ## The first rental
 
 The card stops itself with the container's key, and the trial's guard deletes with the same key, so a key that Vast
-refuses leaves nothing on the card that bounds the costs. On the first rental the owner is that bound:
+refuses leaves nothing on the card that bounds the costs. Before the launcher runs, the card has not even its own
+stop: SSH may not answer, and bootstrap.sh may hang in pip or curl, or end with 1. On the first rental the owner is
+that bound, watching from the moment the instance is created:
 
-1. Before anything long, once the prepared card is ready: `sleep`, which must end with `vast: stopped`. Then `up`,
+1. Before the instance is created, the owner chooses the time of day by which the first attempt, the preparation
+   included, is over. This README sets none.
+2. Before anything long, once the prepared card is ready: `sleep`, which must end with `vast: stopped`. Then `up`,
    a resume with no start over SSH: the card boots anew and runs one pair, which `up` reports ready.
-2. Every stop is confirmed from outside, with the owner's own key: `status` prints `vast: stopped`, and Vast's console
+3. Every stop is confirmed from outside, with the owner's own key: `status` prints `vast: stopped`, and Vast's console
    shows the instance stopped. `sleep` waits 10 minutes for that. After the last request of an idle card, `stopped`
    must come within 25 minutes: 13 to fall asleep, 2 for the drain, 10 for the stop.
-3. Approved in advance, and done at once: when a command says that the card's stop is not confirmed, when `sleep`
-   ends without `vast: stopped`, when that deadline passes, or when Vast refuses a key with 401 or 403, the owner
-   stops the instance in Vast's console, or deletes a trial instance.
+4. Approved in advance, and done at once: when the preparation fails, when SSH or a command stops answering, when
+   the attempt's deadline passes, when `stopped` does not come within those 25 minutes, when a command says that the
+   card's stop is not confirmed, when `sleep` ends without `vast: stopped`, or when Vast refuses a key with 401 or
+   403, the owner stops the instance in Vast's console, or deletes a trial instance, and checks there that it is
+   stopped or gone.
 
 Open, and not built: unattended or permanent use needs an independent budget path, one that bounds the costs without
 the container's key and without the owner at the console.

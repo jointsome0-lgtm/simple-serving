@@ -563,9 +563,10 @@ The first rental is a disposable trial. Its own onstart, simple-story-chat's `gp
 that deletes the instance three hours after the first start, and writes the instance's id and key, which the first
 preparation needs; its last line runs the card's `onstart.sh` (section 8). The guard deletes with the container's key,
 the key of the card's stop, so a key that Vast refuses or has revoked defeats both: nothing on the card then bounds
-the costs. The owner is that bound, with the readback, the deadline and the console action of the README's "The first
-rental", approved in advance. The service never deletes its card, and its `onstart.sh` arms no guard. An onstart for
-a permanent rental, which writes the two files and ends with the same line but arms no guard, is decided before
+the costs, and before the launcher runs the card has no stop of its own. The owner is that bound from the moment the
+instance is created, with the readback, the deadlines and the console action of the README's "The first rental",
+approved in advance. The service never deletes its card, and its `onstart.sh` arms no guard. An onstart for a
+permanent rental, which writes the two files and ends with the same line but arms no guard, is decided before
 permanent use. Unattended or permanent use also needs an independent budget path, which is open and not built.
 
 Before the rental, without a card:
