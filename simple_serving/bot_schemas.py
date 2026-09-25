@@ -14,6 +14,7 @@ import json
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -100,11 +101,14 @@ def _check(value: Any, schema: dict[str, Any], found: set[str]) -> None:
 
 
 def _is(value: Any, kind: str) -> bool:
-    """JSON's types, where true is not a number and 1.0 is an integer."""
+    """JSON's types, where true is not a number and 1.0 is an integer. A number may be a Decimal, as the smoke reads
+    an answer, and is then an integer only when it is one exactly."""
     if kind == "integer":
+        if type(value) is Decimal:
+            return value.is_finite() and value == value.to_integral_value()
         return type(value) is int or (type(value) is float and value.is_integer())
     if kind == "number":
-        return type(value) in (int, float)
+        return type(value) in (int, float, Decimal)
     kinds: dict[str, type | None] = {"object": dict, "array": list, "string": str, "boolean": bool, "null": None}
     expected = kinds[kind]
     return value is None if expected is None else type(value) is expected

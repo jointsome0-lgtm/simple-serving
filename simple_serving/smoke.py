@@ -46,8 +46,9 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 
@@ -361,12 +362,17 @@ def combined(parts: dict[str, dict[str, Any]], **extra: Any) -> dict[str, Any]:
 
 def answer_problems(content: str, schema: dict[str, Any]) -> list[str]:
     """What is wrong with an answer that should follow the schema: `json`, or the keywords it breaks. Empty when it
-    follows it."""
+    follows it. Its numbers are read as decimals, exactly: 1.0000000000000001 is no integer, though a float would
+    round it to one."""
     try:
-        instance = json.loads(content)
+        instance = json.loads(content, parse_float=Decimal, parse_constant=no_constant)
     except (ValueError, RecursionError):
         return ["json"]
     return sorted(bot_schemas.problems(instance, schema))
+
+
+def no_constant(name: str) -> NoReturn:
+    raise ValueError(f"{name} is not JSON")
 
 
 def total(counts: Any) -> int | None:

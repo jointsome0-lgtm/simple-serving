@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +106,10 @@ def test_an_answer_that_breaks_a_keyword_is_caught(name: str, path: str, value: 
 
 def test_json_numbers_and_code_points() -> None:
     assert bot_schemas.problems(changed("walk_cross", "checks/0/finding", 1.0), SCHEMAS["walk_cross"]) == set()
+    # A number as the smoke reads one, a Decimal, is an integer only when it is one exactly.
+    for value, found in ((Decimal("1.0"), set()), (Decimal("1E+0"), set()), (Decimal("1.0000000000000001"), {"type"}),
+                         (Decimal("0.9999999999999999"), {"type"}), (Decimal("1E+400"), {"maximum"})):
+        assert bot_schemas.problems(changed("walk_cross", "checks/0/finding", value), SCHEMAS["walk_cross"]) == found
     assert bot_schemas.problems(changed("memory_plain", "facts/0/at", "ё" * 200), SCHEMAS["memory_plain"]) == set()
     assert bot_schemas.problems(changed("memory_plain", "facts/0/at", "😀" * 200), SCHEMAS["memory_plain"]) == set()
 

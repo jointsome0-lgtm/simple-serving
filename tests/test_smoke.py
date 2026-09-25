@@ -109,6 +109,17 @@ async def test_an_error_event_or_a_refusal_gives_the_code_and_nothing_else() -> 
     assert (await read([*EVENTS[:3], {"error": "quoted text"}])).code == "error"
 
 
+def test_an_answers_numbers_are_read_exactly() -> None:
+    schema = next(entry.schema for entry in smoke.bot_schemas.load() if entry.name == "walk_cross")
+    answer = ('{"checks": [{"finding": FINDING, "confirmed": true, "note": "no reason"}, '
+              '{"finding": 2, "confirmed": false, "note": "he is there"}]}')
+    for finding, problems in (("1", []), ("1.0", []), ("1e0", []), ("1.0000000000000001", ["type"]),
+                              ("1e400", ["maximum"]), ("NaN", ["json"]), ("Infinity", ["json"])):
+        assert smoke.answer_problems(answer.replace("FINDING", finding), schema) == problems, finding
+    # A float would round 1.0000000000000001 to 1.0, an integer.
+    assert json.loads(answer.replace("FINDING", "1.0000000000000001"))["checks"][0]["finding"] == 1.0
+
+
 # The command line.
 
 def keys_file(tmp_path: Path, **keys: str) -> Path:
