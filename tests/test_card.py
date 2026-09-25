@@ -10,12 +10,14 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -472,6 +474,16 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
 
     keys = f"{CLIENT}\n{CONTROL}\n"
     assert bootstrap("") == 4  # the real pins and locks pass, and the card holds no keys yet
+    # The gateway's lock is uv.lock's non-dev set: the same packages, versions and hashes.
+    lock = {package["name"]: package for package in tomllib.loads((card.CODE / "uv.lock").read_text())["package"]}
+    runtime = ["simple-serving"]  # the project, then what it needs, and what that needs in turn
+    for name in runtime:
+        runtime += [need["name"] for need in lock[name].get("dependencies", []) if need["name"] not in runtime]
+    text = (card.CODE / "card/gateway-requirements.txt").read_text()
+    exported = re.findall(r"^(\S+)==(\S+) \\\n((?: +--hash=.*\n)+)", text, re.MULTILINE)
+    assert {name: (version, set(re.findall(r"sha256:\w+", hashes))) for name, version, hashes in exported} == {
+        name: (lock[name]["version"], {file["hash"] for file in [lock[name]["sdist"], *lock[name]["wheels"]]})
+        for name in runtime[1:]}
     for name in ("gateway", "vllm"):
         (code / f"card/{name}-requirements.txt").write_text(f"{name}==0.0.1 \\\n    --hash=sha256:{'0' * 64}\n")
     assert bootstrap(keys) == 3  # the lock is not the pinned vLLM's
