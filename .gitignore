@@ -14,6 +14,3 @@ __pycache__/
 
 # Local state
 logs/
-
-# The gateway's lock for the card, exported from uv.lock when the card is prepared
-card/gateway-requirements.txt

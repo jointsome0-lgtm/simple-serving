@@ -150,24 +150,25 @@ own, and its request logging off (contract section 10).
 
 ## The card
 
-`card/` holds what runs on a rented card: `manifest.env` with the pins and parameters, `bootstrap.sh` for the
-preparation, and `onstart.sh`, which the rental's own onstart runs at every start. The checkout goes to
+`card/` holds what runs on a rented card: `manifest.env` with the pins and parameters, the two locks, `bootstrap.sh`
+for the preparation, and `onstart.sh`, which the rental's own onstart runs at every start. The checkout goes to
 `/workspace/simple-serving`, and the card keeps its state in `/workspace/simple-serving-card`: the key hashes, the
 weights, the two venvs and the logs.
 
 The preparation, once per rental and never at a resume:
 
-1. On the owner's machine, export the gateway's lock with its hashes:
-   `uv export --frozen --no-dev --no-emit-project -o card/gateway-requirements.txt`. vLLM's lock,
-   `card/vllm-requirements.txt`, is made with the pin.
-2. Copy the checkout to `/workspace/simple-serving`.
-3. `uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh`. `keys`
+1. Copy the checkout to `/workspace/simple-serving`.
+2. `uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh`. `keys`
    makes the client key and the control key once, and prints only the SHA-256 of each, one per line.
 
-bootstrap.sh installs each lock into a venv of its own with every hash checked, fetches the weights and the tokenizer
-files at their pinned revisions and checks their hashes, keeps the key hashes in `keys.json`, and starts the
-service. It refuses while a pin or a lock is missing, as vLLM's lock is until it is made with the pin, and it never
-replaces the keys the card holds.
+bootstrap.sh installs each lock into a venv of its own, wheels only and every hash checked, fetches the weights and
+the tokenizer files at their pinned revisions and checks their hashes, keeps the key hashes in `keys.json`, and
+starts the service. It refuses while a pin or a lock is missing, or when vLLM's lock is for another version than the
+pin, and it never replaces the keys the card holds.
+
+The locks, `card/gateway-requirements.txt` and `card/vllm-requirements.txt`, each name in their header the command
+that made them: the gateway's is exported from `uv.lock`, and vLLM's is resolved for the pinned version. A change of
+`uv.lock` or of the pin needs a new lock.
 
 At every later start of the container the rental's own onstart starts the service. Its last line runs the service's
 `onstart.sh` from the persistent disk, once the preparation has put it there:

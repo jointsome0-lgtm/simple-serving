@@ -449,12 +449,10 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
                               check=False).returncode
 
     assert start_container() == 0 and not calls.exists()  # the first start, before the checkout is on the disk
-    for name in ("bootstrap.sh", "onstart.sh"):
+    for name in ("bootstrap.sh", "onstart.sh", "gateway-requirements.txt", "vllm-requirements.txt"):
         shutil.copy(card.CODE / "card" / name, code / "card" / name)
     manifest = (card.CODE / "card/manifest.env").read_text()
     (code / "card/manifest.env").write_text(manifest)
-    for name in ("gateway", "vllm"):
-        (code / f"card/{name}-requirements.txt").write_text(f"{name}==0.0.1 \\\n    --hash=sha256:{'0' * 64}\n")
     weights, tokenizer = b"synthetic weights", b'{"synthetic": true}'
     model = state / "models" / Card.load(code=code, state=state, environ={}, root=root).manifest["MODEL_REVISION"]
     model.mkdir(parents=True)
@@ -473,6 +471,9 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
         return done.returncode
 
     keys = f"{CLIENT}\n{CONTROL}\n"
+    assert bootstrap("") == 4  # the real pins and locks pass, and the card holds no keys yet
+    for name in ("gateway", "vllm"):
+        (code / f"card/{name}-requirements.txt").write_text(f"{name}==0.0.1 \\\n    --hash=sha256:{'0' * 64}\n")
     assert bootstrap(keys) == 3  # the lock is not the pinned vLLM's
     assert not (state / "keys.json").exists()
     for older, text in ((state / "keys.json", json.dumps({"client": CLIENT, "control": CONTROL})),
@@ -502,5 +503,5 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     assert noted.count("python -m simple_serving.card") == 4  # the three preparations, then the resume
     assert not any(line.startswith(("curl", "flock")) for line in noted)  # nothing to fetch, and no guard
     assert not list(root.glob(".simple-chat-trial-*"))
-    assert all("--require-hashes" in line for line in noted if line.startswith("pip"))
+    assert all("--require-hashes --only-binary :all:" in line for line in noted if line.startswith("pip"))
     assert Card.load(code=code, state=state, environ=environ, root=root).prepared()

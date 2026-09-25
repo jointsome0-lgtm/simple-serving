@@ -40,7 +40,7 @@ chmod 600 "$state/keys.json"  # umask leaves the mode of an older file as it was
 
 for venv in gateway vllm; do
   [[ -x $state/$venv/bin/pip ]] || python3 -m venv "$state/$venv"
-  "$state/$venv/bin/pip" install --quiet --no-cache-dir --no-deps --require-hashes \
+  "$state/$venv/bin/pip" install --quiet --no-cache-dir --no-deps --require-hashes --only-binary :all: \
     -r "$code/card/$venv-requirements.txt"
 done
 
