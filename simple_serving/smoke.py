@@ -105,11 +105,11 @@ FILLER = "The keeper climbs the stair, trims the wick and lights the lamp.\n"  #
 ENDING = "How does the night end? One sentence."
 WORD_SCHEMA = {"type": "object", "properties": {"word": {"type": "string", "minLength": 1, "maxLength": 20}},
                "required": ["word"], "additionalProperties": False}
-# The refusal: a pattern with an unclosed group, which no dialect of regular expressions accepts. vLLM 0.30.0 checks
-# a structured request in its API server before it creates the stream. With its default backend, `auto`, it builds
-# the grammar with xgrammar (0.2.8 in the card's lock) and, when that fails, with llguidance (1.7.6); both compile
-# `pattern` as a regular expression, so both fail, and vLLM answers 400, which the gateway passes on as 400
-# invalid_request (section 4). This rests on vLLM's earlier sources; the probe is what checks it on the pin.
+# The refusal: a pattern with an unclosed group, which no dialect of regular expressions accepts. With its default
+# backend, `auto`, vLLM 0.30.0 builds the grammar with xgrammar (0.2.8 in the card's lock) and, when that fails, with
+# llguidance (1.7.6); both refuse this pattern, as checked with those versions. It builds the grammar only once it has
+# answered 200, so its refusal is the stream's first event, an error whose `code` is 400, and the gateway answers
+# that with 400 invalid_request (section 4).
 UNCOMPILABLE = {"type": "object", "properties": {"word": {"type": "string", "pattern": "(unclosed"}},
                 "required": ["word"], "additionalProperties": False}
 FIELDS: dict[str, Any] = {

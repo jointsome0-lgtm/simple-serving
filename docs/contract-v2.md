@@ -159,9 +159,11 @@ An accepted generation passes two stages:
 The gateway hands the request to the engine and waits for the engine's first valid stream event that is not an error.
 Only then does it send 200, the stream headers and that event. Every refusal up to that point is a plain HTTP error
 from section 9. When the engine refuses the request with 400 or 422, the answer is 400 `invalid_request`: the engine
-found the request itself wrong, for example a schema it cannot compile. Any other status from the engine, a failed
-connection, an error event, an invalid event, or a stream that ends before its first event give 503
-`engine_unavailable`. An engine that answers 401, 403 or 404 is misconfigured, and that is not the client's error.
+found the request itself wrong, for example a schema it cannot compile. vLLM 0.30.0 checks a schema only after its
+200, so it refuses that way with an error event before any other, whose `code` is the status; the gateway reads that
+number alone and answers as for the status. Any other status from the engine, a failed connection, another error
+event, an invalid event, or a stream that ends before its first event give 503 `engine_unavailable`. An engine that
+answers 401, 403 or 404 is misconfigured, and that is not the client's error.
 
 An engine event is valid when it is a chunk of the served model: `object` is `chat.completion.chunk`, `model` is the
 alias, and `choices` holds at most one choice, with `index` 0 and a delta that holds nothing but the role

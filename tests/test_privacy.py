@@ -267,7 +267,7 @@ async def engine_failures(checks: Checks, scripts: dict[str, Script]) -> None:
         "unprocessable": (Script(generate_status=422), 400, "invalid_request"),
         "not found": (Script(generate_status=404), 503, "engine_unavailable"),
         "failed": (Script(generate_status=500), 503, "engine_unavailable"),
-        "error first": (Script(events=[{"error": {"message": MARKER, "code": 400}}]), 503, "engine_unavailable"),
+        "error first": (Script(events=[{"error": {"message": MARKER, "code": 400}}]), 400, "invalid_request"),
         "raw first": (Script(events=[{"raw_hex": MARKER.encode().hex()}]), 503, "engine_unavailable"),
         "break first": (Script(events=[{"break": True}]), 503, "engine_unavailable"),
     }

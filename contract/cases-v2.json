@@ -512,7 +512,7 @@
     },
     {
       "name": "engine-error-first",
-      "about": "An error event from the engine before any valid event is a plain 503.",
+      "about": "An error event from the engine before any valid event, with no status of 400 or 422 as its code, is a plain 503.",
       "steps": [
         { "request": { "base": "public", "method": "POST", "path": "/v1/chat/completions", "key": "test-key-bot",
             "headers": { "X-Simple-Serving-Class": "reader", "X-Simple-Serving-Scope": "reader.r1aaaaaa" }, "body_patch": {} },

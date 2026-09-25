@@ -11,7 +11,7 @@ Every chunk sent has the alias as its model and one choice with index 0, or no c
 `role`, `reasoning_content` or `content`. An engine event becomes one chunk, or one for each of those fields when its
 delta holds several; the engine's reasoning field, whatever its name, becomes `reasoning_content`. An event that breaks
 the rules raises EngineError: before the first chunk the gateway answers 503, after it the stream ends with an error
-event.
+event. An error event that comes first is the engine's refusal instead, which `first_error` reads.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .engine import EngineError
+from .engine import EngineError, refusal
 
 CHUNK_OBJECT = "chat.completion.chunk"
 FINISH_REASONS = ("stop", "length")
@@ -93,6 +93,13 @@ class Translator:
     def _chunk(self, delta: dict[str, str]) -> dict[str, Any]:
         return {**self._head, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
 
+
+def first_error(error: Any) -> EngineError:
+    """The error for an error event before any chunk. vLLM 0.30.0 checks a schema only once it has answered 200, so a
+    schema it cannot compile comes as that event, with the status it would have answered as `code`. The number alone
+    is read, as `refusal` reads a status: the event's text may quote the prompt."""
+    code = error.get("code") if isinstance(error, dict) else None
+    return refusal(code) if type(code) is int else EngineError("engine_unavailable")
 
 def _parts(delta: Any) -> list[dict[str, str]]:
     """A delta as single-field deltas, in the order role, reasoning, content. A null field is left out, and so is

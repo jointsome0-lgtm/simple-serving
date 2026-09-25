@@ -23,7 +23,7 @@ from .asgi import Exchange
 from .engine import EngineError, EngineStream
 from .errors import ServiceError
 from .policy import Caller
-from .stream import Translator
+from .stream import Translator, first_error
 from .validation import ChatRequest
 
 if TYPE_CHECKING:
@@ -224,6 +224,8 @@ class Generation(Work):
         event = await stream.next_event()
         if event is None:  # [DONE] before any event
             raise EngineError("engine_unavailable")
+        if "error" in event:
+            raise first_error(event["error"])
         chunks = translator.chunks(event)
         await self.exchange.start_stream()
         while True:

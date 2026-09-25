@@ -119,8 +119,6 @@ class FakeEngine:
         if script.hold_headers is not None:
             await _hold(script.hold_headers, call)
         status = script.generate_status
-        if status is None and _uncompilable(call.body):
-            status = 400
         if status is not None:
             # Engines may quote the prompt in their errors, so this one does; the gateway must never pass it on.
             await _respond_json(send, status, {"error": {
@@ -134,7 +132,13 @@ class FakeEngine:
             await _hold(script.hold_first, call)
         if script.first_delay_s:
             await _hold(asyncio.Event(), call, timeout=script.first_delay_s)
-        events = script.events if script.events is not None else self._default_events(call.body)
+        if script.events is not None:
+            events = script.events
+        elif _uncompilable(call.body):  # vLLM 0.30.0 compiles a schema only after its 200, and refuses in the stream
+            events = [{"error": {"message": "cannot compile: " + _prompt_text(call.body), "type": "BadRequestError",
+                                 "code": 400}}]
+        else:
+            events = self._default_events(call.body)
         for event in events:
             if call.client_left.is_set():
                 return
