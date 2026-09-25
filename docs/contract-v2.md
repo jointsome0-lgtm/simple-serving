@@ -593,6 +593,12 @@ Before the rental, without a card:
   headers and bodies, a connection limit. Check it in front of the fake engine with a slow client.
 - Write the load scenarios and what counts as a pass. Only their numbers are measured on the card.
 
+Written: the pins, in `card/manifest.env` and the two locks; the launch script, the card's launcher in
+`simple_serving/card.py`; and the smoke probes with the count matrix, `python -m simple_serving.smoke` (the README's
+"The smoke"), dry-run against the fake engine by `tests/test_smoke.py`. The TLS proxy and the load scenarios stay
+open. The trial needs neither, since it has no outside keys and stops after step 1 below; they are written before a
+rental that goes further.
+
 On the card:
 
 1. Smoke, in this order. The preparation's `pip check` passes in both venvs (section 12). The start imports vLLM,
