@@ -7,7 +7,12 @@ Status: the gateway of contract v2 is written and tested against a fake engine. 
 that happens on the first rental (contract section 15), whose smoke is written and dry-run against the fake engine.
 The API is in [docs/contract-v2.md](docs/contract-v2.md), the shared cases in [contract/](contract/README.md).
 
-Version 2 serves one text model. Pictures stay in simple-story-chat for now.
+Version 2 serves one text model. Pictures stay in simple-story-chat for now: the owner decided on 2026-09-26 that
+they move here after round two of simple-story-chat's action measurement, with ComfyUI inside and the engine
+unchanged, so that the bot has one service for both lanes. vLLM could not take ComfyUI's place on that date:
+vLLM-Omni had Qwen-Image 2.1 only in open pull requests (#7759 and #8099), took at most 4 reference images where a
+frame needs up to 7, loaded only the 33 GB diffusers weights, and could neither start from an image nor redraw under
+a mask.
 
 ## Install
 
