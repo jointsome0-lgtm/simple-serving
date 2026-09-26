@@ -206,6 +206,8 @@ against 57 to 67 without the drafter, and vLLM accepted 21718 of 34343 drafted t
 `auto` (bfloat16) cache does not fit at this context: its 7281 MiB hold about 63000 tokens, the engine exits with
 `kv_cache_too_small`, and the launcher gives up and stops the instance at once.
 
+What else might make the card faster, not measured yet, is in [docs/speed.md](docs/speed.md).
+
 At every later start of the container the rental's own onstart starts the service. Its last line runs the service's
 `onstart.sh` from the persistent disk, once the preparation has put it there:
 
