@@ -1,0 +1,14 @@
+# The dashboards of monitoring/grafana/dashboards, mounted read-only at /etc/grafana/dashboards (compose.yaml). A
+# change is made in the files, which Grafana reads again within 30 s, not in Grafana's editor.
+apiVersion: 1
+
+providers:
+  - name: simple-serving
+    orgId: 1
+    folder: simple-serving
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
