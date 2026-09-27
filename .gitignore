@@ -14,3 +14,6 @@ __pycache__/
 
 # Local state
 logs/
+
+# Prometheus and Grafana keep their history here, on the owner's machine (README, "Monitoring").
+monitoring/data/

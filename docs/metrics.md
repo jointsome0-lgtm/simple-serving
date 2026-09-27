@@ -3,8 +3,13 @@
 The catalog of what the monitoring reads, as the owner asked on 2026-09-27: the gateway's own metrics, the names of
 vLLM's that the dashboards and the rules use, and those of the optional exporters. It holds for any gateway that
 implements the contract: one written in another language serves the same names, labels and meanings, and
-`monitoring/` depends on nothing else. `tests/test_monitoring.py` checks that the gateway serves each family of the
-gateway's tables below with the type and the labels given, and no other.
+`monitoring/` depends on nothing else. `tests/test_monitoring.py` checks it both ways. The gateway serves each family
+of the gateway's tables below with the type and the labels given, and no other. The dashboards, the rules and
+`monitoring/prometheus/prometheus.yml` use no name outside this file and select no label its name does not have.
+vLLM's names are also checked against vLLM's source, with their types, when `SIMPLE_SERVING_VLLM_SOURCE` names a git
+checkout of the version that `card/manifest.env` pins:
+
+    SIMPLE_SERVING_VLLM_SOURCE=/path/to/vllm uv run pytest tests/test_monitoring.py
 
 ## Where they are served
 

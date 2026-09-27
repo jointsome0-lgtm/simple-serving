@@ -1,14 +1,24 @@
-"""The metric catalog, docs/metrics.md, against the gateway that serves it.
+"""The metric catalog, docs/metrics.md, against the gateway that serves it and the monitoring that reads it.
 
 The catalog is what a gateway in another language would serve, so it must hold the gateway's families as they are:
-each name, its type and its labels, and nothing the gateway does not serve.
+each name, its type and its labels, and nothing the gateway does not serve. The dashboards, the rules and
+prometheus.yml may use no name outside it, and select no label that its name does not have. vLLM's names in it are
+checked against vLLM's own source when SIMPLE_SERVING_VLLM_SOURCE names a git checkout of the version that
+card/manifest.env pins; otherwise that test is skipped. Nothing here needs the network or a parser beyond the
+standard library.
 """
 
 from __future__ import annotations
 
 import collections
+import json
+import os
 import re
+import subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -16,9 +26,23 @@ import pytest
 from .support import CONTROL, ROOT, call, running
 
 CATALOG = ROOT / "docs" / "metrics.md"
+MONITORING = ROOT / "monitoring"
 # A row of the catalog's tables: the name, the type, then the labels, each in backticks.
 ROW = re.compile(r"^\| `([^`]+)` \| (counter|gauge|histogram) \|([^|]*)\|", re.MULTILINE)
 GATEWAY = "simple_serving_"
+VLLM_SOURCE = "SIMPLE_SERVING_VLLM_SOURCE"
+# PromQL's words that are not metric names, and the parts of an expression that hold none.
+KEYWORDS = frozenset({"and", "or", "unless", "by", "without", "on", "ignoring", "group_left", "group_right", "bool",
+                      "offset", "inf", "nan"})
+STRING = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`')
+LABEL_LIST = re.compile(r"\b(?:by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)")
+VARIABLE = re.compile(r"\$\{?\w+\}?")  # Grafana's, such as $__rate_interval and $model_name
+IDENTIFIER = re.compile(r"(?<![\w.:$])[A-Za-z_:][\w:]*")
+SELECTOR = re.compile(r"(?<![\w:])([A-Za-z_:][\w:]*)\s*\{([^}]*)\}")
+MATCHER = re.compile(r"(\w+)\s*(?:=~|!~|!=|=)")
+# The gateway's and vLLM's names wherever they appear in monitoring/, in a description as much as in a query.
+PREFIXED = re.compile(r"(?<![\w:])(?:simple_serving_\w+|vllm:\w+)")
+TARGET_LABELS = frozenset({"job", "instance"})
 
 
 @dataclass(frozen=True)
@@ -61,3 +85,132 @@ async def test_the_catalog_gives_each_family_the_gateway_serves_with_its_type_an
     assert answer.status == 200
     documented = {name: family for name, family in catalog().items() if name.startswith(GATEWAY)}
     assert served(answer.body.decode()) == documented
+
+
+def family_of(name: str, families: dict[str, Family]) -> str | None:
+    """The catalog's family of a name used in a query: itself, or a histogram's for its `_bucket`, `_sum` or
+    `_count`."""
+    if name in families:
+        return name
+    for suffix in ("_bucket", "_sum", "_count"):
+        base = name.removesuffix(suffix)
+        if base != name and base in families and families[base].kind == "histogram":
+            return base
+    return None
+
+
+def metric_names(expr: str) -> set[str]:
+    """The metric names of a PromQL expression: every identifier outside strings, label matchers, ranges and label
+    lists that is neither a keyword nor called as a function or an aggregation."""
+    text = LABEL_LIST.sub(" ", re.sub(r"\[[^\]]*\]", " ", re.sub(r"\{[^}]*\}", " ", STRING.sub('""', expr))))
+    text = VARIABLE.sub(" ", text)
+    return {match.group() for match in IDENTIFIER.finditer(text)
+            if match.group().lower() not in KEYWORDS and not re.match(r"\s*\(", text[match.end():])}
+
+
+def selected_labels(expr: str) -> Iterator[tuple[str, set[str]]]:
+    """Each name of an expression with the labels its matchers select."""
+    for name, matchers in SELECTOR.findall(STRING.sub('""', expr)):
+        yield name, set(MATCHER.findall(matchers))
+
+
+def balanced(expr: str) -> bool:
+    opened: list[str] = []
+    for char in STRING.sub('""', expr):
+        if char in "([{":
+            opened.append(char)
+        elif char in ")]}" and (not opened or opened.pop() != "([{"[")]}".index(char)]):
+            return False
+    return not opened
+
+
+def dashboard_queries(node: Any) -> Iterator[str]:
+    """The PromQL of a dashboard: each target's `expr`, and each query variable's `label_values(...)` as the
+    selector it reads."""
+    if isinstance(node, dict):
+        if isinstance(node.get("expr"), str):
+            yield node["expr"]
+        if node.get("type") == "query":
+            query = node.get("query")
+            text = query.get("query", "") if isinstance(query, dict) else query or ""
+            match = re.fullmatch(r"\s*label_values\((.*),\s*(\w+)\s*\)\s*", text)
+            assert match, f"a query variable that is not label_values(selector, label): {text}"
+            yield match.group(1)
+        for value in node.values():
+            yield from dashboard_queries(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from dashboard_queries(value)
+
+
+def rule_expressions(text: str) -> Iterator[str]:
+    """The `expr` of each rule in a rules file: on its line, or in the block below it."""
+    lines = text.splitlines()
+    for number, line in enumerate(lines):
+        match = re.match(r"^(\s*)expr:\s*(.*)$", line)
+        if not match:
+            continue
+        indent, value = len(match.group(1)), match.group(2).strip()
+        if value in ("|", "|-", ">", ">-"):
+            block = []
+            for following in lines[number + 1:]:
+                if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                    break
+                block.append(following.strip())
+            value = " ".join(block)
+        yield value
+
+
+def expressions() -> dict[str, list[str]]:
+    """Every PromQL expression of the monitoring, by its file."""
+    found = {path.name: list(dashboard_queries(json.loads(path.read_text(encoding="utf-8"))))
+             for path in sorted((MONITORING / "grafana" / "dashboards").glob("*.json"))}
+    found["rules.yml"] = list(rule_expressions((MONITORING / "prometheus" / "rules.yml").read_text(encoding="utf-8")))
+    return found
+
+
+def test_the_monitoring_uses_only_the_catalogs_names_and_selects_only_their_labels() -> None:
+    families = catalog()
+    used: set[str] = set()
+    unknown: set[tuple[str, str]] = set()
+    wrong: set[tuple[str, str, str]] = set()
+    for source, found in expressions().items():
+        for expr in found:
+            assert balanced(expr), (source, expr)
+            names = metric_names(expr)
+            assert names, (source, expr)
+            used |= names
+            unknown |= {(source, name) for name in names if family_of(name, families) is None}
+            for name, labels in selected_labels(expr):
+                family = family_of(name, families)
+                if family is not None:
+                    allowed = families[family].labels | TARGET_LABELS | ({"le"} if name.endswith("_bucket") else set())
+                    wrong |= {(source, name, label) for label in labels - allowed}
+    for path in sorted(MONITORING.rglob("*")):
+        if path.is_file() and path.suffix in (".json", ".yml", ".yaml"):
+            unknown |= {(path.name, name) for name in PREFIXED.findall(path.read_text(encoding="utf-8"))
+                        if family_of(name, families) is None}
+    assert not unknown
+    assert not wrong
+    assert {"simple_serving_requests_total", "simple_serving_generations_waiting"} <= used
+
+
+@pytest.mark.skipif(not os.environ.get(VLLM_SOURCE), reason=f"{VLLM_SOURCE} names no checkout of vLLM")
+def test_the_catalogs_vllm_names_are_in_vllms_source_at_the_pinned_version_with_their_types() -> None:
+    source = Path(os.environ[VLLM_SOURCE])
+    pinned = re.search(r"^VLLM_VERSION=(\S+)$", (ROOT / "card" / "manifest.env").read_text(encoding="utf-8"),
+                       re.MULTILINE)
+    assert pinned
+    tag = subprocess.run(["git", "-C", str(source), "describe", "--tags", "--exact-match"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    assert tag == f"v{pinned.group(1)}"
+    defined: dict[str, str] = {}
+    for path in ("vllm/v1/metrics/loggers.py", "vllm/v1/spec_decode/metrics.py"):
+        text = (source / path).read_text(encoding="utf-8")
+        definitions = re.findall(r'_(gauge|counter|histogram)_cls\(\s*name="(vllm:\w+)"', text)
+        defined |= {name: kind for kind, name in definitions}
+        defined |= dict.fromkeys(re.findall(r'\(\s*"(vllm:spec_decode_\w+)",', text), "counter")  # counter_specs
+    vllm = {name: family for name, family in catalog().items() if name.startswith("vllm:")}
+    assert vllm
+    for name, family in vllm.items():
+        assert defined.get(name.removesuffix("_total") if family.kind == "counter" else name) == family.kind, name

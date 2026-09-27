@@ -1,0 +1,55 @@
+# Prometheus on the owner's machine (README, "Monitoring"). It reads the names of docs/metrics.md and nothing else,
+# so it does not depend on how the gateway is written.
+#
+# The gateway's control listener is on the card's loopback, and `cli up` forwards it to 127.0.0.1:8081 here for as
+# long as it runs. Without the tunnel both jobs are down: a card that is not rented or not reached, which is not an
+# alert. The metrics key reads /metrics and /metrics/engine and nothing else. It cannot drain, sleep or open, and it
+# generates nothing, so a scrape never holds the card awake. Each scrape writes a row to the gateway's log: two jobs
+# every 15 s are 8 rows a minute.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+rule_files:
+  - rules.yml
+
+scrape_configs:
+  # The gateway's own metrics.
+  - job_name: gateway
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_key
+    scrape_protocols: [PrometheusText0.0.4]
+    fallback_scrape_protocol: PrometheusText0.0.4
+    static_configs:
+      - targets: ["127.0.0.1:8081"]
+
+  # vLLM's own /metrics, which the gateway relays when vLLM answers within 5 s and 8 MB, and answers 503 otherwise.
+  - job_name: engine
+    metrics_path: /metrics/engine
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_key
+    scrape_protocols: [PrometheusText0.0.4]
+    fallback_scrape_protocol: PrometheusText0.0.4
+    static_configs:
+      - targets: ["127.0.0.1:8081"]
+
+  # OPTIONAL, and off: node_exporter and nvidia_gpu_exporter on the card, for the overview's machine row. Nothing
+  # installs them yet, and `cli up` forwards neither port (README, "Monitoring", on the exporters). Once both run on
+  # the card's loopback and the tunnel forwards them to these ports, remove the leading "# ".
+  #
+  # - job_name: node
+  #   static_configs:
+  #     - targets: ["127.0.0.1:9100"]
+  #       labels:
+  #         optional: "true"
+  #
+  # - job_name: gpu
+  #   static_configs:
+  #     - targets: ["127.0.0.1:9835"]
+  #       labels:
+  #         optional: "true"
