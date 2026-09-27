@@ -17,6 +17,7 @@ from .asgi import Exchange
 from .config import Config, Key
 from .engine import EngineClient, generation_payload
 from .errors import ServiceError
+from .metrics import Metrics
 from .policy import CLASS_HEADER, SCOPE_HEADER, Caller, cache_salt, find_key, resolve
 from .validation import ChatRequest
 
@@ -44,6 +45,7 @@ class Service:
         self._engine_changed = False
         self.admission = Admission(config)
         self.count_places = CountPlaces(config)
+        self.metrics = Metrics()
         self.work: set[Work] = set()  # accepted generations and counts that have not answered yet
         self.ours_inflight = 0  # requests of ours between their authorization and their end, accepted or not
         self.idle_since = 0.0  # the event loop's time when the last of them ended, or of the first ready

@@ -150,7 +150,7 @@ class CountPlaces:
         self._places = config.count_active
         self._per_key = config.count_per_outside_key
         self._line = Line()
-        self._running = 0
+        self._running: Counter[str] = Counter()  # by class
         self._by_owner: Counter[Key] = Counter()
 
     def enter(self, cls: str, owner: Key | None) -> Ticket:
@@ -159,8 +159,8 @@ class CountPlaces:
         ticket = Ticket(cls, owner)
         if owner is not None:
             self._by_owner[owner] += 1
-        if self._running < self._places:
-            self._running += 1
+        if self.running < self._places:
+            self._running[cls] += 1
             _grant(ticket)
         else:
             self._line.add(ticket)
@@ -172,18 +172,24 @@ class CountPlaces:
         if ticket.waiting:
             self._line.remove(ticket)
         else:
-            self._running -= 1
+            self._running[ticket.cls] -= 1
         if ticket.owner is not None:
             self._by_owner[ticket.owner] -= 1
         ticket.state = "left"
-        while self._running < self._places and (first := next(self._line.in_order(), None)) is not None:
+        while self.running < self._places and (first := next(self._line.in_order(), None)) is not None:
             self._line.remove(first)
-            self._running += 1
+            self._running[first.cls] += 1
             _grant(first)
 
     @property
     def running(self) -> int:
-        return self._running
+        return sum(self._running.values())
+
+    def active_counts(self) -> dict[str, int]:
+        return {cls: self._running[cls] for cls in CLASSES}
+
+    def waiting_counts(self) -> dict[str, int]:
+        return self._line.counts()
 
     @property
     def waiting(self) -> int:

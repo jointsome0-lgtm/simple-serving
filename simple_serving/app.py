@@ -1,10 +1,10 @@
 """The two listeners' applications (contract section 3).
 
 The public listener serves inference, models and state. The control listener, on loopback, serves state, drain,
-sleep and open. They are two applications on two sockets, so the gateway tells them apart by the listener that
-received a request, never by the client's address. Every route is a raw ASGI endpoint (`routes.py`); FastAPI routes
-the requests and answers the rest with the gateway's own handlers, so its default answers, which may echo input, never
-go out.
+sleep and open, and the metrics of the gateway and of the engine. They are two applications on two sockets, so the
+gateway tells them apart by the listener that received a request, never by the client's address. Every route is a raw
+ASGI endpoint (`routes.py`); FastAPI routes the requests and answers the rest with the gateway's own handlers, so its
+default answers, which may echo input, never go out.
 """
 
 from __future__ import annotations
@@ -20,10 +20,11 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from . import routes
+from . import log, routes
 from .asgi import RECORD, Exchange, json_response
 from .errors import STATUS
 from .log import RequestRecord
+from .metrics import Metrics
 from .service import Service
 
 Handler = Callable[[Service, Exchange], Awaitable[None]]
@@ -38,16 +39,18 @@ CONTROL_ROUTES: list[tuple[str, str, Handler]] = [
     ("/v1/control/drain", "POST", routes.drain),
     ("/v1/control/sleep", "POST", routes.sleep),
     ("/v1/control/open", "POST", routes.open_),
+    ("/metrics", "GET", routes.metrics),
+    ("/metrics/engine", "GET", routes.engine_metrics),
 ]
 
 
 def public_app(service: Service) -> Guard:
-    return Guard(_application(service, PUBLIC_ROUTES), "public", PUBLIC_ROUTES,
+    return Guard(_application(service, PUBLIC_ROUTES), "public", PUBLIC_ROUTES, service.metrics,
                  max_connections=service.config.max_connections)
 
 
 def control_app(service: Service) -> Guard:
-    return Guard(_application(service, CONTROL_ROUTES), "control", CONTROL_ROUTES)
+    return Guard(_application(service, CONTROL_ROUTES), "control", CONTROL_ROUTES, service.metrics)
 
 
 class Endpoint:
@@ -62,15 +65,17 @@ class Endpoint:
 
 
 class Guard:
-    """The outermost layer of a listener: the log row of every request, the public listener's cap on open
-    connections, and a last answer to an error that nothing else caught. No exception reaches the ASGI server,
-    whose log would print its text."""
+    """The outermost layer of a listener: the log row of every request and its count in the metrics, the public
+    listener's cap on open connections, and a last answer to an error that nothing else caught. No exception reaches
+    the ASGI server, whose log would print its text."""
 
-    def __init__(self, app: ASGIApp, listener: str, table: list[tuple[str, str, Handler]], *,
+    def __init__(self, app: ASGIApp, listener: str, table: list[tuple[str, str, Handler]], metrics: Metrics, *,
                  max_connections: int | None = None) -> None:
         self._app = app
         self._listener = listener
         self._paths = frozenset(path for path, _, _ in table)
+        self._metrics = metrics
+        metrics.listener(listener, self._paths)
         self._max_connections = max_connections
         self.open_connections: Callable[[], int] = lambda: 0  # set by the server that runs the listener
 
@@ -87,18 +92,24 @@ class Guard:
                 record.status = message["status"]
             await send(message)
 
+        escaped = False
         try:
             if self._max_connections is not None and self.open_connections() > self._max_connections:
                 await self._refuse(record, send_noting_status, "queue_full", close=True)
             else:
                 await self._app(scope, receive, send_noting_status)
         except Exception as error:  # noqa: BLE001 - the last resort: no exception may reach the server's log
+            escaped = True
             record.exception = type(error).__name__
             if record.status is None:
                 with contextlib.suppress(Exception):
                     await self._refuse(record, send_noting_status, "internal_error")
         finally:
             record.emit()
+            try:
+                self._metrics.request_ended(record, escaped=escaped)  # once, as the row is written
+            except Exception as error:  # noqa: BLE001 - as above: a fault of the metrics stays out of the server's log
+                log.row("metrics_error", exception=type(error).__name__)
 
     @staticmethod
     async def _refuse(record: RequestRecord, send: Send, code: str, *, close: bool = False) -> None:

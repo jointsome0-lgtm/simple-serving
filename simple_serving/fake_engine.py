@@ -1,8 +1,9 @@
 """A fake of vLLM's OpenAI-compatible server, for the tests and the dev launcher.
 
-It answers GET /health, GET /v1/models, POST /tokenize and POST /v1/chat/completions the way vLLM does: the status and
-headers of a generation go out at once, its first event after the prompt is read. A test scripts it per step from the
-`engine` block of a case, with gates and delays for the scenarios. Without a script it gives default answers: the count
+It answers GET /health, GET /v1/models, POST /tokenize, POST /v1/chat/completions and GET /metrics the way vLLM
+does: the status and headers of a generation go out at once, its first event after the prompt is read, and its metrics
+are a few of vLLM's names. A test scripts it per step from the `engine` block of a case, with gates and delays for the
+scenarios. Without a script it gives default answers: the count
 is ceil(characters of all message contents / 4), and a generation streams a fixed synthetic sentence and stops. As in
 vLLM, a request that asks for thinking gets a fixed thought first, in the reasoning field, and `max_tokens`, counted
 as characters / 4 too, cuts the answer and finishes it with `length`. A schema that holds a pattern which is not a
@@ -26,7 +27,21 @@ from starlette.types import Message, Receive, Scope, Send
 SENTENCE = ("The keeper ", "lights the lamp ", "and watches ", "the grey sea.")
 THOUGHT = ("The sea is calm, ", "so the lamp comes first.")  # the default reasoning, when a request asks for it
 ROUTES = {("GET", "/health"): "health", ("GET", "/v1/models"): "models", ("POST", "/tokenize"): "tokenize",
-          ("POST", "/v1/chat/completions"): "generate"}
+          ("POST", "/v1/chat/completions"): "generate", ("GET", "/metrics"): "metrics"}
+# A few of vLLM 0.30.0's own metrics, with its names and labels, for the relay and the monitoring's dry run.
+METRICS = """# HELP vllm:num_requests_running Number of requests in model execution batches.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{{engine="0",model_name="{model}"}} {running}
+# HELP vllm:num_requests_waiting Number of requests waiting to be processed.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{{engine="0",model_name="{model}"}} 0.0
+# HELP vllm:kv_cache_usage_perc KV-cache usage. 1 means 100 percent usage.
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{{engine="0",model_name="{model}"}} 0.0
+# HELP vllm:num_preemptions_total Cumulative number of preemption from the engine.
+# TYPE vllm:num_preemptions_total counter
+vllm:num_preemptions_total{{engine="0",model_name="{model}"}} 0.0
+"""
 
 
 @dataclass
@@ -160,6 +175,14 @@ class FakeEngine:
         if script.usage is not None:
             await self._send_event(call, send, self._usage_chunk(script, call.body, events))
         await send({"type": "http.response.body", "body": b"data: [DONE]\n\n", "more_body": False})
+
+    async def _metrics(self, call: Call, send: Send) -> None:
+        if not self.healthy:
+            await _respond(send, 503, b"")
+            return
+        running = sum(1 for other in self.calls_of("generate") if other.ended_at is None)
+        body = METRICS.format(model=self.served_name, running=f"{running:.1f}").encode()
+        await _respond(send, 200, body, b"text/plain; version=0.0.4; charset=utf-8")
 
     async def _unknown(self, call: Call, send: Send) -> None:
         await _respond_json(send, 404, {"error": {"message": "Not Found", "code": 404}})

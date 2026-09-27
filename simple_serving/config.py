@@ -58,6 +58,7 @@ class Key:
     default: str | None
     scopes: bool  # may name cache scopes
     control: bool  # may call the control routes
+    metrics: bool = False  # may read the metrics routes, as the control key may too (contract section 3)
 
     @property
     def outside(self) -> bool:
@@ -179,7 +180,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
 
 
 def _key(digest: bytes, entry: Any, path: str) -> Key:
-    entry = _fields(entry, path, {"label", "classes", "default", "scopes", "control"})
+    entry = _fields(entry, path, {"label", "classes", "default", "scopes", "control", "metrics"})
     classes = entry.get("classes")
     if not isinstance(classes, list) or len(set(classes)) != len(classes) or not set(classes) <= set(CLASSES):
         raise ConfigError(f"{path}.classes must list distinct classes")
@@ -188,7 +189,8 @@ def _key(digest: bytes, entry: Any, path: str) -> Key:
         raise ConfigError(f"{path}.default must be one of the key's classes, or null")
     key = Key(digest=digest, label=_string(entry.get("label"), f"{path}.label"), classes=frozenset(classes),
               default=default, scopes=_boolean(entry.get("scopes"), f"{path}.scopes"),
-              control=_boolean(entry.get("control"), f"{path}.control"))
+              control=_boolean(entry.get("control"), f"{path}.control"),
+              metrics=_boolean(entry.get("metrics", False), f"{path}.metrics"))
     # Contract section 2: outside keys use `external` only, and each is its own cache scope.
     if key.outside and (key.classes != {"external"} or key.scopes):
         raise ConfigError(f"{path}: an outside key may use the class external only and may not name scopes")

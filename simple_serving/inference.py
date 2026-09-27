@@ -10,6 +10,9 @@ closed, which is the abort, and only then is its place freed: a local end, not a
 The terminal message goes out after that: the usage chunk and `[DONE]`, the count, or an error. When the client does
 not read, that send waits without an engine request or a place, and not past a stop: once the work is stopped, a send
 that waits for the client is given up, and the server closes the connection.
+
+Each stage is observed for the metrics as it ends, and only if it ends: the wait for a count place, the count, the wait
+for a generation place, the whole wait, the first token and the end of the engine's stream (metrics.py).
 """
 
 from __future__ import annotations
@@ -65,7 +68,7 @@ class Work:
         message that waits for the client is given up."""
         if self._task is None or self.stop_reason is not None:
             return
-        self.stop_reason = reason
+        self.stop_reason = self.exchange.record.stop = reason
         self._stopped_at = asyncio.get_running_loop().time()
         if not self._task.done():
             self._stopping()
@@ -76,6 +79,7 @@ class Work:
     async def serve(self) -> None:
         """Run the request, which the service has accepted, to its terminal event."""
         self.accepted_at = time.monotonic()
+        self.exchange.record.accepted = True
         wall_s = self.service.config.limits[self.caller.cls].wall_s
         wall_timer = asyncio.get_running_loop().call_later(wall_s, self.stop, "timeout")
         watcher = asyncio.create_task(self._watch_client())
@@ -101,11 +105,17 @@ class Work:
 
     async def count(self) -> int:
         """The engine's count of the prompt, taken in a count place (section 5)."""
-        places = self.service.count_places
-        self._count_place = places.enter(self.caller.cls, self.caller.outside_key)
+        places, metrics, cls, route = (self.service.count_places, self.service.metrics, self.caller.cls,
+                                       self.exchange.record.route)
+        entered = time.monotonic()
+        self._count_place = places.enter(cls, self.caller.outside_key)
         try:
             await self._count_place.granted
-            return await self.service.engine.count(self.service.config.alias, self.request)
+            granted = time.monotonic()
+            metrics.observe("count_place_wait", cls, granted - entered, route)
+            count = await self.service.engine.count(self.service.config.alias, self.request)
+            metrics.observe("count", cls, time.monotonic() - granted, route)
+            return count
         finally:
             places.leave(self._count_place)  # the engine call has ended: it returned, failed or was cancelled
 
@@ -190,9 +200,13 @@ class Generation(Work):
         record = self.exchange.record
         record.input_tokens = await self.count()
         self.service.check_input(self.caller, record.input_tokens, self.request.max_tokens)
+        entered = time.monotonic()
         self.ticket = self.service.admission.enter(self.caller.cls, self.caller.outside_key)
         await self.ticket.granted
         self._handed_at = time.monotonic()
+        assert self.accepted_at is not None
+        self.service.metrics.observe("generation_place_wait", self.caller.cls, self._handed_at - entered)
+        self.service.metrics.observe("wait", self.caller.cls, self._handed_at - self.accepted_at)
         self.stream = await self.service.engine.generate(self.service.payload(self.caller, self.request))
         await self._relay(self.stream)
 
@@ -221,6 +235,8 @@ class Generation(Work):
         """Send 200 with the engine's first event, then each event as it comes. At the engine's end the usage chunk is
         built, which the answer sends with [DONE]."""
         translator = Translator(self.service.config.alias)
+        metrics, cls, accepted = self.service.metrics, self.caller.cls, self.accepted_at
+        assert accepted is not None
         event = await stream.next_event()
         if event is None:  # [DONE] before any event
             raise EngineError("engine_unavailable")
@@ -231,6 +247,8 @@ class Generation(Work):
         while True:
             if self._first_token_at is None and (translator.generated or translator.finish_reason is not None):
                 self._first_token_at = time.monotonic()
+                if translator.generated:  # a token, not a finish alone
+                    metrics.observe("time_to_first_token", cls, self._first_token_at - accepted)
             for chunk in chunks:
                 await self.exchange.send_event(chunk)
             event = await stream.next_event()
@@ -243,7 +261,9 @@ class Generation(Work):
         record.output_tokens = usage.completion_tokens
         record.cached_tokens = usage.cached_tokens
         record.count_matches = usage.prompt_tokens == record.input_tokens
-        times = self._measure(time.monotonic())
+        end = time.monotonic()
+        metrics.observe("total", cls, end - accepted)
+        times = self._measure(end)
         self._record_times(times)
         self._usage_chunk = translator.usage_chunk(usage, times)
 
