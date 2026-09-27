@@ -9,7 +9,8 @@ as characters / 4 too, cuts the answer and finishes it with `length`. A schema t
 regular expression is refused with 400 before the stream, as vLLM refuses a schema it cannot compile. It records every
 call with its body and headers, and the moment it noticed that its client left. GET /metrics gives, for the throughput
 harness, vLLM's counters of the prompt, cached and generated tokens of its usage chunks and its gauge of running
-requests, in Prometheus text.
+requests, in Prometheus text. A request with vLLM's `return_token_ids` gets the prompt's ids in its first chunk and each
+chunk's own ids beside its text, one id for every four characters of it.
 """
 
 from __future__ import annotations
@@ -155,11 +156,11 @@ class FakeEngine:
             elif "error" in event:
                 await self._send_event(call, send, {"error": event["error"]})
             else:
-                await self._send_event(call, send, self._chunk(event))
+                await self._send_event(call, send, self._chunk(event, call.body))
             if script.delay_s:
                 await _hold(asyncio.Event(), call, timeout=script.delay_s)
         while script.endless and not call.client_left.is_set():
-            await self._send_event(call, send, self._chunk({"content": "and on "}))
+            await self._send_event(call, send, self._chunk({"content": "and on "}, call.body))
             await _hold(asyncio.Event(), call, timeout=script.delay_s or 0.01)
         if call.client_left.is_set():
             return
@@ -212,7 +213,7 @@ class FakeEngine:
             room -= len(part)
         return [*events, {"finish_reason": "stop"}]
 
-    def _chunk(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _chunk(self, event: dict[str, Any], body: Any = None) -> dict[str, Any]:
         delta: dict[str, Any] = {}
         if "role" in event:
             delta.update(role=event["role"], content="")  # vLLM's first chunk
@@ -224,7 +225,12 @@ class FakeEngine:
         if finish is not None and not delta:
             delta["content"] = ""  # vLLM's finish chunk
         choice = {"index": event.get("index", 0), "delta": delta, "logprobs": None, "finish_reason": finish}
-        return self._head() | {"choices": [choice]}
+        if not (isinstance(body, dict) and body.get("return_token_ids") is True):
+            return self._head() | {"choices": [choice]}
+        if "role" in event:  # vLLM's first chunk carries the prompt's ids
+            return self._head() | {"choices": [choice], "prompt_token_ids": _token_ids(_prompt_text(body))}
+        return self._head() | {"choices": [choice | {"token_ids": _token_ids(event.get("reasoning", "") +
+                                                                            event.get("content", ""))}]}
 
     def _usage_chunk(self, script: Script, body: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
         given = script.usage or {}
@@ -286,6 +292,12 @@ async def _read_json(receive: Receive) -> Any:
         return json.loads(b"".join(chunks)) if chunks and any(chunks) else None
     except ValueError:
         return None
+
+
+def _token_ids(text: str) -> list[int]:
+    """Stand-in token ids of a text: one for every four characters, from those characters, below Gemma's vocabulary."""
+    return [int.from_bytes(text[at:at + 4].encode()[:4].ljust(4, b"\0"), "big") % 262144
+            for at in range(0, len(text), 4)]
 
 
 def _prompt_text(body: Any) -> str:

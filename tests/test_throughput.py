@@ -19,7 +19,7 @@ import pytest
 
 from simple_serving import bot_schemas, card, policy
 from simple_serving.fake_engine import Script
-from simple_serving.throughput import launcher, metrics, runner, workloads
+from simple_serving.throughput import identity, launcher, metrics, runner, workloads
 from simple_serving.validation import check_chat
 
 from . import support
@@ -328,3 +328,58 @@ async def test_a_pass_counts_each_request_runs_them_at_once_and_keeps_numbers_on
     assert result["first_token_ms"]["median"] >= 50 and result["output_tokens_per_s"] > 0
     assert all(outcome["counted"] == outcome["input_tokens"] for outcome in result["outcomes"])
     assert SECRET not in json.dumps(result)
+
+
+# The identity set.
+
+def test_the_identity_set_finds_the_first_difference_and_keeps_only_chained_digests() -> None:
+    key, other = b"k" * 32, b"o" * 32
+    ids = list(range(40))
+    assert identity.first_difference(ids, ids) is None
+    assert identity.first_difference(ids, [*ids[:17], 99, *ids[18:]]) == 17
+    assert identity.first_difference(ids, ids[:30]) == 30
+    kept = identity.digests(ids, key)
+    assert len(kept) == 3 and kept != identity.digests(ids, other)  # blocks of 16, the last one shorter
+    assert identity.digests([*ids[:5], 99, *ids[6:]], key)[1:] != kept[1:]  # each block chained to the one before
+    reference = {"digests": [kept, kept, kept, None]}
+    changed = [ids, [*ids[:20], 7, *ids[21:]], ids[:39], ids]
+    verdict = identity.against(reference, changed, key)
+    assert verdict == {"same": 1, "of": 4, "failed": 1, "first_difference": [None, 16, 32, None], "visible": True}
+    floor = identity.floor([ids] * 16, [ids] * 8 + [ids[:39]] * 8)
+    assert (floor["same"], floor["visible"], floor["first_difference"][-1]) == (8, False, 39)
+    assert identity.floor([ids] * 16, [ids] * 7 + [None] * 9)["visible"]
+
+
+@pytest.mark.anyio
+async def test_the_identity_set_runs_on_the_engine_and_leaves_digests_only(tmp_path: Path) -> None:
+    stories = workloads.load_pack(synthetic_pack(tmp_path / "pack", scenes=8, chars=400))
+    bodies = identity.payloads(stories, support.ALIAS)
+    assert len(bodies) == 16 and {body["temperature"] for body in bodies} == {0}
+    assert all(body["return_token_ids"] and body["max_tokens"] <= identity.MAX_TOKENS and "cache_salt" not in body
+               for body in bodies)
+    assert sum(1 for body in bodies if "response_format" in body) == 4  # the compactions, under the bot's schema
+    words = [{"role": "assistant"}, *({"content": f"w{SECRET[:3]}{n:04d}"} for n in range(40)),
+             {"finish_reason": "stop"}]
+    changed = [*words[:21], {"content": "x" * 8}, *words[22:]]  # the 21st word: tokens 40 and 41, in block 2
+    altered = bodies[5]["messages"]
+    directory = tmp_path / "identity"
+    async with support.running() as stack:
+        engine = stack.gateway.service.config.engine_url
+        stack.fake.script = lambda body: Script(events=words)
+        async with httpx.AsyncClient(timeout=10) as client:
+            reference = await identity.measure(client, engine, bodies, "reference", directory)
+            stack.fake.script = lambda body: Script(events=changed if body["messages"] == altered else words)
+            change = await identity.measure(client, engine, bodies, "change", directory)
+            with pytest.raises(identity.IdentityError):
+                await identity.measure(client, engine, bodies[:15] + bodies[:1], "change", directory)
+    generations = stack.fake.calls_of("generate")
+    assert len(generations) == 48 and len({call.body["cache_salt"] for call in generations}) == 48
+    assert (reference["same"], reference["failed"], reference["visible"]) == (16, 0, False)
+    assert change["same"] == 15 and change["first_difference"][5] == 32 and not change["visible"]
+    written = {path.name: path for path in directory.iterdir()}
+    assert set(written) == {"key", "reference.json"}
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in written.values())
+    kept = json.loads(written["reference.json"].read_text())
+    assert kept["tokens"] == [80] * 16 and all(len(digests) == 5 for digests in kept["digests"])
+    assert set(reference) == set(change) == {"side", "at", "block", "same", "of", "failed", "first_difference",
+                                             "visible"}  # counts, positions and fixed words
