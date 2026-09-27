@@ -7,17 +7,22 @@ from __future__ import annotations
 
 import hashlib
 import io
+import itertools
 import json
 import signal
 import socket
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
-from simple_serving import card
-from simple_serving.throughput import launcher, metrics
+from simple_serving import bot_schemas, card, policy
+from simple_serving.fake_engine import Script
+from simple_serving.throughput import launcher, metrics, runner, workloads
+from simple_serving.validation import check_chat
 
+from . import support
 from .support import until
 from .test_card import (
     CLIENT,
@@ -236,3 +241,90 @@ def test_the_harness_takes_over_only_a_prepared_card_whose_pair_has_ended(tmp_pa
         assert launcher.take_over(base, pause=lambda seconds: None) == card.PORT_TAKEN
     (base.state / "prepared").write_text("0" * 64 + "\n")
     assert launcher.take_over(base, pause=lambda seconds: None) == card.NOT_PREPARED
+
+
+def synthetic_pack(root: Path, scenes: int = 16, chars: int = 800) -> Path:
+    """The public eval pack's form with synthetic text: five scenarios, each a seed and a chain of scenes, whose nodes
+    are stored in reverse so that only their parent links give the order."""
+    for index, name in enumerate(workloads.SCENARIOS):
+        nodes, parent = {}, None
+        for number in range(scenes):
+            node = f"x{index}{number:02d}"
+            nodes[node] = {"id": node, "parent": parent, "input": f"{SECRET} input {number}",
+                           "text": f"{SECRET} " + "word " * (chars // 5), "time": "", "truncated": False}
+            parent = node
+        state = {"seeds": {"s1": {"id": "s1", "title": f"Story {index}", "startTime": "evening",
+                                  "text": f"{SECRET} seed"}},
+                 "stories": {"h1": {"id": "h1", "seedId": "s1", "nodes": dict(reversed(nodes.items()))}}}
+        (root / name).mkdir(parents=True)
+        (root / name / "frozen.json").write_text(json.dumps({"state": state}), encoding="utf-8")
+    return root
+
+
+def tokens(request: workloads.Request) -> float:
+    return workloads.characters(request.body["messages"]) / 4
+
+
+def test_the_workloads_are_the_bots_requests_built_from_the_pack(tmp_path: Path) -> None:
+    stories = workloads.load_pack(synthetic_pack(tmp_path))
+    assert [len(story.scenes) for story in stories] == [16] * 5
+    assert stories[0].scenes[3].input.endswith("input 3")
+    shape = workloads.Shape(at=3, context=2000, turns=4, gap_s=5.0)
+    built = {name: workloads.build(name, stories, support.ALIAS, shape) for name in workloads.NAMES}
+    for name, lanes in built.items():
+        for request in (request for lane in lanes for request in lane):
+            check_chat(request.body, support.ALIAS)  # the gateway takes it as it is
+            assert policy.READER_SCOPE.fullmatch(request.scope)
+            assert request.body["temperature"] == (0.2 if name == "compactions" else 0.8)
+            assert request.body["max_tokens"] == workloads.MAX_TOKENS[name]
+        assert workloads.at_once(name, shape) == (1 if name in ("reading", "interleaved") else 3)
+    turns = built["turns"]
+    assert [len(lane) for lane in turns] == [4, 4, 4] and len({lane[0].scope for lane in turns}) == 3
+    for lane in turns:
+        assert len({request.scope for request in lane}) == 1
+        for before, after in itertools.pairwise(lane):  # each turn extends the one before, as a story's does
+            assert after.body["messages"][:len(before.body["messages"]) - 1] == before.body["messages"][:-1]
+            assert len(after.body["messages"]) == len(before.body["messages"]) + 2
+        assert tokens(lane[0]) <= 2000 < tokens(lane[1])
+    schema = built["compactions"][0][0].body["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["facts"]["items"]["properties"]["source"]["items"]["enum"] == ["n1", "n2", "n3", "n4"]
+    fact = {"kind": "event", "at": "evening", "text": "The keeper lights the lamp.", "source": ["n2", "n3"]}
+    assert not bot_schemas.problems({"facts": [fact]}, schema)
+    assert len(built["compactions"]) == len(built["scenes"]) == len(built["unshared"]) == 6
+    assert len({lane[0].scope for lane in built["unshared"]}) == 6
+    assert all(tokens(lane[0]) <= 2000 for lane in built["unshared"])
+    [reading] = built["reading"]
+    assert [request.gap_s for request in reading] == [0, 5, 5, 5] and len({r.scope for r in reading}) == 1
+    [interleaved] = built["interleaved"]
+    assert [(request.lane, request.turn) for request in interleaved[:5]] == [(0, 0), (1, 0), (2, 0), (3, 0), (0, 1)]
+    assert len(interleaved) == 16 and [request.gap_s for request in interleaved][:2] == [0, 5]
+    assert len({request.scope for request in interleaved}) == 4
+    firsts = [tokens(request) for request in interleaved[:4]]
+    assert firsts == sorted(firsts) and all(first <= 2000 + 4000 * lane for lane, first in enumerate(firsts))
+
+
+@pytest.mark.anyio
+async def test_a_pass_counts_each_request_runs_them_at_once_and_keeps_numbers_only(tmp_path: Path) -> None:
+    stories = workloads.load_pack(synthetic_pack(tmp_path, scenes=6, chars=400))
+    block = support.service_with(context_tokens=65536, limits={"internal": {"active": 8, "max_tokens": 4096}})
+    async with support.running(block) as stack:
+        stack.fake.script = Script(first_delay_s=0.05, usage={"cached_tokens": 16})
+        target = runner.Target(stack.public, stack.gateway.service.config.engine_url, support.BOT, support.ALIAS)
+        lanes = workloads.build("scenes", stories, support.ALIAS, workloads.Shape(at=2))
+        async with httpx.AsyncClient(timeout=10) as client:
+            result = await runner.run_pass(client, target, lanes, 2, sample_s=0.01)
+    generations = stack.fake.calls_of("generate")
+    assert len(generations) == 4 and len(stack.fake.calls_of("tokenize")) == 8  # the harness's and the gateway's
+    assert {call.body["priority"] for call in generations} == {block["engine_priority"]["internal"]}
+    assert len({call.body["cache_salt"] for call in generations}) == 4  # a scope each
+    most = max(sum(1 for other in generations if other.started_at <= call.started_at < (other.ended_at or 0))
+               for call in generations)
+    assert most == 2
+    assert result["requests"] == result["done"] == 4 and result["failed"] == {}
+    assert result["count_mismatches"] == 0 and result["cached_tokens"] == 64
+    assert result["read_tokens"] == result["input_tokens"] - 64 and result["output_tokens"] == 4 * 13
+    assert result["metrics"]["generation_tokens"] == 4 * 13 and result["metrics"]["prompt_tokens_cached"] == 64
+    assert result["peaks"]["num_requests_running"] >= 1 and result["samples"] >= 1
+    assert result["first_token_ms"]["median"] >= 50 and result["output_tokens_per_s"] > 0
+    assert all(outcome["counted"] == outcome["input_tokens"] for outcome in result["outcomes"])
+    assert SECRET not in json.dumps(result)

@@ -7,7 +7,9 @@ is ceil(characters of all message contents / 4), and a generation streams a fixe
 vLLM, a request that asks for thinking gets a fixed thought first, in the reasoning field, and `max_tokens`, counted
 as characters / 4 too, cuts the answer and finishes it with `length`. A schema that holds a pattern which is not a
 regular expression is refused with 400 before the stream, as vLLM refuses a schema it cannot compile. It records every
-call with its body and headers, and the moment it noticed that its client left.
+call with its body and headers, and the moment it noticed that its client left. GET /metrics gives, for the throughput
+harness, vLLM's counters of the prompt, cached and generated tokens of its usage chunks and its gauge of running
+requests, in Prometheus text.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from starlette.types import Message, Receive, Scope, Send
 SENTENCE = ("The keeper ", "lights the lamp ", "and watches ", "the grey sea.")
 THOUGHT = ("The sea is calm, ", "so the lamp comes first.")  # the default reasoning, when a request asks for it
 ROUTES = {("GET", "/health"): "health", ("GET", "/v1/models"): "models", ("POST", "/tokenize"): "tokenize",
-          ("POST", "/v1/chat/completions"): "generate"}
+          ("POST", "/v1/chat/completions"): "generate", ("GET", "/metrics"): "metrics"}
 
 
 @dataclass
@@ -76,6 +78,8 @@ class FakeEngine:
         self.script: Script | Callable[[Any], Script] | None = None  # a callable picks a script by request body
         self.healthy = True
         self.calls: list[Call] = []
+        self.totals = {"prompt_tokens": 0, "prompt_tokens_cached": 0, "generation_tokens": 0}  # of the usage chunks
+        self.running = 0  # generations in progress
 
     def calls_of(self, *kinds: str) -> list[Call]:
         return [call for call in self.calls if call.kind in kinds]
@@ -88,9 +92,11 @@ class FakeEngine:
                     started_at=time.monotonic())
         self.calls.append(call)
         watcher = asyncio.create_task(_watch_client(call, receive))
+        self.running += call.kind == "generate"
         try:
             await getattr(self, "_" + call.kind)(call, send)
         finally:
+            self.running -= call.kind == "generate"
             watcher.cancel()
             call.ended_at = time.monotonic()
             call.ended.set()
@@ -161,6 +167,22 @@ class FakeEngine:
             await self._send_event(call, send, self._usage_chunk(script, call.body, events))
         await send({"type": "http.response.body", "body": b"data: [DONE]\n\n", "more_body": False})
 
+    async def _metrics(self, call: Call, send: Send) -> None:
+        await _respond(send, 200, self.metrics_text().encode(), b"text/plain; version=0.0.4; charset=utf-8")
+
+    def metrics_text(self) -> str:
+        """Prometheus text of the kind vLLM 0.30.0 writes, for the names the harness reads."""
+        labels = f'engine="0",model_name="{self.served_name}"'
+        prompt, cached = self.totals["prompt_tokens"], self.totals["prompt_tokens_cached"]
+        lines = ["# TYPE vllm:num_requests_running gauge", f"vllm:num_requests_running{{{labels}}} {self.running}.0",
+                 "# TYPE vllm:num_requests_waiting gauge", f"vllm:num_requests_waiting{{{labels}}} 0.0"]
+        for name, value in (*self.totals.items(), ("prefix_cache_queries", prompt), ("prefix_cache_hits", cached)):
+            lines += [f"# TYPE vllm:{name} counter", f"vllm:{name}_total{{{labels}}} {value}.0"]
+        lines += ["# TYPE vllm:prompt_tokens_by_source counter",
+                  f'vllm:prompt_tokens_by_source_total{{{labels},source="local_compute"}} {prompt - cached}.0',
+                  f'vllm:prompt_tokens_by_source_total{{{labels},source="local_cache_hit"}} {cached}.0']
+        return "\n".join(lines) + "\n"
+
     async def _unknown(self, call: Call, send: Send) -> None:
         await _respond_json(send, 404, {"error": {"message": "Not Found", "code": 404}})
 
@@ -215,6 +237,9 @@ class FakeEngine:
                                  "completion_tokens": completion}
         if given.get("cached_tokens") is not None:
             usage["prompt_tokens_details"] = {"cached_tokens": given["cached_tokens"]}
+        for name, value in (("prompt_tokens", prompt), ("generation_tokens", completion),
+                            ("prompt_tokens_cached", given.get("cached_tokens") or 0)):
+            self.totals[name] += value if type(value) is int else 0
         return self._head() | {"choices": [], "usage": usage}
 
     def _head(self) -> dict[str, Any]:
