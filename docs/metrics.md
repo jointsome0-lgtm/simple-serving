@@ -18,10 +18,11 @@ checkout of the version that `card/manifest.env` pins:
 - `GET /metrics/engine` on the control listener: the engine's own `/metrics`, relayed as it is, with its content
   type, when the engine answers 200 within 5 s and 8 MB; otherwise 503 `engine_unavailable`. The engine listens on
   the card's loopback and its port is not forwarded, since that would open its API without a key (contract section 1).
-- Both take the metrics key, which reads the metrics and nothing else, or the control key. Without a known key they
-  answer 401 `unauthorized`, to a key without either right 403 `forbidden`, and the public listener does not have
-  them (404). The control listener listens on the card's loopback, and the owner's machine reaches it only through
-  the tunnel of `cli up`, at 127.0.0.1:8081.
+- Both take the metrics key, or the control key (contract section 3). The metrics key has no other right: it uses no
+  class, names no scope and calls no control route, and like any key it may read `/v1/models` and `/v1/state`.
+  Without a known key the routes answer 401 `unauthorized`, to a key without either right 403 `forbidden`, and the
+  public listener does not have them (404). The control listener listens on the card's loopback, and the owner's
+  machine reaches it only through the tunnel of `cli up`, at 127.0.0.1:8081.
 - A scrape is not work of ours. It does not reset the idle interval (contract section 8), holds nothing awake and
   starts no generation: the monitoring never probes the model. It writes one row to the gateway's log, as every
   request does.
