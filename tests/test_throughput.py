@@ -11,6 +11,7 @@ import itertools
 import json
 import signal
 import socket
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ import pytest
 
 from simple_serving import bot_schemas, card, policy
 from simple_serving.fake_engine import Script
-from simple_serving.throughput import identity, launcher, metrics, overlap, runner, workloads
+from simple_serving.throughput import identity, launcher, metrics, overlap, runner, sweep, workloads
 from simple_serving.validation import check_chat
 
 from . import support
@@ -152,9 +153,13 @@ def test_each_change_is_one_edit_of_the_cards_own_command_and_manifest_env_stays
     synthetic = launcher.plan_for(base, launcher.parse_change("synthetic=0.78,0.62,0.49"))
     assert synthetic.timing_only and json.loads(synthetic.engine.argv[-1])["synthetic_acceptance_rates"] == [
         0.78, 0.62, 0.49]
+    four = launcher.plan_for(base, launcher.parse_change("synthetic=0.78,0.62,0.49,0.37"))  # the count is the rates'
+    assert json.loads(four.engine.argv[-1])["num_speculative_tokens"] == 4
+    assert ("arg_num_speculative_tokens", 4) in four.expect and base.manifest["MTP_SPECULATIVE_TOKENS"] == "3"
     sliding = launcher.plan_for(base, launcher.parse_change("attention-sliding=flashinfer"))
     assert sliding.engine.env["VLLM_HAS_FLASHINFER_CUBIN"] == "1"
-    for wrong in ("mtp=9", "mtp=3", "linear=cutlass", "synthetic=0.5,0.6,0.4", "synthetic=0.9,0.8", "watermark=2",
+    for wrong in ("mtp=9", "mtp=3", "linear=cutlass", "synthetic=0.5,0.6,0.4", "synthetic=" + "0.5," * 8 + "0.4",
+                  "synthetic=nan", "watermark=2",
                   "gpu-memory=0.92", "per-batch=4-1:3", f"kv-cache={SECRET}", "reference=1", "nothing"):
         with pytest.raises(launcher.ChangeError) as refused:
             launcher.plan_for(base, launcher.parse_change(wrong))
@@ -410,3 +415,79 @@ def test_a_pass_that_overlapped_a_readers_request_is_flagged(tmp_path: Path) -> 
     assert overlap.flag(passes, requests) == 2
     assert [(entry["reader_overlap"], entry["reader_requests"]) for entry in passes] == [
         (True, 1), (True, 1), (False, 0)]
+
+
+# The timing sweep.
+
+BENCH = """#!{python}
+import asyncio, json, sys
+import httpx
+args = sys.argv[1:]
+def value(flag):
+    return args[args.index(flag) + 1]
+async def one(client):
+    body = {{"model": "m", "messages": [{{"role": "user", "content": "synthetic"}}], "max_tokens": 8, "stream": True}}
+    async with client.stream("POST", "http://127.0.0.1:" + value("--port") + "/v1/chat/completions", json=body) as r:
+        async for _ in r.aiter_bytes():
+            pass
+async def main():
+    async with httpx.AsyncClient() as client:
+        await asyncio.gather(*(one(client) for _ in range(min(2, int(value("--max-concurrency"))))))
+asyncio.run(main())
+result = {{"duration": 12.5, "completed": 6, "failed": 0, "output_throughput": 245.75, "median_ttft_ms": 812.4,
+          "p99_itl_ms": 31.0, "spec_decode_per_position_acceptance_rates": [0.78, 0.62, 0.49],
+          "generated_texts": ["{secret}"], "model_id": "/workspace/{secret}", "date": "20260927-120000",
+          "{secret}_ms": 1.0}}
+with open(value("--result-dir") + "/" + value("--result-filename"), "w") as file:
+    json.dump(result, file)
+"""
+
+
+def test_the_sweeps_commands_are_the_runbooks_and_the_pinned_bench_takes_them(state: Path) -> None:
+    base = card_at(state)
+    planned = sweep.cells()
+    assert len(planned) == 24 and [cell.name for cell in planned[:2]] == ["shared-4000-at1", "shared-4000-at2"]
+    assert planned[-1] == sweep.Cell(16000, 8, shared=False)
+    for cell in planned:
+        argv = sweep.arguments(base, cell, state / "sweep")
+        sweep.check(argv)
+
+        def value(flag: str, argv: list[str] = argv) -> str:
+            return argv[argv.index(flag) + 1]
+
+        assert argv[:3] == [str(state / "vllm/bin/vllm"), "bench", "serve"] and value("--port") == "8092"
+        assert int(value("--random-prefix-len")) + int(value("--random-input-len")) == cell.context
+        assert value("--random-prefix-len") == (str(cell.context - 256) if cell.shared else "0")
+        assert (value("--random-output-len"), value("--temperature"), value("--max-concurrency")) == (
+            "512", "0", str(cell.at))
+        assert int(value("--num-prompts")) == 3 * cell.at and "--ignore-eos" in argv
+    argv = sweep.arguments(base, planned[0], state / "sweep")
+    for wrong in ([*argv, "--save-detailed"], [*argv, "--seed", "8"], [*argv[:-3], "--result-filename"],
+                  [part if part != "512" else "many" for part in argv],
+                  [part for part in argv if part != "--ignore-eos"], ["python", *argv[1:]]):
+        with pytest.raises(sweep.SweepError):
+            sweep.check(wrong)
+
+
+@pytest.mark.anyio
+async def test_a_sweep_keeps_the_benchs_numbers_and_stops_a_context_the_cache_did_not_hold(state: Path) -> None:
+    bench = state / "vllm/bin/vllm"
+    bench.parent.mkdir(parents=True)
+    bench.write_text(BENCH.format(python=sys.executable, secret=SECRET))
+    bench.chmod(0o700)
+    async with support.running() as stack:
+        stack.fake.script = Script(first_delay_s=0.3)
+        port = stack.gateway.service.config.engine_url.rsplit(":", 1)[1]
+        base = card_at(state, ENGINE_PORT=port)
+        planned = sweep.cells(contexts=(4000,), unshared=(), at=(1, 2, 3, 4))
+        async with httpx.AsyncClient(timeout=10) as client:
+            found = await sweep.sweep(client, base, state / "sweep", planned, sample_s=0.02)
+    assert [(cell["cell"], cell.get("held"), cell.get("skipped")) for cell in found] == [
+        ("shared-4000-at1", True, None), ("shared-4000-at2", True, None), ("shared-4000-at3", False, None),
+        ("shared-4000-at4", None, "cache")]
+    first = found[0]
+    assert first["exit_code"] == 0 and first["metrics"]["generation_tokens"] > 0
+    assert first["bench"] == {"duration": 12.5, "completed": 6, "failed": 0, "output_throughput": 245.75,
+                              "median_ttft_ms": 812.4, "p99_itl_ms": 31.0,
+                              "spec_decode_per_position_acceptance_rates": [0.78, 0.62, 0.49]}
+    assert SECRET not in json.dumps(found)

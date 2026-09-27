@@ -40,6 +40,7 @@ DEFAULT_GPU_MEMORY = 0.92  # vLLM 0.30.0's, which `non-default args` leaves out 
 LINEAR_KERNELS = {"marlin": "marlin", "humming": "humming", "flashinfer_cutedsl": "flashinfer_cutedsl_w4a16"}
 FLASHINFER_ENV = {"VLLM_HAS_FLASHINFER_CUBIN": "1"}  # item 13: no download of a cubin that sm_120 does not use
 STILL_RUNNING = 1  # the launcher's pair did not end
+MAX_DRAFTS = 8  # drafted tokens a change may ask for: 6 for the acceptance pass, 5 at most for the sweep
 
 
 class ChangeError(ValueError):
@@ -252,14 +253,17 @@ def _per_batch(value: str, manifest: dict[str, str], edits: list[Callable[[Plan]
 def _synthetic(value: str, manifest: dict[str, str], edits: list[Callable[[Plan], None]],
                expect: list[tuple[str, int | None]]) -> bool:
     """Rates by position, unconditional and not increasing, one for each drafted token (vllm/config/speculative.py:
-    517-536): the engine accepts drafts at those rates whatever they are, for the timing sweep only."""
-    drafted = _drafting(manifest)
+    517-536): the engine drafts as many tokens as there are rates and accepts them at those rates whatever they are,
+    for the timing sweep only. The count is part of the change, since the sweep times each count at its own rates."""
+    _drafting(manifest)
     try:
         rates = [float(part) for part in value.split(",")]
     except ValueError:
         raise ChangeError("synthetic takes the rates by position, separated by commas") from None
-    if len(rates) != drafted or any(not 0 <= rate <= 1 for rate in rates) or rates != sorted(rates, reverse=True):
-        raise ChangeError("synthetic takes one rate from 0 to 1 per drafted token, none above the one before")
+    if not 1 <= len(rates) <= MAX_DRAFTS or any(not 0 <= rate <= 1 for rate in rates) \
+            or rates != sorted(rates, reverse=True):
+        raise ChangeError(f"synthetic takes 1 to {MAX_DRAFTS} rates from 0 to 1, none above the one before")
+    manifest["MTP_SPECULATIVE_TOKENS"] = str(len(rates))
     edits.append(_speculation(rejection_sample_method="synthetic", synthetic_acceptance_rates=rates))
     expect += [("arg_rejection_sample_method_synthetic", None), ("arg_synthetic_acceptance_rates", None)]
     return True
@@ -284,7 +288,7 @@ def _attention(sliding: bool) -> Apply:
 
 CHANGES: dict[str, Apply] = {
     "reference": _reference,
-    "mtp": _manifest("MTP_SPECULATIVE_TOKENS", lambda value: _integer(value, 0, 8)),  # item 3; 6 for acceptance
+    "mtp": _manifest("MTP_SPECULATIVE_TOKENS", lambda value: _integer(value, 0, MAX_DRAFTS)),  # item 3
     "kv-offloading": _manifest("KV_OFFLOADING_GIB", lambda value: _integer(value, 0, 512)),  # item 2
     "gpu-memory": _manifest("GPU_MEMORY_UTILIZATION", lambda value: _fraction(value, 0.5, 0.99)),  # item 4
     "batched-tokens": _manifest("MAX_NUM_BATCHED_TOKENS", lambda value: _integer(value, 64, 65536)),  # item 5
