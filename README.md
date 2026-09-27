@@ -50,6 +50,8 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
   gateway;
 - `tests/test_smoke.py`: the first rental's smoke: the privacy probe's verdict, and the whole smoke through the dev
   launcher, whose output holds no key, no prompt and nothing of the model's text;
+- `tests/test_sweep.py`: the sweep on a text card's tail (`docs/speed.md`): its levels, their admission by the cache
+  and by `--until`, and every `vllm bench serve` it runs, with a stand-in for vLLM's benchmark and canned `/metrics`;
 - `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher.
 
 Three kinds of test stay apart (contract section 14). A client's adapter runs the public steps of the cases in its own

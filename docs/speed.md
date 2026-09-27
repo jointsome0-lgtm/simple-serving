@@ -376,6 +376,40 @@ them, and prompts that share nothing at 16000; `rejection_sample_method` `synthe
 the lock. Step 7 picks the batch and the count with the most tokens a second at the bot's and the eval's lengths, no
 preemptions and first tokens within the reference's spread, and runs the workloads there.
 
+#### The sweep on a text card's tail
+
+`simple_serving/sweep.py` gives item 3's main lever a first number on a 5090 rented for other work, in its last
+minutes: step 6's `vllm bench serve` against the engine as it runs, with three drafts, the card's own settings and no
+restart. A level sends 256 new tokens after a prefix its prompts share (the context less 256), 512 out with
+`--ignore-eos` at temperature 0, twice as many prompts as requests at once and at least 4, a seed of its own, and one
+warm-up request that reads the prefix first. The order is 16000 tokens at 2, 4, 3, 6, 8 and 1 at once, then 4000 and
+40000 the same way, then 16000 that share nothing. A level is skipped when its requests would need more than 95 per
+cent of the 104492 tokens without sharing (16000 at 8, 40000 above 2), or when its estimate does not fit before
+`--until`; one still running at `--until` is ended. The estimate, a model and not measured, is 14.5 minutes for the 18
+levels that fit and 4.0 for the first six (16000 at 2, 4, 3, 6 and 1, and 4000 at 2); 12 minutes hold 16 of them.
+
+It runs only after the card's own work is done, never beside a text run: a level starts only while the engine has no
+request, and one that meets another client's request ends the sweep. The gateway does not see the sweep and stops the
+card 13 minutes after the last request of ours through it, so `--until` is at most 12 minutes after that request, and
+before the trial guard's three hours.
+
+Each level prints one JSON line of numbers and fixed words: output tokens a second in all and for one request while it
+answers (1000 over the median time per output token), the first token's median and p90, the durations, what the
+engine's `/metrics` counters gained, the warm-up included (prompt and generation tokens, prefix-cache queries and
+hits, preemptions, drafts and accepted tokens by position), and the peaks of requests running and waiting and of cache
+usage. vLLM's JSON results stay in `/workspace/simple-serving-card/sweep/<UTC time>/`. The engine needs no key, since
+`card.py` gives it no `--api-key`, and every flag is in the pinned vLLM (`vllm/benchmarks/serve.py:1601-1850`,
+`vllm/benchmarks/datasets/datasets.py:1602-1616,1918-1965`). From this checkout, right after the card's last request
+through the gateway:
+
+```
+ssh <card> 'cat > /workspace/simple-serving-card/sweep.py' < simple_serving/sweep.py
+until=$(( $(date +%s) + 720 ))
+run="/workspace/simple-serving-card/vllm/bin/python /workspace/simple-serving-card/sweep.py --until $until"
+ssh <card> "$run --plan"
+ssh <card> "$run" | tee sweep.jsonl
+```
+
 ### Minutes and price
 
 The 5090 at $0.50 to $0.65 an hour. Traffic is priced by the offer, $2.6 to $52 a TB, and was $2.6 on the fourth card;
