@@ -137,6 +137,10 @@ class Card:
             "--max-num-seqs", m["MAX_NUM_SEQS"], "--max-num-batched-tokens", m["MAX_NUM_BATCHED_TOKENS"],
             "--gpu-memory-utilization", m["GPU_MEMORY_UTILIZATION"], "--kv-cache-dtype", m["KV_CACHE_DTYPE"],
             "--scheduling-policy", "priority", "--enable-prefix-caching", "--enable-prompt-tokens-details",
+            # Dense retention: a story's next turn finds its prefix again. With vLLM's default the cache hit nothing,
+            # and on a 5090 on 2026-09-27 this took a story's next turn from 6406 to 372 ms to its first token, the
+            # same tokens in 16 of 16, and four interleaved stories lost nothing (docs/speed.md, item 8).
+            "--prefix-cache-retention-interval", "None",
             "--reasoning-parser", "gemma4",  # the model's thinking in the reasoning field, apart from the answer
             # A schema's JSON from xgrammar alone, which has no fallback: a schema compiles with the pinned version or
             # is refused. Whitespace between its tokens is allowed, as the bot's llama.cpp allows it: forbidden, it left
