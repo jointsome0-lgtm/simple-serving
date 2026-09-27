@@ -96,7 +96,8 @@ names a pin.
      ends `dry run: ok: ...`. On the card, from `/workspace/simple-serving` with the gateway venv's Python: `run
      --change NAME[=VALUE]` with `--pack`, `--workloads`, `--at`, `--identity reference|change` or `--sweep` writes one
      `result.json` of counts, times and fixed words and prints its report, `report RESULT` prints it again, and
-     `microbench gemm|attention` runs the runbook's steps 2 and 3 (`--dry-run` prints the plan without a GPU).
+     `microbench gemm|attention` runs the runbook's steps 2 and 3 (`--dry-run` prints the plan without a GPU). The
+     cheap card's manifest, E2B and its assistant pinned file by file, is `card/cheap-card.env`.
    - *Quality.* Identical: the engine does not change.
    - *Gain.* None by itself; every item below is judged by it.
 

@@ -560,3 +560,21 @@ async def test_a_timing_only_change_runs_no_workload_and_a_workload_needs_the_pa
     argv = cli.microbench_argv(base, "gemm", "marlin")
     assert argv[0] == str(state / "vllm/bin/python") and argv[2:] == ["gemm", "--kernels", "marlin"]
 
+
+def test_the_cheap_cards_manifest_is_the_cards_with_e2b_and_its_assistant_pinned() -> None:
+    def read(name: str) -> dict[str, str]:
+        lines = (card.CODE / "card" / name).read_text().splitlines()
+        return dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
+
+    cheap, manifest = read("cheap-card.env"), read("manifest.env")
+    changed = {name for name in manifest if cheap[name] != manifest[name]}
+    assert cheap.keys() == manifest.keys()
+    assert changed == {"MODEL_REPO", "MODEL_REVISION", "MODEL_FILES", "TOKENIZER_REPO", "TOKENIZER_REVISION",
+                       "TOKENIZER_FILES", "MODEL_ALIAS", "DRAFTER_REPO", "DRAFTER_REVISION", "DRAFTER_FILES"}
+    assert cheap["MODEL_REPO"] == "google/gemma-4-E2B-it" and cheap["MODEL_REVISION"].startswith("3e22461f")
+    assert cheap["DRAFTER_REPO"] == "google/gemma-4-E2B-it-assistant"
+    assert cheap["DRAFTER_REVISION"].startswith("2d874ef7")
+    for key in ("MODEL_FILES", "TOKENIZER_FILES", "DRAFTER_FILES"):
+        pins = dict(pin.split(":") for pin in cheap[key].split(","))
+        assert all(len(digest) == 64 and int(digest, 16) >= 0 for digest in pins.values())
+        assert {"config.json"} <= pins.keys() and (key == "TOKENIZER_FILES") == ("tokenizer.json" in pins)
