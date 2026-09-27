@@ -130,7 +130,7 @@ reads, chunked bodies included, and stops reading past the limit with 413 `body_
 | `temperature`          | number from 0 to 2                               | optional                           |
 | `top_p`                | number above 0, at most 1                        | optional                           |
 | `top_k`                | integer, at least 1                              | optional                           |
-| `min_p`                | number from 0 to 1                               | optional                           |
+| `min_p`                | number from 0 to 1                               | optional; while the engine drafts tokens, see below |
 | `repetition_penalty`   | number above 0, at most 2                        | optional                           |
 | `seed`                 | integer                                          | optional                           |
 | `response_format`      | `{"type": "json_schema", "json_schema": {"name": string, "strict": boolean, "schema": object}}` | optional |
@@ -140,15 +140,24 @@ Any other field, at any depth, is refused with 400 `unsupported_field`. The rule
 the gateway passes on as it is. A value of the wrong type or out of range is refused with 400 `invalid_request`. So is
 a body whose objects and arrays nest more than 64 deep, counting the body itself and the inside of `schema`.
 
+While the engine drafts tokens for speculative decoding (Gemma 4's multi-token prediction, on while
+`MTP_SPECULATIVE_TOKENS` in `card/manifest.env` is above 0), it has no `min_p`: vLLM 0.30.0 then loads no `min_p`
+filter and refuses a request whose `min_p` is above 0.00001, unless its `temperature` is 0, where it samples greedily
+and drops `min_p`. An absent `temperature` is 1 there. The gateway refuses such a generation itself, before its count
+stage, with 400 `min_p_unavailable`, and the engine sees nothing of it. A `min_p` of 0 or none passes, and so does any
+`min_p` at `temperature` 0; the bot sends 0 (section 13). The gateway knows that the engine drafts from the count of
+drafted tokens among its pinned versions (section 12), which the card's launcher writes only then. While the engine
+does not draft, `min_p` goes to the engine as it is.
+
 ### Before the stream starts
 
 The gateway checks, in this order: the route, the key, the service status, the class, the scope, the body (its size,
-then JSON, then the fields), `max_tokens` against the class limit. Then it accepts the request, checking the service
-status once more, since a drain may have begun while the body was read. From acceptance on, the wall time and the
-measurements of section 11 run, and a drain sees the request as work (section 8). Before acceptance a fixed bound
-applies instead, 30 seconds from the request's arrival, and it is not a setting: a body that has not all arrived by
-then is refused with 504 `timeout`, and a refusal that its client does not take by then is given up with the
-connection.
+then JSON, then the fields), `max_tokens` against the class limit, and `min_p` while the engine drafts tokens (above).
+Then it accepts the request, checking the service status once more, since a drain may have begun while the body was
+read. From acceptance on, the wall time and the measurements of section 11 run, and a drain sees the request as work
+(section 8). Before acceptance a fixed bound applies instead, 30 seconds from the request's arrival, and it is not a
+setting: a body that has not all arrived by then is refused with 504 `timeout`, and a refusal that its client does not
+take by then is given up with the connection.
 
 An accepted generation passes two stages:
 1. The count stage: the request waits for a count place and the engine counts the input, under the count limits of
@@ -210,7 +219,8 @@ event. The gateway then ends its stream with the error event `engine_unavailable
   most 2 counts at once, waiting ones included; a third is refused with 429 `queue_full`. The count stage of a
   generation shares these limits.
 - The gateway sends the engine only what renders the prompt: the model alias, the messages and the template arguments,
-  never the rest of the body.
+  never the rest of the body. So a count does not apply the rule of section 4 on `min_p` while the engine drafts
+  tokens.
 - A count applies neither the class limits of section 7 nor the context. A body whose `n` plus `max_tokens` exceeds
   the context is still counted. The answer is the count.
 
@@ -250,7 +260,8 @@ sets one. `/v1/state` shows the same number.
 - In any status except `ready`, the inference routes answer 503. The code is the status itself, except `failed`,
   which answers `engine_unavailable`.
 - For the control key the answer also holds `sleep_requested`, true once a sleep has begun (section 8); `active` and
-  `waiting`, counted by class; and the pinned versions of section 12. `active` and `waiting` cover generation
+  `waiting`, counted by class; and the pinned versions of section 12. While the engine drafts tokens, it also holds
+  `"unavailable_fields": ["min_p"]`, the field that section 4 then refuses. `active` and `waiting` cover generation
   admission only (section 7): a count, and a generation still in its count stage, are in neither. Whether the card
   may stop is the gateway's own decision (section 8), never a client's reading of these counters.
 - `/v1/state` and the control routes answer in every status.
@@ -427,6 +438,7 @@ body. FastAPI's default validation answer echoes the input, so it is replaced.
 | 400    | `invalid_request`, `unsupported_field`            | the body breaks section 4 or 8, or the scope breaks section 2 |
 | 400    | `limit_exceeded`                                  | input or `max_tokens` over the class limit   |
 | 400    | `context_limit`                                   | input plus `max_tokens` over the context     |
+| 400    | `min_p_unavailable`                               | a `min_p` that the engine refuses while it drafts tokens (section 4) |
 | 401    | `unauthorized`                                    | no key or an unknown key                     |
 | 403    | `class_not_allowed`, `scope_not_allowed`          | the key may not use the class or the scope   |
 | 403    | `forbidden`                                       | a key without the control right on a control route |
@@ -704,3 +716,9 @@ GPTQ or NVFP4, a separate configuration, measured again.
   on quality; the entry on llmfan46's repository still holds.
 - 2026-09-26, the owner: the bot sends the gateway two calls at once by default, so that two readers are served
   together, the reason route A was taken. Section 13's lanes without placement, left for later, are in.
+- 2026-09-27, the owner: while the engine drafts tokens, the gateway refuses a `min_p` that vLLM 0.30.0 would refuse,
+  itself, with 400 `min_p_unavailable` and before the engine sees the request (section 4), and the smoke's `fields`
+  probe checks that refusal. That day, on a 5090 with 3 drafted tokens, the smoke had passed 2 of its 10 probes and
+  stopped at `fields`, whose `min_p` of 0.05 vLLM refused, and which the gateway answered as it answers any refusal of
+  the engine, with 400 `invalid_request`. The card then ran with `MTP_SPECULATIVE_TOKENS=0`, where the smoke passed 10
+  of 10. Multi-token prediction stays on by default.

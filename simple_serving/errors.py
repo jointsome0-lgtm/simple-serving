@@ -7,6 +7,7 @@ STATUS = {
     "unsupported_field": 400,
     "limit_exceeded": 400,
     "context_limit": 400,
+    "min_p_unavailable": 400,
     "unauthorized": 401,
     "class_not_allowed": 403,
     "scope_not_allowed": 403,

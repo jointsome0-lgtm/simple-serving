@@ -111,7 +111,8 @@ async def gateway(tmp_path: Path, fake: FakeEngine) -> AsyncIterator[Process]:
     engine_socket = bind(Listener("127.0.0.1", 0))
     engine = Servers([(fake, engine_socket)], graceful_s=1)
     await engine.start()
-    block = service_with(limits={"agent": {"waiting": 0}, "external": {"wall_s": 0.5}}, drain_deadline_s=0.5)
+    block = service_with(limits={"agent": {"waiting": 0}, "external": {"wall_s": 0.5}}, drain_deadline_s=0.5,
+                         versions={"mtp_speculative_tokens": "3"})  # vLLM drafts tokens, as on the card
     block["keys"] = [{"sha256": hashlib.sha256(raw.encode()).hexdigest(), **entry}
                      for raw, entry in block["keys"].items()]
     config = {**block, "engine_url": f"http://127.0.0.1:{engine_socket.getsockname()[1]}", "health_interval_s": 0.1,
@@ -188,8 +189,8 @@ async def test_no_answer_and_no_log_line_holds_the_request(tmp_path: Path) -> No
     requests = [row for row in rows if row.get("event") == "request"]
     codes = {row.get("code") for row in requests}
     assert codes >= {"unauthorized", "class_not_allowed", "scope_not_allowed", "invalid_request", "unsupported_field",
-                     "limit_exceeded", "context_limit", "body_too_large", "not_found", "forbidden", "stale_boot",
-                     "queue_full", "timeout", "draining", "engine_unavailable"}, codes
+                     "limit_exceeded", "context_limit", "min_p_unavailable", "body_too_large", "not_found", "forbidden",
+                     "stale_boot", "queue_full", "timeout", "draining", "engine_unavailable"}, codes
     assert any(row.get("cancelled") for row in requests)
     assert {row["scope"] for row in requests if "scope" in row} <= {"reader", "agent", "internal", "external"}
 
@@ -242,6 +243,7 @@ async def refusals_of_the_body(checks: Checks) -> None:
             await checks.error(400, code, "POST", url, headers=internal, content=content)
             await checks.error(400, code, "POST", checks.public + COUNT, headers=internal, content=content)
     await checks.error(400, "limit_exceeded", "POST", url, key=OUTSIDE_A, body=body("max_tokens", max_tokens=512))
+    await checks.error(400, "min_p_unavailable", "POST", url, headers=internal, body=body("min_p", min_p=0.05))
     oversized = json.dumps(body("large", messages=[{"role": "user", "content": MARKER * 200_000}])).encode()
     await checks.error(413, "body_too_large", "POST", url, headers=internal, content=oversized)
 

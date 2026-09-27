@@ -26,6 +26,11 @@ if TYPE_CHECKING:
 STARTING_RETRY_S = 1.0
 FORCED_STOP_S = 120  # from the start of a sleep; the one place where the instance stops under unfinished work
 PINNED_PACKAGES = ("fastapi", "starlette", "uvicorn", "httpx")
+# vLLM 0.30.0 with speculative decoding loads no min_p filter (build_logitsprocs in vllm/v1/sample/logits_processor),
+# and refuses a min_p above this once it has made a request's sampling parameters (SamplingParams._validate_spec_decode
+# and _SAMPLING_EPS in vllm/sampling_params.py). A temperature of 0 is greedy sampling there, which sets min_p to 0
+# first; any other temperature is raised to at least 0.01, and one left out is 1.0 under --generation-config vllm.
+MIN_P_EPS = 1e-5
 
 
 class Service:
@@ -113,6 +118,13 @@ class Service:
         if request.max_tokens > self.config.limits[caller.cls].max_tokens:
             raise ServiceError("limit_exceeded")
 
+    def check_min_p(self, request: ChatRequest) -> None:
+        """While vLLM drafts tokens, a min_p that it would refuse is refused here, with a code that says why, and the
+        engine sees nothing of the request. A count sends the engine no sampling, and is not checked."""
+        sampling = request.sampling
+        if self.config.speculative and sampling.get("min_p", 0) > MIN_P_EPS and sampling.get("temperature", 1) != 0:
+            raise ServiceError("min_p_unavailable")
+
     def accept(self, work: Work) -> None:
         """Take on a checked request, if the service still serves."""
         self.check_serving()
@@ -152,6 +164,8 @@ class Service:
         if control:
             state.update(sleep_requested=self.sleep_requested, active=self.admission.active_counts(),
                          waiting=self.admission.waiting_counts(), versions=self._versions())
+            if self.config.speculative:
+                state["unavailable_fields"] = ["min_p"]  # what check_min_p refuses
         return state
 
     def drain(self, boot_id: str) -> dict[str, Any]:

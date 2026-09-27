@@ -139,8 +139,10 @@ never the key:
 
 `context_tokens` is the gateway's own limit, or `null` for the engine's. Optional fields: `body_limit_bytes`
 (2 000 000), `max_connections` (64), `idle_timeout_s` (780), `health_interval_s` (5) and `versions`, which the control
-key sees in `/v1/state` next to the gateway's own. An outside key has the classes `["external"]` and no scopes. To
-hash a key without printing it:
+key sees in `/v1/state` next to the gateway's own. One of them is also a switch: `mtp_speculative_tokens`, a count
+above 0 that the card's launcher writes only while vLLM drafts tokens, makes the gateway refuse the `min_p` that vLLM
+would refuse then ("The card" below). An outside key has the classes `["external"]` and no scopes. To hash a key
+without printing it:
 
 ```
 read -rs KEY && printf '%s' "$KEY" | sha256sum && unset KEY
@@ -187,6 +189,13 @@ drafted token in one pass and keeps each only as its own sampling would, so the 
 change, only their speed. The drafter reads the heretic's KV cache and keeps none of its own; its 0.9 GB of weights
 come out of the cache's share of the memory. `/v1/state` names the drafter's revision and the count among the
 versions, and so does the smoke's record.
+
+With the drafter, vLLM 0.30.0 has no `min_p`: it loads no `min_p` filter, and refuses a request whose `min_p` is above
+0.00001 unless its `temperature` is 0, where it samples greedily and drops `min_p`. So while the launcher's versions
+name the count, the gateway refuses such a request itself, with 400 `min_p_unavailable`, before it counts the input,
+and nothing of it reaches vLLM (contract section 4); the control key's `/v1/state` then holds
+`"unavailable_fields": ["min_p"]`. A `min_p` of 0 or none passes, and the bot sends 0. With `MTP_SPECULATIVE_TOKENS=0`
+the gateway passes any `min_p` on, as before.
 
 A card prepared with another count is not prepared for this manifest, and the launcher starts nothing there until the
 preparation runs again. Copy the checkout to the card again, and run the preparation with nothing on stdin, since the
@@ -315,8 +324,9 @@ The probes run in this order, each within a time bound of its own, and the first
 - `completion`: one short completion, and its stream as section 4 has it: the alias in every chunk, one finish, one
   usage chunk, then `[DONE]`.
 - `fields`: each optional field of section 4 alone, at a legal value, and the answer with `response_format` follows
-  its schema. Beside them, two answers with one seed at temperature 0.8, compared by hash: an observation, which
-  passes nothing.
+  its schema. While the manifest turns multi-token prediction on, the 0.05 of `min_p` is due to be refused instead,
+  and its part passes on the gateway's 400 `min_p_unavailable` alone. Beside them, two answers with one seed at
+  temperature 0.8, compared by hash: an observation, which passes nothing.
 - `reasoning`: thinking on gives reasoning and an answer, thinking off an answer alone.
 - `finish`: `length` after exactly 8 tokens, and `stop`.
 - `refusal`: a schema whose `pattern` does not compile is 400 `invalid_request`, before any stream. The comment at
@@ -365,7 +375,8 @@ uv run python -m simple_serving.dev --config dev.json --engine-port 8200 --publi
 uv run python -m simple_serving.smoke --config keys.json --public-port 8201 --control-port 8202 --fake --card-dir logs/dry-run
 ```
 
-The pause after each event holds a stream open while the abort probe looks for it.
+The pause after each event holds a stream open while the abort probe looks for it. With multi-token prediction on in
+the manifest, the pins make the gateway refuse the `min_p` of the `fields` probe, as the card's does.
 
 ## The first rental
 

@@ -17,8 +17,10 @@ The probes run in this order, each within a time bound of its own, and the first
 - completion: one short completion with the least body, and its stream as section 4 has it: the alias in every chunk,
   one finish, one usage chunk after it, and [DONE].
 - fields: each optional field of section 4 alone, at a legal value. The answer with `response_format` ends in `stop`
-  and follows its schema, and the one with thinking off has no reasoning. Beside them an observation that passes
-  nothing: two answers at temperature 0.8 with one seed, compared by hash.
+  and follows its schema, and the one with thinking off has no reasoning. While the manifest turns multi-token
+  prediction on, the gateway refuses the min_p of 0.05 with 400 min_p_unavailable, and that refusal is what its part
+  checks. Beside them an observation that passes nothing: two answers at temperature 0.8 with one seed, compared by
+  hash.
 - reasoning: thinking on gives reasoning and an answer, thinking off an answer alone.
 - finish: `length` at a small max_tokens, after exactly that many tokens, and `stop`.
 - refusal: a schema that the engine cannot compile is 400 invalid_request, before any stream.
@@ -422,6 +424,7 @@ class Smoke:
     fake: bool = False
     card: CardFiles = field(default_factory=CardFiles)
     record: Record | None = None
+    mtp: bool = False  # the manifest turns multi-token prediction on: vLLM drafts tokens
     undo: Callable[[], Awaitable[bool]] | None = None  # what the running probe changed and run() undoes
 
     def headers(self, listener: str) -> dict[str, str]:
@@ -607,7 +610,10 @@ async def probe_fields(smoke: Smoke) -> dict[str, Any]:
             answer = answer_problems(stream.content, WORD_SCHEMA)
         if stream.ok and name == "chat_template_kwargs" and stream.reasoning:
             failed.append("reasoning")
-        parts[name] = answered(stream, failed, answer)
+        if name == "min_p" and smoke.mtp:  # vLLM drafts tokens, and the gateway refuses it first (contract section 4)
+            parts[name] = refused(stream, "min_p_unavailable")
+        else:
+            parts[name] = answered(stream, failed, answer)
         if not parts[name]["ok"]:
             return combined(parts)
     # An observation, not a check: the engine may batch the two answers differently.
@@ -656,7 +662,12 @@ async def probe_finish(smoke: Smoke) -> dict[str, Any]:
 async def probe_refusal(smoke: Smoke) -> dict[str, Any]:
     stream = await smoke.generate(smoke.body([user(WORD)], 32, response_format={
         "type": "json_schema", "json_schema": {"name": "word", "strict": True, "schema": UNCOMPILABLE}}))
-    line: dict[str, Any] = {"ok": stream.status == 400 and stream.code == "invalid_request", "status": stream.status}
+    return refused(stream, "invalid_request")
+
+
+def refused(stream: Stream, code: str) -> dict[str, Any]:
+    """A probe's or a part's line where 400 with `code` is due before any stream."""
+    line: dict[str, Any] = {"ok": stream.status == 400 and stream.code == code, "status": stream.status}
     if stream.code is not None:
         line["code"] = stream.code
     if not line["ok"]:
@@ -995,7 +1006,8 @@ async def smoke_run(args: argparse.Namespace, config: dict[str, Any], manifest: 
     async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=CALL_S), trust_env=False) as client:
         smoke = Smoke(client, f"http://127.0.0.1:{args.public_port}", f"http://127.0.0.1:{args.control_port}",
                       config["client_key"], config["control_key"], manifest["MODEL_ALIAS"],
-                      int(manifest["CONTEXT_TOKENS"]), args.fake, files, record)
+                      int(manifest["CONTEXT_TOKENS"]), args.fake, files, record,
+                      mtp=int(manifest["MTP_SPECULATIVE_TOKENS"]) > 0)
         return await run(smoke, names)
 
 

@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from . import log, vast
-from .config import IDLE_TIMEOUT_S, PROVISIONAL
+from .config import DRAFTED_TOKENS, IDLE_TIMEOUT_S, PROVISIONAL
 
 CODE = Path(__file__).resolve().parent.parent  # the checkout
 STATE = Path(os.environ.get("SIMPLE_SERVING_CARD_DIR", "/workspace/simple-serving-card"))
@@ -203,12 +203,13 @@ class Card:
 def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
     """The engine's pins that the gateway shows the control key in /v1/state, beside its own (contract section 12).
     With multi-token prediction on they name the drafter and its tokens too, and with the KV cache's copy in RAM its
-    size, so that a record says which it measured."""
+    size, so that a record says which it measured. The count of drafted tokens also tells the gateway that vLLM
+    drafts, and so which min_p it refuses (config.DRAFTED_TOKENS)."""
     pins = {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
             "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
     if int(manifest["MTP_SPECULATIVE_TOKENS"]):
         pins |= {"drafter_revision": manifest["DRAFTER_REVISION"],
-                 "mtp_speculative_tokens": manifest["MTP_SPECULATIVE_TOKENS"]}
+                 DRAFTED_TOKENS: manifest["MTP_SPECULATIVE_TOKENS"]}
     if int(manifest["KV_OFFLOADING_GIB"]):
         pins |= {"kv_offloading_gib": manifest["KV_OFFLOADING_GIB"]}
     return pins
