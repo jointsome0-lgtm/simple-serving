@@ -172,8 +172,10 @@ class Card:
 
     def config(self) -> dict[str, Any]:
         """The gateway's configuration: the provisional limits, the manifest's model and ports, and the hashes of the
-        two keys."""
+        keys: the client's and the control key's, and the metrics key's where the card holds it."""
         m, keys = self.manifest, json.loads((self.state / "keys.json").read_text())
+        metrics = [{"sha256": keys["metrics"], "label": "metrics", "classes": [], "default": None, "scopes": False,
+                    "control": False, "metrics": True}] if "metrics" in keys else []
         return PROVISIONAL | {
             "alias": m["MODEL_ALIAS"],
             "context_tokens": int(m["CONTEXT_TOKENS"]),
@@ -184,6 +186,7 @@ class Card:
                  "default": "internal", "scopes": True, "control": False},
                 {"sha256": keys["control"], "label": "control", "classes": [], "default": None, "scopes": False,
                  "control": True},
+                *metrics,
             ],
             "versions": pinned_versions(m),
         }

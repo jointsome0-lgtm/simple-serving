@@ -168,13 +168,23 @@ The preparation, once per rental and never at a resume:
 
 1. Copy the checkout to `/workspace/simple-serving`.
 2. `uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh`. `keys`
-   makes the client key and the control key once, and prints only the SHA-256 of each, one per line.
+   makes the client key, the control key and the metrics key once, and prints only the SHA-256 of each, one per line.
 
 bootstrap.sh installs each lock into a venv of its own, wheels only and every hash checked, and runs `pip check`
 there. It fetches the weights and the tokenizer files at their pinned revisions over 16 connections with aria2c,
 which it installs with apt-get when the card lacks it, and checks their hashes. It keeps the key hashes in
 `keys.json` and starts the service. It refuses while a pin or a lock is missing, or when vLLM's lock is for another
 version than the pin, and it never replaces the keys the card holds.
+
+The metrics key reads the gateway's metrics and the engine's, and nothing else ([Monitoring](#monitoring)). A card
+prepared before it holds the client key and the control key alone, and works as it did: its metrics answer the control
+key only. The preparation run again with the three hashes, the first two the card's own, puts the metrics key beside
+them, and the gateway takes it at the pair's next start, a resume or `card.py --stop` and a start as for the drafter
+below:
+
+```
+uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh
+```
 
 The locks, `card/gateway-requirements.txt` and `card/vllm-requirements.txt`, each name in their header the command
 that made them: the gateway's is exported from `uv.lock`, and vLLM's is resolved for the pinned version. A change of
@@ -275,7 +285,8 @@ uv run python -m simple_serving.cli up | sleep | status | keys | trial --ssh-hos
   reports the instance stopped.
 - `status` shows the instance's state in Vast and, through a forward of its own, the gateway's status, whether it
   serves the manifest's model, and its counts. Nothing of an answer is printed as it came.
-- `keys` makes the two gateway keys once, for the preparation above.
+- `keys` makes the three gateway keys once, for the preparation above. `keys --metrics-file PATH` also writes the
+  metrics key alone into that file, open to its owner only, for Prometheus ([Monitoring](#monitoring)).
 - `trial --ssh-host HOST` is for a trial rental. It reads the card's instance id over SSH and writes it, with the
   host, into the configuration, printing neither.
 
@@ -283,14 +294,16 @@ The configuration is `~/.config/simple-serving/config.json`, open to its owner o
 names:
 
 ```json
-{"instance_id": "...", "vast_api_key": "...", "ssh_host": "...", "client_key": "...", "control_key": "..."}
+{"instance_id": "...", "vast_api_key": "...", "ssh_host": "...", "client_key": "...", "control_key": "...",
+ "metrics_key": "..."}
 ```
 
-`keys` writes the last two. `vast_api_key` is a Vast key allowed GET and PUT on that instance alone, never the account
-key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. On a trial rental `trial` writes `instance_id`
-and `ssh_host`, and `vast_api_key` stays the owner's key: Vast answers the card's own container key on the card, and
-refuses it from the owner's machine with 401 (measured 2026-09-25). The bot's model profile takes the address
-`http://127.0.0.1:8080` and the client key; it holds neither the control key nor a Vast key.
+`keys` writes the last three, and on a configuration that holds the first two of them adds the metrics key alone. `up`,
+`sleep`, `status` and the smoke need no metrics key. `vast_api_key` is a Vast key allowed GET and PUT on that instance
+alone, never the account key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. On a trial rental
+`trial` writes `instance_id` and `ssh_host`, and `vast_api_key` stays the owner's key: Vast answers the card's own
+container key on the card, and refuses it from the owner's machine with 401 (measured 2026-09-25). The bot's model
+profile takes the address `http://127.0.0.1:8080` and the client key; it holds neither the control key nor a Vast key.
 
 ## The smoke
 
