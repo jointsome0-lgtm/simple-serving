@@ -21,7 +21,7 @@ import pytest
 
 from simple_serving import bot_schemas, card, policy
 from simple_serving.fake_engine import Script
-from simple_serving.throughput import identity, launcher, metrics, overlap, runner, sweep, workloads
+from simple_serving.throughput import identity, launcher, metrics, microbench, overlap, runner, sweep, workloads
 from simple_serving.validation import check_chat
 
 from . import support
@@ -491,3 +491,26 @@ async def test_a_sweep_keeps_the_benchs_numbers_and_stops_a_context_the_cache_di
                               "median_ttft_ms": 812.4, "p99_itl_ms": 31.0,
                               "spec_decode_per_position_acceptance_rates": [0.78, 0.62, 0.49]}
     assert SECRET not in json.dumps(found)
+
+
+def test_the_microbenchmarks_plan_the_31bs_shapes_without_torch(capsys: pytest.CaptureFixture[str]) -> None:
+    assert microbench.main(["gemm", "--dry-run"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    table = {"qkv_sliding": (16384, 5376, 50), "qkv_full": (20480, 5376, 10), "o_sliding": (5376, 8192, 50),
+             "o_full": (5376, 16384, 10), "gate_up": (43008, 5376, 60), "down": (5376, 21504, 60)}  # docs/speed.md
+    assert {shape["name"]: (shape["n"], shape["k"], shape["layers"]) for shape in plan["shapes"]} == table
+    assert plan["kernels"] == ["marlin", "humming", "cutedsl"]
+    verification = {requests * (drafts + 1) for requests in range(1, 9) for drafts in range(2, 6)}
+    assert set(range(1, 9)) | verification | {64, 1024} <= set(plan["rows"]) and max(plan["rows"]) == 1024
+    assert min(plan["large"]["values"]) >= 30000
+    assert microbench.main(["attention", "--dry-run"]) == 0
+    cases = json.loads(capsys.readouterr().out)["cases"]
+    assert {(case["kernel"], case["layer"], case["q"]) for case in cases} == {
+        *(("triton", "full", q) for q in (1, 4, 5, 6)), ("triton", "sliding", 4), ("triton", "sliding", 5),
+        ("xqa", "sliding", 4), ("xqa", "sliding", 5), ("native", "full", 1)}
+    assert {case["context"] for case in cases} == {4000, 16000, 40000} and max(case["batch"] for case in cases) == 8
+    assert "torch" not in sys.modules and "vllm" not in sys.modules
+    with pytest.raises(microbench.PlanError):
+        microbench.check({"kind": "gemm", "shapes": [{"name": "odd", "n": 24, "k": 20, "parts": [24]}], "rows": [1]})
+    with pytest.raises(SystemExit):
+        microbench.main(["gemm", "--kernels", "cutlass", "--dry-run"])
