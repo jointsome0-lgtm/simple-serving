@@ -172,7 +172,6 @@ more. vLLM serves a counter with `_total`, as named here, and a histogram as `_b
 | `vllm:spec_decode_num_drafts_total` | counter | `model_name`, `engine` | Drafts of the multi-token prediction. |
 | `vllm:spec_decode_num_draft_tokens_total` | counter | `model_name`, `engine` | Tokens drafted. |
 | `vllm:spec_decode_num_accepted_tokens_total` | counter | `model_name`, `engine` | Drafted tokens accepted. |
-| `vllm:spec_decode_num_accepted_tokens_per_pos_total` | counter | `model_name`, `engine`, `position` | Drafted tokens accepted, by position in the draft, from 0. |
 | `vllm:time_to_first_token_seconds` | histogram | `model_name`, `engine` | vLLM's time to the first token. |
 | `vllm:inter_token_latency_seconds` | histogram | `model_name`, `engine` | The time between tokens. |
 | `vllm:request_time_per_output_token_seconds` | histogram | `model_name`, `engine` | The mean time per output token of each request. |
@@ -182,7 +181,6 @@ more. vLLM serves a counter with `_total`, as named here, and a histogram as `_b
 | `vllm:request_decode_time_seconds` | histogram | `model_name`, `engine` | The time a request spent in decode. |
 | `vllm:request_prompt_tokens` | histogram | `model_name`, `engine` | The prompt's length in tokens, a request each. |
 | `vllm:request_generation_tokens` | histogram | `model_name`, `engine` | Tokens generated, a request each. |
-| `vllm:request_max_num_generation_tokens` | histogram | `model_name`, `engine` | The largest number of tokens a request asked for. |
 
 The speculative counters exist only while the drafter is on (`MTP_SPECULATIVE_TOKENS` in `card/manifest.env`). The
 acceptance rate is `rate(vllm:spec_decode_num_accepted_tokens_total[5m]) /
