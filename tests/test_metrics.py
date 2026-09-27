@@ -143,6 +143,13 @@ def ttft(before: Samples, after: Samples) -> dict[Labels, float]:
     return changes(before, after, "simple_serving_time_to_first_token_seconds_count")
 
 
+def row_times(logged: io.StringIO) -> list[tuple[bool, ...]]:
+    """Which of wait_ms, first_token_ms and total_ms each generation's row holds, in order."""
+    rows = [json.loads(line) for line in logged.getvalue().splitlines()]
+    return sorted(tuple(name in row for name in ("wait_ms", "first_token_ms", "total_ms"))
+                  for row in rows if row.get("event") == "request" and row.get("route") == GENERATION)
+
+
 # The scenarios.
 
 
@@ -234,7 +241,7 @@ async def test_an_engine_error_after_the_200_is_an_engine_error_and_its_status_s
         assert changes(before, after, "simple_serving_total_seconds_count") == {}
 
 
-async def test_a_client_that_leaves_is_a_disconnect_with_a_first_token_only_if_one_came() -> None:
+async def test_a_client_that_leaves_is_a_disconnect_with_a_first_token_only_if_one_came(logged: io.StringIO) -> None:
     async with running(service_with(keys=KEYS)) as stack, httpx.AsyncClient(timeout=10) as client:
         endless = Script(events=[{"role": "assistant"}, {"content": "and "}], endless=True, delay_s=0.01)
         stack.fake.script = by_prompt({"early": Script(hold_first=asyncio.Event()), "late": endless})
@@ -252,6 +259,8 @@ async def test_a_client_that_leaves_is_a_disconnect_with_a_first_token_only_if_o
         responses = changes(before, after, "simple_serving_http_responses_total")
         assert responses[(("listener", "public"), ("route", GENERATION), ("status", "none"))] == 1
         assert responses[(("listener", "public"), ("route", GENERATION), ("status", "200"))] == 1
+    # Their rows hold the steps they reached: both were handed to the engine, the early one got no first token.
+    assert row_times(logged) == [(True, False, True), (True, True, True)]
 
 
 async def test_a_done_that_waits_for_its_client_past_the_wall_time_is_a_timeout_not_a_success(
@@ -271,7 +280,8 @@ async def test_a_done_that_waits_for_its_client_past_the_wall_time_is_a_timeout_
         await unread.leave()
 
 
-async def test_a_drain_stops_the_waiting_and_refuses_the_new_while_our_active_work_ends_well() -> None:
+async def test_a_drain_stops_the_waiting_and_refuses_the_new_while_our_active_work_ends_well(
+        logged: io.StringIO) -> None:
     gate = asyncio.Event()
     async with running(service_with(keys=KEYS)) as stack, httpx.AsyncClient(timeout=10) as client:
         stack.fake.script = by_prompt({"active": Script(hold_first=gate)})
@@ -298,6 +308,8 @@ async def test_a_drain_stops_the_waiting_and_refuses_the_new_while_our_active_wo
         assert ttft(before, after) == {of_class("agent"): 1}
         assert after["simple_serving_status", (("status", "drained"),)] == 1
         assert after["simple_serving_drain_generation", ()] == 1
+    # The rows: refused before acceptance, no times; stopped while it waited for a place, its end alone; ended well.
+    assert row_times(logged) == [(False, False, False), (False, False, True), (True, True, True)]
 
 
 async def test_a_request_cut_by_the_gateways_shutdown_is_unavailable_and_its_row_says_cancelled(

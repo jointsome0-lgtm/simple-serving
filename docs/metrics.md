@@ -102,9 +102,11 @@ The times start at acceptance, once the body has arrived and passed its checks (
 | `simple_serving_time_to_first_token_seconds` | histogram | `class` | From acceptance to the first token received from the engine, reasoning included: the log row's `first_token_ms`, observed only when a token arrived. |
 | `simple_serving_total_seconds` | histogram | `class` | From acceptance to the end of the engine's stream, for streams that ended well: the log row's `total_ms`. |
 
-The log row keeps its times as before, and differs from these histograms in one way: a request that ended before a stage
-writes the stage's time as its end. A stream that ended without any token has a `first_token_ms` in its row, the moment
-its finish arrived, and no observation here; a stopped request has all three times in its row.
+The log row holds the same moments in whole milliseconds, each step only when the request reached it, and its end as
+`total_ms` however it ended: a request stopped before its first token has no `first_token_ms`. It differs from these
+histograms twice. A stream whose finish came without any token has a `first_token_ms` in its row, and in its usage chunk
+when it ended well: the moment its finish arrived, with no observation here. A request that did not end well has a
+`total_ms` in its row, the moment it ended, and no observation here.
 
 ### Gauges
 

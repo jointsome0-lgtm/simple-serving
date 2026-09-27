@@ -229,8 +229,14 @@ class Generation(Work):
         finally:
             if self.ticket is not None:
                 self.service.admission.leave(self.ticket)
-        if self.exchange.record.total_ms is None:
-            self._record_times(self._measure(time.monotonic()))  # a stopped or failed request, for its log row
+        record = self.exchange.record
+        if record.total_ms is None:  # a stopped or failed request: its row holds the steps it reached, and its end
+            times = self._measure(time.monotonic())
+            record.total_ms = times["total_ms"]
+            if self._handed_at is not None:
+                record.wait_ms = times["wait_ms"]
+            if self._first_token_at is not None:
+                record.first_token_ms = times["first_token_ms"]
 
     async def _relay(self, stream: EngineStream) -> None:
         """Send 200 with the engine's first event, then each event as it comes. At the engine's end the usage chunk is
@@ -270,8 +276,8 @@ class Generation(Work):
 
     def _measure(self, end: float) -> dict[str, int]:
         """The measurements of section 11, in whole milliseconds from acceptance. A stream without any token measures
-        its first token when its finish arrived; for a request stopped earlier, the steps it did not reach end at
-        `end`."""
+        its first token when its finish arrived. A step not reached ends at `end` here, and `cleanup` keeps it out of
+        the row."""
         assert self.accepted_at is not None
         accepted = self.accepted_at
 
