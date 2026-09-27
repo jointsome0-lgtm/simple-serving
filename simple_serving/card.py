@@ -26,8 +26,8 @@ launcher's next start: costs may go on. The attempts go on too, but they bound n
 
 The logs are in `logs/` of the state directory, with one older file beside each. The launcher makes a log 0600 when it
 opens it; one that it moves aside keeps its mode. `card.jsonl` holds the launcher's rows and, of vLLM's output, only a
-few numbers and fixed categories of failure and warning. `gateway.jsonl` holds the gateway's rows that pass
-`gateway_row`.
+few numbers, fixed codes of its choices (`engine_choice`) and fixed categories of failure and warning. `gateway.jsonl`
+holds the gateway's rows that pass `gateway_row`.
 """
 
 from __future__ import annotations
@@ -103,6 +103,67 @@ FAILURES = (
 # where they do not, it takes the largest, which "will likely reduce accuracy" (modelopt.py in vLLM 0.30.0).
 WARNINGS = (("fused_scales_differ", ("scale differs across parallel layers",)),)
 GATEWAY_KEYS = log.FIELDS | {"time", "logger", "level"}
+
+# vLLM's choices of kernel, attention backend, runner, graphs and RAM copy, and the arguments a pass of the throughput
+# harness changes (docs/speed.md, item 1), in the wording of vLLM 0.30.0's source and provisional until the cheap card
+# checks each against real output. A line gives `engine_choice` rows, each a code built from these words and at most a
+# few numbers. A word outside them becomes `other`, so no row holds a value that vLLM printed.
+NVFP4_KERNELS = {  # vLLM's NVFP4 kernel classes, from .../kernels/linear/__init__.py
+    "MarlinNvFp4LinearKernel": "marlin", "HummingNvFp4LinearKernel": "humming",
+    "FlashInferCuteDslNvFp4W4A16LinearKernel": "flashinfer_cutedsl_w4a16",
+    "FlashInferCuteDslNvFp4LinearKernel": "flashinfer_cutedsl",
+    "FlashInferCutlassNvFp4LinearKernel": "flashinfer_cutlass",
+    "FlashInferTrtllmNvFp4LinearKernel": "flashinfer_trtllm", "FlashInferCudnnNvFp4LinearKernel": "flashinfer_cudnn",
+    "FlashInferB12xNvFp4LinearKernel": "flashinfer_b12x", "B12xNvFp4LinearKernel": "b12x",
+    "CutlassNvFp4LinearKernel": "cutlass", "FbgemmNvFp4LinearKernel": "fbgemm", "TorchNvFp4LinearKernel": "torch",
+    "EmulationNvFp4LinearKernel": "emulation",
+}
+LINEAR_QUANTS = frozenset({  # the keys of KernelConfig.linear_backend_per_quant
+    "nvfp4_w4a16", "nvfp4_w4a4", "fp8_block_w8a8", "fp8_w8a8", "int8_w8a8", "mixed_precision", "mxfp8", "mxfp4",
+    "mxfp6", "w8a16_fp8",
+})
+LINEAR_BACKENDS = frozenset({  # vllm/config/kernel.py's LinearBackend
+    "auto", "cutlass", "flashinfer_cutlass", "flashinfer_cutedsl", "flashinfer_trtllm", "flashinfer_cudnn",
+    "flashinfer_b12x", "b12x", "marlin", "humming", "triton", "deep_gemm", "torch", "aiter", "machete", "fbgemm",
+    "conch", "exllama", "emulation", "xpu", "xpu_woq",
+})
+ATTENTION_BACKENDS = frozenset({  # vllm/v1/attention/backends/registry.py's AttentionBackendEnum
+    "FLASH_ATTN", "FLASH_ATTN_DIFFKV", "TRITON_ATTN", "TRITON_ATTN_DIFFKV", "TRITON_FLASH_ATTN", "ROCM_ATTN",
+    "ROCM_AITER_MLA", "ROCM_AITER_TRITON_MLA", "ROCM_AITER_FA", "ROCM_AITER_MLA_SPARSE", "XPU_MLA_SPARSE", "TORCH_SDPA",
+    "FLASHINFER", "TRITON_FLASHINFER", "FLASHINFER_MLA", "TOKENSPEED_MLA", "FLASHINFER_MLA_SPARSE",
+    "FLASHINFER_MLA_SPARSE_SM120", "FLASHINFER_MLA_SPARSE_SM90", "TRITON_MLA", "CUTLASS_MLA", "FLASHMLA",
+    "FLASHMLA_SPARSE", "FLASHMLA_SPARSE_DSV4", "FLASHINFER_MLA_SPARSE_DSV4", "ROCM_FLASHMLA_SPARSE_DSV4",
+    "FLASHMLA_SPARSE_DSV41", "FLASHINFER_MLA_SPARSE_DSV41", "B12X", "FLASH_ATTN_MLA", "FLASH_ATTN_MLA_SPARSE",
+    "MINIMAX_M3_SPARSE", "CUTLASS_MSA", "TRITON_MSA", "NO_ATTENTION", "FLEX_ATTENTION", "HPC_ATTN",
+    "ROCM_AITER_UNIFIED_ATTN", "CPU_ATTN", "CPU_MLA", "AMX_MLA", "TURBOQUANT", "CUSTOM",
+})
+CACHE_KINDS = frozenset({  # vllm/v1/kv_cache_interface.py's KVCacheSpecKind, the keys of backend_per_kind
+    "full_attention", "mla_attention", "sliding_window", "sliding_window_mla", "mamba", "chunked_local_attention",
+    "sink_full_attention", "encoder_only_attention", "cross_attention", "unknown", "sparse",
+})
+CACHE_DTYPES = frozenset({  # vllm/config/cache.py's CacheDType
+    "auto", "float16", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc", "fp8_ds_mla", "nvfp4_ds_mla",
+    "turboquant_k8v4", "turboquant_4bit_nc", "turboquant_k3v4_nc", "turboquant_3bit_nc", "int4_per_token_head",
+    "int8_per_token_head", "fp8_per_token_head", "nvfp4", "nvfp4_4over6",
+})
+DECODE_PATHS = {"xqa": "xqa", "trtllm-gen": "trtllm_gen", "flashinfer-native": "native"}  # FlashInfer's decoding
+OFFLOADING_SPECS = {"CPUOffloadingSpec": "cpu", "TieringOffloadingSpec": "tiering"}  # vllm/v1/kv_offload/factory.py
+# The keys of `non-default args` kept as numbers, each with its code and the factor to an integer, and as fixed words.
+ARG_NUMBERS = {
+    "max_model_len": ("arg_max_model_len", 1), "max_num_seqs": ("arg_max_num_seqs", 1),
+    "max_num_batched_tokens": ("arg_max_num_batched_tokens", 1),
+    "gpu_memory_utilization": ("arg_gpu_memory_utilization_x1000", 1000), "watermark": ("arg_watermark_x1000", 1000),
+    "kv_offloading_size": ("arg_kv_offloading_mib", 1024),  # GiB in vLLM
+    "prefix_cache_retention_interval": ("arg_prefix_cache_retention_interval", 1),  # None is dense retention
+    "num_speculative_tokens": ("arg_num_speculative_tokens", 1),  # in --speculative-config's JSON
+}
+ARG_WORDS = {
+    "kv_cache_dtype": CACHE_DTYPES, "attention_backend": ATTENTION_BACKENDS,
+    "draft_sample_method": frozenset({"greedy", "probabilistic"}),
+    "rejection_sample_method": frozenset({"standard", "synthetic", "block"}),
+}
+ARG_FLAGS = ("num_speculative_tokens_per_batch_size", "synthetic_acceptance_rates")  # their presence only
+NUMBER = r"-?\d+(?:\.\d+)?"
 
 
 @dataclass(frozen=True)
@@ -392,6 +453,7 @@ class Pair:
         self.ready = asyncio.Event()
         self.asleep = False
         self.noted: set[str] = set()  # the categories logged so far, each once
+        self.choices: list[dict[str, Any]] = []  # the engine_choice rows so far, for the throughput harness's proof
 
     async def run(self, engine: Command, gateway: Command, deadline_s: float, ended: asyncio.Event) -> str:
         """Run until a signal, the exit of either process or the load deadline, whichever comes first, and return
@@ -427,13 +489,19 @@ class Pair:
         await asyncio.Future()
 
     def engine_line(self, line: bytes) -> None:
-        """A line of vLLM's output gives a few numbers, a category of failure or of warning, or nothing."""
+        """A line of vLLM's output gives a few numbers, codes of its choices, a category of failure or of warning, or
+        nothing."""
         text = line.decode(errors="replace")
         fields = {name: value for pattern in MEASUREMENTS if (found := pattern.search(text))
                   for name, value in found.groupdict().items()}  # vLLM prints some of them on one line
         if fields:
             log.row("engine_measure", **{name: round(float(value.replace(",", "")) * SCALE[name.split("_")[-1]])
                                          for name, value in fields.items()})
+            return
+        if chosen := engine_choices(text):
+            for code, numbers in chosen:
+                log.row("engine_choice", code=code, **numbers)
+                self.choices.append({"code": code, **numbers})
             return
         lowered = text.lower()
         for event, categories in (("engine_failure", FAILURES), ("engine_warning", WARNINGS)):
@@ -454,6 +522,64 @@ class Pair:
         if row.get("event") == "stop_failed":  # the gateway's own stop, once it has fallen asleep
             unconfirmed(self.state, row)
         self.asleep = self.asleep or row.get("event") == "sleep"
+
+
+def engine_choices(text: str) -> list[tuple[str, dict[str, int]]]:
+    """The choices a line of vLLM's output names, each as a code of fixed words and its numbers, in the order of
+    docs/speed.md's item 1."""
+    if found := re.search(r"Using (\w+) for NVFP4 GEMM", text):
+        return [(f"nvfp4_gemm_{NVFP4_KERNELS.get(found[1], 'other')}", {})]
+    if found := re.search(r"Applied linear backend override for '(\w+)': '(\w+)'", text):
+        return [(f"linear_override_{known(found[1], LINEAR_QUANTS)}_{known(found[2], LINEAR_BACKENDS)}", {})]
+    if "FA4 not available, forcing TRITON_ATTN backend" in text:  # Gemma 4's heads of 256 and 512
+        return [("attention_forced_triton_attn", {})]
+    if "Using FA4 for all layers" in text:
+        return [("attention_forced_fa4", {})]
+    if found := re.search(r"Using AttentionBackendEnum\.(\w+) backend\.", text):  # a backend the configuration set
+        return [(f"attention_selected_{known(found[1], ATTENTION_BACKENDS)}", {})]
+    if found := re.search(r"Using (\w+) attention backend out of potential backends", text):  # vLLM's own pick
+        return [(f"attention_chosen_{known(found[1], ATTENTION_BACKENDS)}", {})]
+    if found := re.search(r"FlashInfer XQA decode does not support head_dim=(\d+)", text):
+        return [("flashinfer_xqa_reverted", {"head_dim": int(found[1])})]
+    if found := re.search(r"FlashInfer resolved query dtypes: .*\bdecode_backend=([\w-]+)", text):
+        return [(f"flashinfer_decode_{DECODE_PATHS.get(found[1], 'other')}", {})]
+    if "Using V2 Model Runner" in text:
+        return [("model_runner_v2", {})]
+    if "using the V1 model runner instead" in text:
+        return [("model_runner_v1", {})]
+    if found := re.search(rf"Graph capturing finished in (\d+) secs, took ({NUMBER}) GiB", text):
+        return [("graphs_captured", {"capture_ms": int(found[1]) * 1000, "graph_mib": round(float(found[2]) * 1024)})]
+    if found := re.search(r"Creating offloading spec with name: (\w+)", text):
+        return [(f"kv_offloading_{OFFLOADING_SPECS.get(found[1], 'other')}", {})]
+    if (at := text.find("non-default args: ")) >= 0:
+        return non_default_args(text[at:])
+    return []
+
+
+def non_default_args(text: str) -> list[tuple[str, dict[str, int]]]:
+    """The keys of vLLM's `non-default args` that a pass may change: a Python dict whose own keys are quoted, and
+    whose configuration objects print their fields as `name=value`."""
+    chosen: list[tuple[str, dict[str, int]]] = []
+    for key, (code, factor) in ARG_NUMBERS.items():
+        if found := re.search(rf"'{key}': ({NUMBER}|None)\b", text):
+            chosen.append((f"{code}_none", {}) if found[1] == "None"
+                          else (code, {"value": round(float(found[1]) * factor)}))
+    for key, words in ARG_WORDS.items():
+        if found := re.search(rf"'{key}': '(\w+)'", text):
+            chosen.append((f"arg_{key}_{known(found[1], words)}", {}))
+    chosen += [(f"arg_{key}", {}) for key in ARG_FLAGS if f"'{key}': " in text]
+    for pairs in re.findall(r"(?:'linear_backend_per_quant': |\blinear_backend_per_quant=)\{([^{}]*)\}", text):
+        chosen += [(f"arg_linear_{known(quant, LINEAR_QUANTS)}_{known(backend, LINEAR_BACKENDS)}", {})
+                   for quant, backend in re.findall(r"'(\w+)': '(\w+)'", pairs)]
+    for pairs in re.findall(r"(?:'backend_per_kind': |\bbackend_per_kind=)\{([^{}]*)\}", text):
+        chosen += [(f"arg_attention_{known(kind, CACHE_KINDS)}_{known(backend, ATTENTION_BACKENDS)}", {})
+                   for kind, backend in re.findall(r"'(\w+)': (?:<AttentionBackendEnum\.)?'?(\w+)", pairs)]
+    return chosen
+
+
+def known(word: str, words: frozenset[str]) -> str:
+    """`word` lowercased when it is one of `words`, which may be written in either case, and `other` when not."""
+    return word.lower() if word in words or word.upper() in words else "other"
 
 
 def gateway_row(line: bytes) -> dict[str, Any] | None:

@@ -20,7 +20,8 @@ import sys
 import time
 import tomllib
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -282,6 +283,99 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
     assert len(rows(logged, "gateway_output")) == len(lines) - 2
     assert pair.ready.is_set() and not pair.asleep and card.marked(state) == card.STOP_UNCONFIRMED
     assert SECRET not in logged.getvalue()
+
+
+class AttentionBackendEnum(Enum):  # prints as vLLM's does
+    FLASHINFER = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
+    TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+
+
+@dataclass
+class KernelConfig:  # a stand-in with vLLM's name, whose repr prints its fields as vLLM's does
+    linear_backend_per_quant: dict[str, str] | None
+    note: str = SECRET
+
+
+@dataclass
+class AttentionConfig:
+    backend: AttentionBackendEnum | None
+    backend_per_kind: dict[str, AttentionBackendEnum]
+
+
+def vllm_line(source: str, message: str, *args: object) -> bytes:
+    """A line as vLLM 0.30.0 prints it: the process, the level, the time and the place, then its format string filled
+    with `args`."""
+    return f"(EngineCore pid=7) INFO 09-27 12:00:00 [{source}] {message % args}\n".encode()
+
+
+def test_the_engines_choices_leave_fixed_codes_and_numbers_only(state: Path, logged: io.StringIO) -> None:
+    """Each format string of docs/speed.md's item 1, verbatim from vLLM 0.30.0 and filled with synthetic values, gives
+    one engine_choice row per code, and a value that is not one of the fixed words becomes `other`."""
+    pair = card.Pair(state)
+    model = f"/workspace/simple-serving-card/models/{SECRET}"
+    arguments = {
+        "model_tag": model, "model": model, "served_model_name": [SECRET], "host": "127.0.0.1", "port": 8092,
+        "tokenizer": f"/workspace/{SECRET}/tokenizer", "max_model_len": 65536, "max_num_seqs": 8,
+        "max_num_batched_tokens": 512, "gpu_memory_utilization": 0.94, "kv_cache_dtype": "int4_per_token_head",
+        "prefix_cache_retention_interval": None, "watermark": 0.02, "kv_offloading_size": 12.0,
+        "attention_backend": "FLASHINFER", "enable_prefix_caching": True,
+        "kernel_config": KernelConfig({"nvfp4_w4a16": "humming"}),
+        "attention_config": AttentionConfig(None, {"sliding_window": AttentionBackendEnum.FLASHINFER}),
+        "speculative_config": {"method": "mtp", "model": f"/workspace/{SECRET}", "num_speculative_tokens": 4,
+                               "draft_sample_method": "probabilistic", "rejection_sample_method": "block",
+                               "num_speculative_tokens_per_batch_size": [(1, 4, 4), (5, 8, 2)]},
+    }
+    synthetic = {"speculative_config": {"method": "mtp", "num_speculative_tokens": 3,
+                                        "rejection_sample_method": "synthetic",
+                                        "synthetic_acceptance_rates": [0.78, 0.62, 0.49]},
+                 "prefix_cache_retention_interval": 0, "kv_cache_dtype": SECRET.replace("-", "_"),
+                 "kernel_config": KernelConfig({"nvfp4_w4a16": SECRET.replace("-", "_")})}
+    for line in (
+        vllm_line("__init__.py:1180", "Using %s for NVFP4 GEMM", "MarlinNvFp4LinearKernel"),
+        vllm_line("__init__.py:1136", "Using %s for NVFP4 GEMM", SECRET.replace("-", "_")),
+        vllm_line("__init__.py:245", "Applied linear backend override for %r: %r", "nvfp4_w4a16", "humming"),
+        vllm_line("config.py:252", "Gemma4 model has heterogeneous head dimensions %s. FA4 not available, forcing "
+                  "TRITON_ATTN backend.", {256, 512}),
+        vllm_line("cuda.py:478", "Using %s backend.", AttentionBackendEnum.TRITON_ATTN),
+        vllm_line("cuda.py:538", "Using %s attention backend out of potential backends: %s.", "FLASHINFER",
+                  "['TRITON_ATTN', 'FLASHINFER']"),
+        vllm_line("flashinfer.py:838", "FlashInfer XQA decode does not support head_dim=%d; reverting this KV-cache "
+                  "group to native FlashInfer decode.", 512),
+        vllm_line("flashinfer.py:909", "FlashInfer resolved query dtypes: prefill=%s, decode=%s, decode_backend=%s, "
+                  "kv_cache_dtype=%s, arch=%s", "torch.bfloat16", "torch.bfloat16", "xqa", "fp8_e4m3", "sm120"),
+        vllm_line("gpu_worker.py:441", "Using V2 Model Runner"),
+        vllm_line("vllm.py:717", "Model Runner V2 does not yet support %s; using the V1 model runner instead.",
+                  SECRET),
+        vllm_line("model_runner.py:1067", "Graph capturing finished in %.0f secs, took %.2f GiB", 12.4, 0.45),
+        vllm_line("factory.py:57", "Creating offloading spec with name: %s", "CPUOffloadingSpec"),
+        vllm_line("api_utils.py:286", "non-default args: %s", arguments),
+        vllm_line("api_utils.py:286", "non-default args: %s", synthetic),  # a second start's
+    ):
+        pair.engine_line(line)
+    found = rows(logged, "engine_choice")
+    assert found == [{"event": "engine_choice", **row} for row in pair.choices]
+    assert sorted(pair.choices, key=repr) == sorted([
+        {"code": "nvfp4_gemm_marlin"}, {"code": "nvfp4_gemm_other"}, {"code": "linear_override_nvfp4_w4a16_humming"},
+        {"code": "attention_forced_triton_attn"}, {"code": "attention_selected_triton_attn"},
+        {"code": "attention_chosen_flashinfer"}, {"code": "flashinfer_xqa_reverted", "head_dim": 512},
+        {"code": "flashinfer_decode_xqa"}, {"code": "model_runner_v2"}, {"code": "model_runner_v1"},
+        {"code": "graphs_captured", "capture_ms": 12000, "graph_mib": 461}, {"code": "kv_offloading_cpu"},
+        {"code": "arg_max_model_len", "value": 65536}, {"code": "arg_max_num_seqs", "value": 8},
+        {"code": "arg_max_num_batched_tokens", "value": 512},
+        {"code": "arg_gpu_memory_utilization_x1000", "value": 940}, {"code": "arg_watermark_x1000", "value": 20},
+        {"code": "arg_kv_offloading_mib", "value": 12288}, {"code": "arg_prefix_cache_retention_interval_none"},
+        {"code": "arg_num_speculative_tokens", "value": 4}, {"code": "arg_kv_cache_dtype_int4_per_token_head"},
+        {"code": "arg_attention_backend_flashinfer"}, {"code": "arg_draft_sample_method_probabilistic"},
+        {"code": "arg_rejection_sample_method_block"}, {"code": "arg_num_speculative_tokens_per_batch_size"},
+        {"code": "arg_linear_nvfp4_w4a16_humming"}, {"code": "arg_attention_sliding_window_flashinfer"},
+        {"code": "arg_prefix_cache_retention_interval", "value": 0}, {"code": "arg_num_speculative_tokens", "value": 3},
+        {"code": "arg_kv_cache_dtype_other"}, {"code": "arg_rejection_sample_method_synthetic"},
+        {"code": "arg_synthetic_acceptance_rates"}, {"code": "arg_linear_nvfp4_w4a16_other"},
+    ], key=repr)
+    assert all(re.fullmatch(r"[a-z0-9_]+", row["code"]) for row in found)
+    assert all(type(value) is int for row in pair.choices for name, value in row.items() if name != "code")
+    assert "secret" not in logged.getvalue() and "7f3a9c" not in logged.getvalue()  # SECRET, with - or _
+    assert not rows(logged, "engine_failure") and not rows(logged, "engine_measure")
 
 
 @pytest.mark.anyio

@@ -2,10 +2,10 @@
 
 Contract section 10: a row about a request may hold the time, route, key label, class, scope kind, status, error
 code, token counts, the measurements, whether the request was cancelled, and the finish reason. Rows about the service
-itself add its boot, status and ports, and the card's launcher adds exit codes and a few numbers from vLLM's output
-(`card.py`). A field outside `FIELDS` is dropped. Records of other libraries keep their logger, level and the class of
-an exception only, because their messages and tracebacks may quote a request. That includes uvicorn's own: its
-messages are mostly fixed texts, but nothing checks that each of them is.
+itself add its boot, status and ports, and the card's launcher adds exit codes, a few numbers from vLLM's output and
+fixed codes of its choices (`card.py`). A field outside `FIELDS` is dropped. Records of other libraries keep their
+logger, level and the class of an exception only, because their messages and tracebacks may quote a request. That
+includes uvicorn's own: its messages are mostly fixed texts, but nothing checks that each of them is.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ FIELDS = frozenset({
     "input_tokens", "output_tokens", "cached_tokens", "count_matches", "wait_ms", "first_token_ms", "total_ms",
     "exception", "boot_id", "service_status", "drain_generation", "context_tokens", "port", "reason",
     "process", "exit_code", "load_ms", "weights_mib", "weights_load_ms", "kv_cache_mib", "kv_cache_tokens",
-    "concurrency_x100",
+    "concurrency_x100", "value", "head_dim", "capture_ms", "graph_mib",
 })
 
 
