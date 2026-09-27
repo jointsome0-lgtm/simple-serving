@@ -26,6 +26,19 @@ measured on this card yet. Each item is a question for a rental, with the eviden
    from its log, against full graphs if they are not the default.
 4. **The drafter's count.** 3 was measured against none, and 2 and 4 were not. Its acceptance fell from 78 to 62 and
    49 per cent over the three positions.
+5. **A copy of the KV cache in RAM** (`KV_OFFLOADING_GIB`, off). The owner asked for it on 2026-09-27, so that a
+   reader who reads on the card while it is measured keeps their story warm. The cache on the GPU holds 104492
+   tokens, and four long stories at once do not fit in it: a story whose prefix was dropped reads all of it again,
+   30000 to 44000 tokens, 10 to 15 s of the card at the 3000 tokens a second simple-story-chat's throughput study
+   assumed. vLLM's native backend keeps the dropped blocks in a pinned buffer and loads them back over PCIe. By vLLM
+   0.30.0's source it stores what a later hit can use: every block of the global layers, 40 KiB a token, and of the
+   sliding layers only the windows at the prompt's end and at the shared prefix's end, about 412 MiB each. A story of
+   40000 tokens would then take about 2.5 GiB, and 12 GiB would keep four. That is an estimate, not a measurement.
+   Before turning it on, read the container's memory (`/sys/fs/cgroup/memory.max`, or `free -g` where that is `max`)
+   and the engine's resident memory in the reference run, and leave the engine that and a few GiB more. A buffer that
+   does not fit fails the engine at its start, and the launcher then stops the instance. It is measured on four long
+   stories interleaved, with and without it: the prompt tokens read again (`input_tokens` against `cached_tokens` in
+   the gateway's log) and each turn's first token.
 
 ## How to measure
 

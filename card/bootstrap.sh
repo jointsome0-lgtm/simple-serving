@@ -9,9 +9,9 @@
 # the key hashes in keys.json, and then runs card/onstart.sh for the first start. At every later start the rental's
 # own onstart runs it (README, "The card"): the preparation changes no onstart, which the platform may restore at a
 # start. A second run changes nothing that is in place, and no run prints a hash. Exit codes: 0 prepared and started;
-# 1 a download or a check failed; 3 a pin or a lock is missing, or MTP_SPECULATIVE_TOKENS is not a count; 4 no keys,
-# or not two different SHA-256 digests; 5 the card holds other keys, which stay. The last step is the launcher's
-# start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
+# 1 a download or a check failed; 3 a pin or a lock is missing, or MTP_SPECULATIVE_TOKENS or KV_OFFLOADING_GIB is not a
+# count; 4 no keys, or not two different SHA-256 digests; 5 the card holds other keys, which stay. The last step is the
+# launcher's start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
 # SIMPLE_SERVING_CARD_DIR and SIMPLE_SERVING_CARD_ROOT move the state and /root, for tests.
 set -euo pipefail
 umask 077
@@ -26,6 +26,7 @@ done
 for file in "${stamped[@]}"; do [[ -s $file ]] || exit 3; done
 # A count of drafted tokens, where bash would read a leading 0 as octal, and 0 alone for off.
 [[ ${MTP_SPECULATIVE_TOKENS:-} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3
+[[ ${KV_OFFLOADING_GIB:-} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3  # GiB for the KV cache's copy in RAM, the same way
 if [[ $MTP_SPECULATIVE_TOKENS != 0 ]]; then
   for pin in DRAFTER_REPO DRAFTER_REVISION DRAFTER_FILES; do [[ -n ${!pin:-} ]] || exit 3; done
 fi

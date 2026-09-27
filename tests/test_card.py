@@ -143,6 +143,14 @@ def test_multi_token_prediction_adds_the_drafter_to_vllm_and_the_pins_only_when_
         "drafter_revision": on.manifest["DRAFTER_REVISION"], "mtp_speculative_tokens": "3"}
 
 
+def test_the_kv_cache_copy_in_ram_is_off_by_default_and_reaches_vllm_and_the_pins_only_when_on(state: Path) -> None:
+    off, on = card_at(state), card_at(state, KV_OFFLOADING_GIB="12")
+    assert off.manifest["KV_OFFLOADING_GIB"] == "0"  # pinned RAM a card may lack, until a rental measures it
+    assert "--kv-offloading-size" not in off.engine().argv
+    assert on.engine().argv == [*off.engine().argv, "--kv-offloading-size", "12"]
+    assert card.pinned_versions(on.manifest) == card.pinned_versions(off.manifest) | {"kv_offloading_gib": "12"}
+
+
 FAILED_LOAD = ("Traceback (most recent call last):", f'  File "{SECRET}.py", line 1, in load',
                "x" * 3 * card.LINE_BYTES + SECRET, f"torch.OutOfMemoryError: CUDA out of memory. {SECRET}")
 WAITS = ((), None)  # a stand-in that prints nothing and waits to be ended

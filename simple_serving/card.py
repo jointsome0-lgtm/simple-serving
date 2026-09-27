@@ -146,7 +146,7 @@ class Card:
             # Sampling defaults from vLLM: the model's generation_config.json is pinned for its stop ids alone.
             "--generation-config", "vllm",
             "--disable-uvicorn-access-log", "--uvicorn-log-level", "warning",
-            *self.speculation(),
+            *self.speculation(), *self.offloading(),
         ], {name: value for name, value in os.environ.items() if name != "CONTAINER_API_KEY"} | ENGINE_ENV)
 
     def speculation(self) -> list[str]:
@@ -158,6 +158,12 @@ class Card:
         drafter = self.state / "drafters" / self.manifest["DRAFTER_REVISION"]
         return ["--speculative-config",
                 json.dumps({"method": "mtp", "model": str(drafter), "num_speculative_tokens": tokens})]
+
+    def offloading(self) -> list[str]:
+        """vLLM's argument for a copy of the KV cache in the card's RAM, a buffer of KV_OFFLOADING_GIB for its native
+        backend, and none while that is 0."""
+        gib = int(self.manifest["KV_OFFLOADING_GIB"])
+        return ["--kv-offloading-size", str(gib)] if gib else []
 
     def gateway(self) -> Command:
         return Command([str(self.state / "gateway/bin/python"), "-m", "simple_serving"],
@@ -196,12 +202,15 @@ class Card:
 
 def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
     """The engine's pins that the gateway shows the control key in /v1/state, beside its own (contract section 12).
-    With multi-token prediction on they name the drafter and its tokens too, so that a record says which it measured."""
+    With multi-token prediction on they name the drafter and its tokens too, and with the KV cache's copy in RAM its
+    size, so that a record says which it measured."""
     pins = {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
             "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
     if int(manifest["MTP_SPECULATIVE_TOKENS"]):
         pins |= {"drafter_revision": manifest["DRAFTER_REVISION"],
                  "mtp_speculative_tokens": manifest["MTP_SPECULATIVE_TOKENS"]}
+    if int(manifest["KV_OFFLOADING_GIB"]):
+        pins |= {"kv_offloading_gib": manifest["KV_OFFLOADING_GIB"]}
     return pins
 
 

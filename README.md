@@ -211,6 +211,10 @@ against 57 to 67 without the drafter, and vLLM accepted 21718 of 34343 drafted t
 `auto` (bfloat16) cache does not fit at this context: its 7281 MiB hold about 63000 tokens, the engine exits with
 `kv_cache_too_small`, and the launcher gives up and stops the instance at once.
 
+`KV_OFFLOADING_GIB` in the manifest gives vLLM a copy of the KV cache in the card's RAM, and it is 0, off, until a
+rental measures it ([docs/speed.md](docs/speed.md), item 5). It is switched as the drafter is, by the preparation
+again and a new start, and `/v1/state` then names its size among the versions.
+
 What else might make the card faster, not measured yet, is in [docs/speed.md](docs/speed.md).
 
 At every later start of the container the rental's own onstart starts the service. Its last line runs the service's
