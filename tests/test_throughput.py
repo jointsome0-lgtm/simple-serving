@@ -21,7 +21,18 @@ import pytest
 
 from simple_serving import bot_schemas, card, policy
 from simple_serving.fake_engine import Script
-from simple_serving.throughput import identity, launcher, metrics, microbench, overlap, runner, sweep, workloads
+from simple_serving.throughput import (
+    cli,
+    identity,
+    launcher,
+    metrics,
+    microbench,
+    overlap,
+    report,
+    runner,
+    sweep,
+    workloads,
+)
 from simple_serving.validation import check_chat
 
 from . import support
@@ -514,3 +525,38 @@ def test_the_microbenchmarks_plan_the_31bs_shapes_without_torch(capsys: pytest.C
         microbench.check({"kind": "gemm", "shapes": [{"name": "odd", "n": 24, "k": 20, "parts": [24]}], "rows": [1]})
     with pytest.raises(SystemExit):
         microbench.main(["gemm", "--kernels", "cutlass", "--dry-run"])
+
+
+# The result, its report and the commands.
+
+def test_a_result_holds_counts_times_and_fixed_words_only(tmp_path: Path) -> None:
+    result = {"harness": report.VERSION, "change": "synthetic=0.8,0.6", "timing_only": True, "outcome": "ready",
+              "load_s": 201.5, "started": "2026-09-27T06:00:00Z", "versions": {"model_revision": "24ac337e"},
+              "proof": {"ok": True, "missing": [], "unexpected": [], "codes": ["arg_max_num_seqs"]},
+              "sweep": [{"cell": "shared-4000-at1", "held": True, "exit_code": 0, "acceptance": [0.8, 0.6],
+                         "bench": {"output_throughput": 101.5, "median_tpot_ms": 9.5}},
+                        {"cell": "shared-4000-at2", "skipped": "cache"}], "flagged": 0}
+    path = report.write(tmp_path, result)
+    assert path.stat().st_mode & 0o777 == 0o600 and report.read(path) == result
+    lines = report.text(result).splitlines()
+    assert lines[0] == "change synthetic=0.8,0.6: ready after 201.5 s, timing only"
+    assert "acceptance 0.8,0.6" in lines[2] and "skipped" in lines[3]
+    for leak in ({"outcomes": [{"text": f"{SECRET} and more words"}]}, {f"{SECRET} key": 1}, {"tokens": b"\x00"},
+                 {"identity": {"first": list(range(100))}}):
+        with pytest.raises(report.ResultError) as refused:
+            report.write(tmp_path / "other", result | leak)
+        assert SECRET not in str(refused.value)
+    assert not (tmp_path / "other").exists()
+
+
+@pytest.mark.anyio
+async def test_a_timing_only_change_runs_no_workload_and_a_workload_needs_the_pack(state: Path) -> None:
+    base = card_at(state)
+    for options in (cli.Options(change="synthetic=0.5", workloads=("turns",), pack=state),
+                    cli.Options(change="reference", identity="reference")):
+        with pytest.raises(cli.RunError):
+            await cli.run(base, options)
+    assert not (state / cli.RUNS).exists()
+    argv = cli.microbench_argv(base, "gemm", "marlin")
+    assert argv[0] == str(state / "vllm/bin/python") and argv[2:] == ["gemm", "--kernels", "marlin"]
+

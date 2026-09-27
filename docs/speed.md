@@ -91,6 +91,12 @@ names a pin.
      launcher, the workloads, the identity set and the microbenchmarks of the runbook.
    - *Took effect.* On a dry run against the fake engine (`simple_serving/fake_engine.py`), vLLM's format strings filled
      with synthetic values give one row per code and no value; on the cheap card the real lines give the same rows.
+   - *Commands* (`simple_serving/throughput/`). `python -m simple_serving.throughput dry-run` runs all of it here in
+     about 20 s, against the fake engine behind a stand-in `vllm`, with a reader's requests beside the reference, and
+     ends `dry run: ok: ...`. On the card, from `/workspace/simple-serving` with the gateway venv's Python: `run
+     --change NAME[=VALUE]` with `--pack`, `--workloads`, `--at`, `--identity reference|change` or `--sweep` writes one
+     `result.json` of counts, times and fixed words and prints its report, `report RESULT` prints it again, and
+     `microbench gemm|attention` runs the runbook's steps 2 and 3 (`--dry-run` prints the plan without a GPU).
    - *Quality.* Identical: the engine does not change.
    - *Gain.* None by itself; every item below is judged by it.
 
