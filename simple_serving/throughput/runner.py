@@ -118,7 +118,7 @@ async def run_pass(client: httpx.AsyncClient, target: Target, lanes: Sequence[Se
     before = await metrics.read(client, target.engine)
     pending, outcomes = list(enumerate(lanes)), []
     offsets = [sum(len(lane) for lane in lanes[:index]) for index in range(len(lanes))]
-    start = time.monotonic()
+    start, began = time.monotonic(), time.time()
 
     async def worker() -> None:
         while pending:
@@ -133,11 +133,11 @@ async def run_pass(client: httpx.AsyncClient, target: Target, lanes: Sequence[Se
 
     async with metrics.Sampler(client, target.engine, sample_s) as sampler:
         await asyncio.gather(*(worker() for _ in range(max(1, min(at, len(lanes))))))
-    elapsed_ms = ms(time.monotonic() - start)
+    elapsed_ms, window = ms(time.monotonic() - start), [round(began, 3), round(time.time(), 3)]
     after = await metrics.read(client, target.engine)
     moved = metrics.delta(before, after)
     outcomes.sort(key=lambda outcome: (outcome.started_ms, outcome.lane, outcome.turn))
-    return {"at": at, "lanes": len(lanes), **summary(outcomes, elapsed_ms),
+    return {"at": at, "lanes": len(lanes), "window": window, **summary(outcomes, elapsed_ms),
             "metrics": moved, "acceptance": metrics.acceptance(moved), "peaks": sampler.peaks,
             "samples": sampler.samples, "outcomes": [asdict(outcome) for outcome in outcomes]}
 

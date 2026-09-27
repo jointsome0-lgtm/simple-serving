@@ -11,6 +11,7 @@ import itertools
 import json
 import signal
 import socket
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ import pytest
 
 from simple_serving import bot_schemas, card, policy
 from simple_serving.fake_engine import Script
-from simple_serving.throughput import identity, launcher, metrics, runner, workloads
+from simple_serving.throughput import identity, launcher, metrics, overlap, runner, workloads
 from simple_serving.validation import check_chat
 
 from . import support
@@ -326,6 +327,7 @@ async def test_a_pass_counts_each_request_runs_them_at_once_and_keeps_numbers_on
     assert result["metrics"]["generation_tokens"] == 4 * 13 and result["metrics"]["prompt_tokens_cached"] == 64
     assert result["peaks"]["num_requests_running"] >= 1 and result["samples"] >= 1
     assert result["first_token_ms"]["median"] >= 50 and result["output_tokens_per_s"] > 0
+    assert 0 < result["window"][1] - result["window"][0] < 10  # epoch seconds, for the reader-overlap flag
     assert all(outcome["counted"] == outcome["input_tokens"] for outcome in result["outcomes"])
     assert SECRET not in json.dumps(result)
 
@@ -383,3 +385,28 @@ async def test_the_identity_set_runs_on_the_engine_and_leaves_digests_only(tmp_p
     assert kept["tokens"] == [80] * 16 and all(len(digests) == 5 for digests in kept["digests"])
     assert set(reference) == set(change) == {"side", "at", "block", "same", "of", "failed", "first_difference",
                                              "visible"}  # counts, positions and fixed words
+
+
+# The reader-overlap flag.
+
+def test_a_pass_that_overlapped_a_readers_request_is_flagged(tmp_path: Path) -> None:
+    def row(at: float, cls: str, **fields: Any) -> str:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(at)) + f".{int(at % 1 * 1000):03d}Z"
+        return json.dumps({"time": stamp, "event": "request", "route": "/v1/chat/completions", "class": cls,
+                           "scope": "reader", **fields})
+
+    t = 1_790_000_000.0
+    (tmp_path / "gateway.jsonl.1").write_text(row(t + 5, "reader", total_ms=2000) + "\n")  # within the first pass
+    (tmp_path / "gateway.jsonl").write_text("\n".join([
+        row(t + 130, "reader", total_ms=40_000),  # began before the second pass ended
+        row(t + 250, "internal", total_ms=9000),  # the harness's own
+        row(t + 400, "reader"),  # a refusal, which has no duration: after every pass
+        f"Traceback {SECRET}", json.dumps({"event": "request", "class": "reader", "note": SECRET}),
+    ]) + "\n")
+    requests = overlap.reader_requests(tmp_path)
+    assert requests == [(t + 3, t + 5), (t + 90, t + 130), (t + 400, t + 400)]
+    passes: list[dict[str, Any]] = [{"window": [t, t + 60]}, {"window": [t + 61, t + 100]},
+                                    {"window": [t + 200, t + 300]}]
+    assert overlap.flag(passes, requests) == 2
+    assert [(entry["reader_overlap"], entry["reader_requests"]) for entry in passes] == [
+        (True, 1), (True, 1), (False, 0)]
