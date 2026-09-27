@@ -454,6 +454,7 @@ class Pair:
         self.asleep = False
         self.noted: set[str] = set()  # the categories logged so far, each once
         self.choices: list[dict[str, Any]] = []  # the engine_choice rows so far, for the throughput harness's proof
+        self.measured: dict[str, int] = {}  # the engine_measure numbers, the latest of each, for the harness too
 
     async def run(self, engine: Command, gateway: Command, deadline_s: float, ended: asyncio.Event) -> str:
         """Run until a signal, the exit of either process or the load deadline, whichever comes first, and return
@@ -495,8 +496,10 @@ class Pair:
         fields = {name: value for pattern in MEASUREMENTS if (found := pattern.search(text))
                   for name, value in found.groupdict().items()}  # vLLM prints some of them on one line
         if fields:
-            log.row("engine_measure", **{name: round(float(value.replace(",", "")) * SCALE[name.split("_")[-1]])
-                                         for name, value in fields.items()})
+            numbers = {name: round(float(value.replace(",", "")) * SCALE[name.split("_")[-1]])
+                       for name, value in fields.items()}
+            log.row("engine_measure", **numbers)
+            self.measured.update(numbers)
             return
         if chosen := engine_choices(text):
             for code, numbers in chosen:

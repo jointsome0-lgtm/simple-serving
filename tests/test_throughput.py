@@ -5,7 +5,34 @@ and fixed words only."""
 
 from __future__ import annotations
 
-from simple_serving.throughput import metrics
+import hashlib
+import io
+import json
+import signal
+import socket
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from simple_serving import card
+from simple_serving.throughput import launcher, metrics
+
+from .support import until
+from .test_card import (
+    CLIENT,
+    CONTROL,
+    CREDENTIAL,
+    ENGINE,
+    GATEWAY,
+    READY,
+    card_at,
+    exits,
+    prepared,
+    ran,
+    stand_in,
+    vllm_line,
+)
 
 SECRET = "synthetic-secret-7f3a9c"  # stands in for a prompt or an output, which nothing the harness writes may hold
 ALIAS = "gemma-4-31b-heretic-nvfp4"
@@ -68,3 +95,144 @@ def test_metrics_keep_the_named_counters_and_gauges_as_integers_and_no_other_val
         sampler.take(metrics.gauges(metrics.parse(canned_metrics(running=running))))
     assert sampler.peaks["num_requests_running"] == 4 and sampler.samples == 3
     assert metrics.parse("") == {} and metrics.acceptance({}) == []
+
+
+# The A/B launcher.
+
+@pytest.fixture(autouse=True)
+def no_vast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing the harness starts may reach Vast: every stop that is not a fake fails the test."""
+    async def refuse(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("the harness tried to reach Vast")
+
+    monkeypatch.setattr("simple_serving.vast.stop", refuse)
+
+
+@pytest.fixture
+def state(tmp_path: Path) -> Path:
+    (tmp_path / "state/logs").mkdir(parents=True)
+    (tmp_path / "state/keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL}))
+    return tmp_path / "state"
+
+
+def test_each_change_is_one_edit_of_the_cards_own_command_and_manifest_env_stays(state: Path) -> None:
+    base = card_at(state)
+    manifest_file = card.CODE / "card/manifest.env"
+    before = manifest_file.read_bytes()
+    reference = launcher.plan_for(base, launcher.parse_change("reference"))
+    assert reference.engine.argv == base.engine().argv and not reference.timing_only
+    assert set(reference.expect) >= {("arg_num_speculative_tokens", 3), ("arg_kv_cache_dtype_fp8", None),
+                                     ("arg_max_num_batched_tokens", 1024)}
+    assert reference.absent == ["kv_offloading_cpu"]
+
+    def extra(change: str) -> list[str]:
+        argv = launcher.plan_for(base, launcher.parse_change(change)).engine.argv
+        return [part for part in argv if part not in reference.engine.argv]
+
+    assert extra("linear=humming") == ["--kernel-config", '{"linear_backend_per_quant": {"nvfp4_w4a16": "humming"}}']
+    assert extra("retention=dense") == ["--prefix-cache-retention-interval", "None"]
+    assert extra("watermark=0.02") == ["--watermark", "0.02"]
+    assert extra("kv-offloading=12") == ["--kv-offloading-size", "12"]
+    assert extra("gpu-memory=0.95") == ["0.95"] and extra("batched-tokens=512") == ["512"]
+    assert extra("kv-cache=int4_per_token_head") == ["int4_per_token_head"]
+    assert extra("attention=flashinfer") == ["--attention-backend", "FLASHINFER"]
+    speculation = json.loads(extra("verify=block")[0])
+    assert speculation["rejection_sample_method"] == "block" and speculation["num_speculative_tokens"] == 3
+    assert json.loads(extra("per-batch=1-4:3,5-8:2")[0])["num_speculative_tokens_per_batch_size"] == [
+        [1, 4, 3], [5, 8, 2]]
+    assert "--speculative-config" not in launcher.plan_for(base, launcher.parse_change("mtp=0")).engine.argv
+    mtp4 = launcher.plan_for(base, launcher.parse_change("mtp=4"))
+    assert ("arg_num_speculative_tokens", 4) in mtp4.expect and mtp4.manifest["MTP_SPECULATIVE_TOKENS"] == "4"
+    synthetic = launcher.plan_for(base, launcher.parse_change("synthetic=0.78,0.62,0.49"))
+    assert synthetic.timing_only and json.loads(synthetic.engine.argv[-1])["synthetic_acceptance_rates"] == [
+        0.78, 0.62, 0.49]
+    sliding = launcher.plan_for(base, launcher.parse_change("attention-sliding=flashinfer"))
+    assert sliding.engine.env["VLLM_HAS_FLASHINFER_CUBIN"] == "1"
+    for wrong in ("mtp=9", "mtp=3", "linear=cutlass", "synthetic=0.5,0.6,0.4", "synthetic=0.9,0.8", "watermark=2",
+                  "gpu-memory=0.92", "per-batch=4-1:3", f"kv-cache={SECRET}", "reference=1", "nothing"):
+        with pytest.raises(launcher.ChangeError) as refused:
+            launcher.plan_for(base, launcher.parse_change(wrong))
+        assert SECRET not in str(refused.value)
+    assert manifest_file.read_bytes() == before
+
+
+def test_the_proof_needs_every_expected_code_and_none_of_the_absent_ones(state: Path) -> None:
+    plan = launcher.plan_for(card_at(state), launcher.parse_change("linear=humming"))
+    shown: list[dict[str, Any]] = [
+        {"code": "arg_max_model_len", "value": 65536}, {"code": "arg_max_num_seqs", "value": 8},
+        {"code": "arg_max_num_batched_tokens", "value": 1024}, {"code": "arg_kv_cache_dtype_fp8"},
+        {"code": "arg_num_speculative_tokens", "value": 3}, {"code": "linear_override_nvfp4_w4a16_humming"},
+        {"code": "arg_linear_nvfp4_w4a16_humming"}, {"code": "nvfp4_gemm_humming"}]
+    assert launcher.proof(plan, shown)["ok"]
+    marlin = [row for row in shown if row["code"] != "nvfp4_gemm_humming"] + [{"code": "nvfp4_gemm_marlin"}]
+    assert launcher.proof(plan, marlin)["missing"] == ["nvfp4_gemm_humming"]
+    three = [row for row in shown if row["code"] != "arg_num_speculative_tokens"]
+    assert launcher.proof(plan, [*three, {"code": "arg_num_speculative_tokens", "value": 4}])["missing"] == [
+        "arg_num_speculative_tokens=3"]
+    assert launcher.proof(plan, [*shown, {"code": "kv_offloading_cpu"}])["unexpected"] == ["kv_offloading_cpu"]
+
+
+def test_the_harness_gateway_has_its_own_key_the_rental_limits_and_no_credential(state: Path) -> None:
+    base = card_at(state)
+    plan = launcher.plan_for(base, launcher.parse_change("reference"))
+    config = launcher.harness_config(base, plan, launcher.key_digest("synthetic-harness-key"))
+    assert [key["label"] for key in config["keys"]] == ["client", "control", "harness"]
+    harness = config["keys"][-1]
+    assert harness == {"sha256": hashlib.sha256(b"synthetic-harness-key").hexdigest(), "label": "harness",
+                       "classes": ["internal"], "default": "internal", "scopes": True, "control": False}
+    assert config["limits"]["internal"]["active"] == 8 and config["limits"]["shared"]["active"] == 8
+    assert card.PROVISIONAL["limits"]["internal"]["active"] == 2  # the card's own limits are left as they were
+    assert config["versions"]["harness_change"] == "reference" and config["idle_timeout_s"] == launcher.IDLE_S
+    timing = launcher.plan_for(base, launcher.parse_change("synthetic=0.8,0.6,0.5"))
+    assert [key["label"] for key in launcher.harness_config(base, timing, "0" * 64)["keys"]] == ["control", "harness"]
+    gateway = launcher.harness_gateway(base, state / "run/gateway.json")
+    assert base.gateway().env["CONTAINER_API_KEY"] == CREDENTIAL["CONTAINER_API_KEY"]
+    assert not {"CONTAINER_API_KEY", "CONTAINER_ID"} & set(gateway.env)
+    assert gateway.env["SIMPLE_SERVING_CONFIG"] == str(state / "run/gateway.json")
+
+
+@pytest.mark.anyio
+async def test_a_start_that_fails_ends_the_pair_and_leaves_the_instance_running(state: Path,
+                                                                                logged: io.StringIO) -> None:
+    base = card_at(state)
+    run_dir = state / "throughput/run"
+    run_dir.mkdir(parents=True)
+    stand_in(state / ENGINE, "ERROR 09-27 12:00:00 [core.py:710] RuntimeError: CUDA error: an illegal memory access",
+             exit_code=1)
+    stand_in(state / GATEWAY)
+    plan = launcher.plan_for(base, launcher.parse_change("mtp=4"))
+    async with launcher.started(base, plan, run_dir, "synthetic-harness-key") as start:
+        assert start.outcome == "engine_exit" and not start.pair.ready.is_set()
+    assert "cuda_error" in start.pair.noted and not (state / "given-up").exists()
+    assert (run_dir / "gateway.json").stat().st_mode & 0o777 == 0o600
+    assert not {"CONTAINER_API_KEY", "CONTAINER_ID"} & set(ran(state / GATEWAY)["env"])
+
+
+@pytest.mark.anyio
+async def test_a_start_that_is_ready_shows_its_change_took_effect(state: Path, logged: io.StringIO) -> None:
+    base = card_at(state)
+    run_dir = state / "throughput/run"
+    run_dir.mkdir(parents=True)
+    arguments = {"max_model_len": 65536, "max_num_seqs": 8, "max_num_batched_tokens": 1024, "kv_cache_dtype": "fp8",
+                 "speculative_config": {"method": "mtp", "num_speculative_tokens": 3},
+                 "prefix_cache_retention_interval": None}
+    stand_in(state / ENGINE, vllm_line("api_utils.py:286", "non-default args: %s", arguments).decode().rstrip())
+    stand_in(state / GATEWAY, READY)
+    plan = launcher.plan_for(base, launcher.parse_change("retention=dense"))
+    async with launcher.started(base, plan, run_dir, "synthetic-harness-key") as start:
+        assert start.outcome == "ready"
+        await until(lambda: bool(start.pair.choices))  # the stand-ins print at once; vLLM long before it is ready
+        assert launcher.proof(plan, start.pair.choices)["ok"]
+    assert exits(logged) == {"gateway": -signal.SIGTERM, "engine": -signal.SIGTERM}
+    written = json.loads((run_dir / "gateway.json").read_text())
+    assert "synthetic-harness-key" not in json.dumps(written)
+
+
+def test_the_harness_takes_over_only_a_prepared_card_whose_pair_has_ended(tmp_path: Path) -> None:
+    base = prepared(tmp_path)
+    assert launcher.take_over(base, pause=lambda seconds: None) == 0  # no launcher runs: nothing to end
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", base.ports["engine"]))
+        assert launcher.take_over(base, pause=lambda seconds: None) == card.PORT_TAKEN
+    (base.state / "prepared").write_text("0" * 64 + "\n")
+    assert launcher.take_over(base, pause=lambda seconds: None) == card.NOT_PREPARED
