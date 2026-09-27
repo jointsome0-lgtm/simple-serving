@@ -110,7 +110,7 @@ def summary(config: Config, engine_port: int, delays: Delays) -> str:
     keys = []
     for key in config.keys:
         rights = [cls for cls in CLASSES if cls in key.classes]
-        rights += ["scopes"] * key.scopes + ["control"] * key.control
+        rights += ["scopes"] * key.scopes + ["control"] * key.control + ["metrics"] * key.metrics
         keys.append(f"{key.label} ({', '.join(rights)})")
     return "\n".join([
         "simple-serving dev launcher: ready",

@@ -127,6 +127,7 @@ class Work:
         finally:
             if not task.done():  # the server shuts down and cancelled this handler
                 self.stop("shutdown")
+                self.exchange.record.cancelled = True  # no terminal message goes out: the row and the metrics say so
                 await asyncio.wait({task})
             await self.cleanup()
         return task

@@ -8,6 +8,8 @@ nothing awake.
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 from typing import Any
 
 import httpx
@@ -296,6 +298,21 @@ async def test_a_drain_stops_the_waiting_and_refuses_the_new_while_our_active_wo
         assert ttft(before, after) == {of_class("agent"): 1}
         assert after["simple_serving_status", (("status", "drained"),)] == 1
         assert after["simple_serving_drain_generation", ()] == 1
+
+
+async def test_a_request_cut_by_the_gateways_shutdown_is_unavailable_and_its_row_says_cancelled(
+        logged: io.StringIO) -> None:
+    async with running(service_with(keys=KEYS)) as stack:
+        stack.fake.script = by_prompt({"held": Script(hold_first=asyncio.Event())})
+        held = await RawClient.post(stack.public, GENERATION, user_body("held"), headers=reader())
+        await reached(stack, "held")
+        service = stack.service
+    # The server's grace ran out and it cancelled the handler: no terminal message went out.
+    assert {series: value for series, value in service.metrics.requests.items() if value} == {
+        (GENERATION, "reader", "unavailable", "none"): 1}
+    rows = [json.loads(line) for line in logged.getvalue().splitlines()]
+    assert [row["cancelled"] for row in rows if row.get("event") == "request" and row["route"] == GENERATION] == [True]
+    await held.leave()
 
 
 # A scrape and its rights.
