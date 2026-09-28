@@ -347,13 +347,13 @@ To set it up, once:
    into that file, open to its owner only. A configuration that holds the client key and the control key alone gets the
    metrics key first, and the card takes it at its next preparation ("The card" above). Until then that card answers
    its metrics to the control key alone, and Prometheus's scrapes get 401.
-2. Pin the images. `monitoring/compose.yaml` names `prom/prometheus:v3.5.0` and `grafana/grafana:12.1.0`, each with a
-   placeholder digest of 64 zeros: it was written without network access, and neither the tags nor the digests were
-   checked. A zero digest makes every pull fail, so nothing unpinned runs. Choose the versions and write in the digest
-   that the registry gives for each tag, for instance from
-   `docker buildx imagetools inspect docker.io/prom/prometheus:v3.5.0`.
-3. `mkdir -p monitoring/data/prometheus monitoring/data/grafana` for the history, which git ignores. Prometheus keeps
-   ten years or 20 GB of it, whichever comes first.
+2. The images are pinned: `monitoring/compose.yaml` names `prom/prometheus:v3.13.3` and `grafana/grafana:12.4.11`,
+   each with the digest of its tag's index as the registry gave it on 2026-09-29, Prometheus's long-term release of
+   2026 and the last minor of Grafana 12, which Grafana still patched then. A new version takes the digest that the
+   registry gives for its tag, for instance from `docker buildx imagetools inspect docker.io/prom/prometheus:v3.13.3`.
+3. `mkdir -p monitoring/data/prometheus monitoring/data/grafana` for the history, which git ignores, or the same two
+   directories in the one that `MONITORING_DATA` names, which then outlives the checkout. Prometheus keeps ten years
+   or 20 GB of it, whichever comes first.
 
 Then, from `monitoring/`, with Docker as the owner's own user:
 
@@ -362,11 +362,13 @@ METRICS_KEY_FILE=$HOME/.config/simple-serving/metrics.key MONITORING_USER="$(id 
 ```
 
 With rootless Podman, whose root in a container is the owner, `MONITORING_USER=0:0` and `podman compose up -d`, with
-the same key file. Both containers use the host's network, since the tunnel listens on the host's loopback alone, and
-listen on 127.0.0.1 alone: Prometheus at http://127.0.0.1:9090, with its alerts at http://127.0.0.1:9090/alerts, and
-Grafana at http://127.0.0.1:3000. Grafana shows the dashboards to a viewer without a login; editing needs its admin
-login, admin and admin until the first login changes it. The datasource and the dashboards are provisioned read-only
-from `monitoring/grafana/`, so a change is made in the files. `docker compose down` stops both and keeps the history.
+the same key file; with docker-compose as its provider, `podman compose` needs Podman's socket, which
+`systemctl --user start podman.socket` opens. Both containers use the host's network, since the tunnel listens on the
+host's loopback alone, and listen on 127.0.0.1 alone: Prometheus at http://127.0.0.1:9090, with its alerts at
+http://127.0.0.1:9090/alerts, and Grafana at http://127.0.0.1:3000. Grafana shows the dashboards to a viewer without a
+login; editing needs its admin login, admin and admin until the first login changes it. The datasource and the
+dashboards are provisioned read-only from `monitoring/grafana/`, so a change is made in the files.
+`docker compose down` stops both and keeps the history.
 
 ### The overview
 
