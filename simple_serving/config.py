@@ -32,6 +32,9 @@ IDLE_TIMEOUT_S = 780  # without work of ours, before the service falls asleep (c
 # prediction, their count (card.pinned_versions). The gateway takes it as the sign that vLLM runs speculative decoding,
 # and then refuses a min_p that vLLM would refuse (service.py).
 DRAFTED_TOKENS = "mtp_speculative_tokens"
+# And the entry, "1", that it writes while vLLM loads Gemma 4's vision tower (card.pinned_versions). Only then may a
+# user message hold a picture (validation.py), and only then may a key have the right to send one.
+VISION = "vision"
 # The provisional values of contract section 7, which the dev launcher and the card use until the card has measured
 # its own (section 15, step 4).
 PROVISIONAL: dict[str, Any] = {
@@ -62,6 +65,7 @@ class Key:
     default: str | None
     scopes: bool  # may name cache scopes
     control: bool  # may call the control routes
+    vision: bool = False  # may send a picture, while the engine takes pictures
 
     @property
     def outside(self) -> bool:
@@ -105,6 +109,7 @@ class Config:
     health_interval_s: float
     versions: Mapping[str, str]
     speculative: bool  # vLLM drafts tokens: `versions` names their count
+    vision: bool = False  # vLLM takes pictures: `versions` names its vision tower
 
 
 def load(path: str) -> Config:
@@ -162,6 +167,11 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
     drafted = versions.get(DRAFTED_TOKENS)
     if drafted is not None and not re.fullmatch(r"[1-9][0-9]*", drafted):
         raise ConfigError(f"versions.{DRAFTED_TOKENS} must be a count above 0, or left out while nothing drafts")
+    vision = versions.get(VISION)
+    if vision is not None and vision != "1":
+        raise ConfigError(f"versions.{VISION} must be 1, or left out while the engine takes no pictures")
+    if vision is None and any(key.vision for key in keys):
+        raise ConfigError(f"a key may have the right vision only while versions.{VISION} is 1")
     return Config(
         alias=_string(data.get("alias"), "alias"),
         engine_url=engine_url.rstrip("/"),
@@ -184,11 +194,12 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
         health_interval_s=_seconds(data.get("health_interval_s", 5), "health_interval_s"),
         versions=MappingProxyType(dict(versions)),
         speculative=drafted is not None,
+        vision=vision is not None,
     )
 
 
 def _key(digest: bytes, entry: Any, path: str) -> Key:
-    entry = _fields(entry, path, {"label", "classes", "default", "scopes", "control"})
+    entry = _fields(entry, path, {"label", "classes", "default", "scopes", "control", "vision"})
     classes = entry.get("classes")
     if not isinstance(classes, list) or len(set(classes)) != len(classes) or not set(classes) <= set(CLASSES):
         raise ConfigError(f"{path}.classes must list distinct classes")
@@ -197,7 +208,8 @@ def _key(digest: bytes, entry: Any, path: str) -> Key:
         raise ConfigError(f"{path}.default must be one of the key's classes, or null")
     key = Key(digest=digest, label=_string(entry.get("label"), f"{path}.label"), classes=frozenset(classes),
               default=default, scopes=_boolean(entry.get("scopes"), f"{path}.scopes"),
-              control=_boolean(entry.get("control"), f"{path}.control"))
+              control=_boolean(entry.get("control"), f"{path}.control"),
+              vision=_boolean(entry.get("vision", False), f"{path}.vision"))
     # Contract section 2: outside keys use `external` only, and each is its own cache scope.
     if key.outside and (key.classes != {"external"} or key.scopes):
         raise ConfigError(f"{path}: an outside key may use the class external only and may not name scopes")

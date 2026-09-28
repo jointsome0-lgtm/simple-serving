@@ -4,12 +4,13 @@ request or of its output, on every error path.
 The gateway runs as its own process, configured from a file with hashed keys, as in production. Every request carries
 a marker: in its messages, its schema, its field names and values, its path and query, its headers and its key. The
 fake engine echoes the prompt in its errors, as engines may. Afterwards everything the process wrote is searched for
-the marker and for the keys.
+the marker and for the keys. A second test does the same for a picture, and searches for its URL and its digests too.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -27,6 +28,7 @@ import pytest
 from simple_serving.config import Listener
 from simple_serving.fake_engine import FakeEngine, Script
 from simple_serving.server import Servers, bind
+from simple_serving.validation import PICTURE_BYTES
 
 from .support import (
     ALIAS,
@@ -42,6 +44,9 @@ from .support import (
     RawClient,
     call,
     chat_body,
+    picture,
+    picture_body,
+    picture_url,
     prompt_of,
     reader,
     service_with,
@@ -107,14 +112,16 @@ class Process:
 
 
 @asynccontextmanager
-async def gateway(tmp_path: Path, fake: FakeEngine) -> AsyncIterator[Process]:
+async def gateway(tmp_path: Path, fake: FakeEngine, *, vision: bool = False) -> AsyncIterator[Process]:
+    """The gateway's process in front of `fake`. With `vision` vLLM takes pictures, and the bot's key may send one."""
     engine_socket = bind(Listener("127.0.0.1", 0))
     engine = Servers([(fake, engine_socket)], graceful_s=1)
     await engine.start()
+    versions = {"mtp_speculative_tokens": "3", **({"vision": "1"} if vision else {})}  # vLLM drafts, as on the card
     block = service_with(limits={"agent": {"waiting": 0}, "external": {"wall_s": 0.5}}, drain_deadline_s=0.5,
-                         versions={"mtp_speculative_tokens": "3"})  # vLLM drafts tokens, as on the card
-    block["keys"] = [{"sha256": hashlib.sha256(raw.encode()).hexdigest(), **entry}
-                     for raw, entry in block["keys"].items()]
+                         versions=versions)
+    block["keys"] = [{"sha256": hashlib.sha256(raw.encode()).hexdigest(), **entry,
+                      **({"vision": True} if vision and raw == BOT else {})} for raw, entry in block["keys"].items()]
     config = {**block, "engine_url": f"http://127.0.0.1:{engine_socket.getsockname()[1]}", "health_interval_s": 0.1,
               "listen": {"public": {"host": "127.0.0.1", "port": 0}, "control": {"host": "127.0.0.1", "port": 0}}}
     path = tmp_path / "gateway.json"
@@ -389,3 +396,94 @@ async def malformed_http(checks: Checks) -> None:
         answer = await asyncio.wait_for(reader_.read(), 5)
         assert MARKER.encode() not in answer
         writer.close()
+
+
+def traces(url: str) -> list[bytes]:
+    """What a picture would leave where it leaked: a piece of its data URL, of which vLLM quotes the head in an
+    error, or a digest of its bytes or of its URL, in hex or in base64."""
+    data = base64.b64decode(url.partition(",")[2])
+    digests = [hashlib.new(name, value).digest() for name in sorted(hashlib.algorithms_guaranteed)
+               if not name.startswith("shake") for value in (data, url.encode())]
+    return [b"data:image", b"base64,", *(url[start:start + 16].encode() for start in range(0, len(url) - 15, 8)),
+            *(digest.hex().encode() for digest in digests),
+            *(base64.b64encode(digest).rstrip(b"=") for digest in digests),
+            *(base64.urlsafe_b64encode(digest).rstrip(b"=") for digest in digests)]
+
+
+async def test_no_answer_and_no_log_line_holds_a_picture(tmp_path: Path) -> None:
+    """Contract section 10 for a picture, which the bot's key may send while vLLM takes pictures: its bytes, its URL
+    and their digests reach no answer and no line of the gateway, on the paths a picture takes. The synthetic picture
+    holds the marker in a chunk of its own, and the fake engine quotes the picture's URL in its errors."""
+    url = picture_url(picture(MARKER))
+    left = traces(url)
+    fake = FakeEngine(ALIAS, SERVICE["context_tokens"])
+    scripts: dict[str, Script] = {}  # by the name of the request, which ends its prompt
+    fake.script = lambda body: next((script for name, script in scripts.items()
+                                     if prompt_of(body).endswith(text(name))), Script())
+
+    def clean(answer: Answer) -> None:
+        Checks.clean(answer)
+        assert not any(trace in answer.body for trace in left), answer.body[:300]
+
+    async with gateway(tmp_path, fake, vision=True) as process, httpx.AsyncClient(timeout=10) as client:
+        checks = Checks(client, process)
+        await checks.status("ready")
+        chat, count, internal = checks.public + CHAT, checks.public + COUNT, {CLASS: "internal"}
+        answered = await call(client, "POST", chat, headers=internal, body=picture_body(text("caption"), url))
+        counted = await call(client, "POST", count, headers=internal, body=picture_body(text("count"), url))
+        assert answered.done and counted.status == 200
+        clean(answered)
+        clean(counted)
+
+        image = {"type": "image_url", "image_url": {"url": url}}
+
+        def parts(*first: Any, role: str = "user") -> dict[str, Any]:
+            return chat_body(messages=[{"role": role, "content": [*first, {"type": "text", "text": text("parts")}]}])
+
+        refusals: dict[tuple[int, str], list[tuple[str, dict[str, Any]]]] = {
+            (403, "vision_not_allowed"): [(OUTSIDE_A, picture_body(text("outside"), url))],
+            (400, "invalid_request"): [
+                (BOT, parts(image, image)),  # a second picture
+                (BOT, parts(image, role="system")),
+                (BOT, picture_body(text("http"), f"https://{MARKER}.example/{MARKER}.png")),
+                (BOT, picture_body(text("file"), f"file:///tmp/{MARKER}.png")),
+                (BOT, picture_body(text("gif"), url.replace("image/png", "image/gif", 1))),
+                (BOT, picture_body(text("named jpeg"), url.replace("image/png", "image/jpeg", 1))),
+                (BOT, picture_body(text("base64"), url[:40] + url[41:])),  # a character short
+                (BOT, picture_body(text("large"), picture_url(picture(MARKER) + bytes(PICTURE_BYTES)))),
+            ],
+            (400, "unsupported_field"): [
+                (BOT, parts({**image, MARKER: MARKER})),
+                (BOT, parts({"type": "image_url", "image_url": {"url": url, "detail": MARKER}})),
+            ],
+        }
+        for (status, code), sent in refusals.items():
+            for key, request in sent:
+                for route in (chat, count):
+                    refused = await call(client, "POST", route, key=key, headers=internal if key == BOT else None,
+                                         body=request)
+                    assert (refused.status, refused.json()) == (status, {"error": {"code": code}}), refused.body[:300]
+                    clean(refused)
+
+        failures = {  # what the engine does, quoting the picture, and what the client is told
+            "refused": (Script(generate_status=400), 400, "invalid_request"),
+            "failed": (Script(generate_status=500), 503, "engine_unavailable"),
+            "error first": (Script(events=[{"error": {"message": url, "code": 400}}]), 400, "invalid_request"),
+        }
+        for name, (script, status, code) in failures.items():
+            scripts[name] = script
+            refused = await call(client, "POST", chat, headers=internal, body=picture_body(text(name), url))
+            assert (refused.status, refused.json()) == (status, {"error": {"code": code}}), refused.body[:300]
+            clean(refused)
+        scripts["error later"] = Script(events=[{"content": "A grey pixel. "}, {"error": {"message": url}}])
+        cut = await call(client, "POST", chat, headers=internal, body=picture_body(text("error later"), url))
+        assert cut.status == 200 and cut.error_event == "engine_unavailable" and not cut.done
+        clean(cut)
+
+    output = b"".join(process.lines)
+    assert MARKER.encode() not in output
+    assert not any(trace in output for trace in left)
+    requests = [row for row in process.rows() if row.get("event") == "request"]
+    assert {row.get("code") for row in requests} >= {"vision_not_allowed", "invalid_request", "unsupported_field",
+                                                    "engine_unavailable"}
+    assert any(row.get("status") == 200 for row in requests)  # a log that holds nothing would prove nothing

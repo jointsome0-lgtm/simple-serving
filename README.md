@@ -40,7 +40,7 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
 - `tests/test_scenarios.py`: the scenarios of the cases file: a client that leaves in every phase, places and lines,
   counts, wall time, drains;
 - `tests/test_privacy.py`: the gateway as its own process, started as in production; every error path carries a marker
-  that no answer and no log line may hold;
+  that no answer and no log line may hold, and the paths of a picture its URL and digests too;
 - `tests/test_gateway.py`: the engine's health and context, what the engine receives, errors inside the gateway;
 - `tests/test_sleep.py`: what holds the service awake, the idle interval, the sleep and the stop of the instance, on
   a fake clock and a fake Vast;
@@ -93,14 +93,18 @@ with keys alone gets the full limits:
   "dev-key-control": {"label": "control", "classes": [], "default": null, "scopes": false, "control": true}}}
 ```
 
-The fake engine counts a prompt as the characters of all message contents divided by 4, rounded up, and answers every
-generation with a fixed synthetic sentence in a few chunks, then `stop` and its usage. With thinking on, a fixed
-thought comes first, in the reasoning field. `max_tokens`, counted the same way, cuts the answer and ends it with
-`length`, and a schema with a `pattern` that is not a regular expression gets 400 before any stream. It answers in
-milliseconds, so requests rarely overlap. `--first-event-delay-ms N` makes it pause N ms before the first event of each
-generation, as for a long prompt, and `--event-delay-ms N` after each event; with them, concurrent requests fill the
-places and wait. Both default to 0. Like the card's, the gateway falls asleep after 780 seconds without a request of
-ours (contract section 8); it has no instance to stop, so it then stays drained until the launcher starts again.
+With `"versions": {"vision": "1"}` in the file as well, the gateway takes a picture from a key whose entry adds
+`"vision": true`, as on a card with `VISION=1` ("The card" below).
+
+The fake engine counts a prompt as the characters of all message texts divided by 4, rounded up, and 282 more for a
+picture, the most that vLLM counts for one of Gemma 4's. It answers every generation with a fixed synthetic sentence in
+a few chunks, then `stop` and its usage. With thinking on, a fixed thought comes first, in the reasoning field.
+`max_tokens`, counted the same way, cuts the answer and ends it with `length`, and a schema with a `pattern` that is not
+a regular expression gets 400 before any stream. It answers in milliseconds, so requests rarely overlap.
+`--first-event-delay-ms N` makes it pause N ms before the first event of each generation, as for a long prompt, and
+`--event-delay-ms N` after each event; with them, concurrent requests fill the places and wait. Both default to 0. Like
+the card's, the gateway falls asleep after 780 seconds without a request of ours (contract section 8); it has no
+instance to stop, so it then stays drained until the launcher starts again.
 
 ## Running the gateway
 
@@ -139,10 +143,12 @@ never the key:
 
 `context_tokens` is the gateway's own limit, or `null` for the engine's. Optional fields: `body_limit_bytes`
 (2 000 000), `max_connections` (64), `idle_timeout_s` (780), `health_interval_s` (5) and `versions`, which the control
-key sees in `/v1/state` next to the gateway's own. One of them is also a switch: `mtp_speculative_tokens`, a count
+key sees in `/v1/state` next to the gateway's own. Two of them are also switches. `mtp_speculative_tokens`, a count
 above 0 that the card's launcher writes only while vLLM drafts tokens, makes the gateway refuse the `min_p` that vLLM
-would refuse then ("The card" below). An outside key has the classes `["external"]` and no scopes. To hash a key
-without printing it:
+would refuse then ("The card" below). `vision`, `"1"` that the launcher writes only while vLLM loads Gemma 4's vision
+tower, lets a user message hold one picture from a key whose entry has `"vision": true`, and the gateway refuses to
+start with that right in a key while `vision` is not there (contract section 4). An outside key has the classes
+`["external"]` and no scopes. To hash a key without printing it:
 
 ```
 read -rs KEY && printf '%s' "$KEY" | sha256sum && unset KEY

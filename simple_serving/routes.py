@@ -44,7 +44,9 @@ async def _inference(service: Service, exchange: Exchange, kind: type[Generation
         try:
             async with asyncio.timeout_at(deadline):
                 body = await exchange.read_body(service.config.body_limit_bytes)
-            request = check_chat(parse_json(body), service.config.alias)
+            request = check_chat(parse_json(body), service.config.alias, vision=service.config.vision)
+            if request.pictures and not caller.key.vision:
+                raise ServiceError("vision_not_allowed")
             if kind is Generation:
                 service.check_max_tokens(caller, request)
                 service.check_min_p(request)

@@ -16,15 +16,17 @@ import pytest
 
 from simple_serving import app
 from simple_serving.config import CLASSES
-from simple_serving.fake_engine import FakeEngine, Script
+from simple_serving.fake_engine import PICTURE_TOKENS, FakeEngine, Script
 from simple_serving.service import Service
 from simple_serving.stream import Translator
 from simple_serving.validation import MAX_DEPTH
 
 from .support import (
     ALIAS,
+    BOT,
     CLASS,
     CONTROL,
+    OUTSIDE_A,
     SCOPE,
     SERVICE,
     Answer,
@@ -36,6 +38,9 @@ from .support import (
     count,
     eventually,
     generate,
+    picture,
+    picture_body,
+    picture_url,
     prompt_of,
     reached,
     reader,
@@ -265,6 +270,31 @@ async def test_a_min_p_that_vllm_refuses_while_it_drafts_is_refused_before_the_e
     assert all(answers[name].done and bodies[name][0].items() <= sent[name].items() for name in sent)
     assert counted.status == 200 and "unavailable_fields" not in public
     assert view.get("unavailable_fields") == (["min_p"] if drafting else None)
+
+
+@pytest.mark.parametrize("vision", [True, False], ids=["vision", "text only"])
+async def test_a_picture_reaches_the_engine_only_from_a_key_with_the_right_while_it_takes_pictures(
+        vision: bool) -> None:
+    """While the card's versions name its vision tower, a key without the right `vision` is refused a picture with
+    403 vision_not_allowed. Without the tower no key has the right, and a picture is 400 invalid_request, as any
+    content that is not a string was before. Nothing of a refused request reaches the engine, not even a count."""
+    block = service_with(versions={"vision": "1"} if vision else {})
+    block["keys"][BOT] |= {"vision": True} if vision else {}
+    url = picture_url(picture())
+    async with running(block) as stack, httpx.AsyncClient(timeout=10) as client:
+        answers = {
+            "allowed": await generate(client, stack, picture_body("allowed", url)),
+            "counted": await count(client, stack, picture_body("counted", url)),
+            "outside": await generate(client, stack, picture_body("outside", url), key=OUTSIDE_A),
+            "outside count": await count(client, stack, picture_body("outside count", url), key=OUTSIDE_A),
+        }
+    for name in ("outside", "outside count") if vision else answers:
+        assert_refused(answers[name], *((403, "vision_not_allowed") if vision else (400, "invalid_request")))
+    calls = [*stack.fake.calls_of("tokenize"), *stack.fake.calls_of("generate")]
+    assert sorted(prompt_of(made.body) for made in calls) == (["allowed", "allowed", "counted"] if vision else [])
+    if vision:
+        assert answers["allowed"].done and answers["counted"].json() == {"input_tokens": 2 + PICTURE_TOKENS}
+        assert all(made.body["messages"] == picture_body(prompt_of(made.body), url)["messages"] for made in calls)
 
 
 async def test_a_body_nested_past_the_limit_is_invalid_even_inside_the_schema() -> None:

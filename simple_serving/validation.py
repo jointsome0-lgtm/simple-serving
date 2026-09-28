@@ -2,13 +2,18 @@
 
 Nothing is coerced: a boolean is not an integer, and "1" is not 1. A field outside the contract, at any depth, is
 `unsupported_field`; a missing value, a wrong type or a value out of range is `invalid_request`. The schema inside
-`response_format.json_schema.schema` is not looked into and passes on to the engine as it is.
+`response_format.json_schema.schema` is not looked into and passes on to the engine as it is. While the engine takes
+pictures (config.VISION), a user message's content may also be a list of parts: text, and one picture in the whole
+request (PICTURE).
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,15 +39,27 @@ CHAT_SHAPE: dict[str, Any] = {
     "response_format": {"type": LEAF, "json_schema": {"name": LEAF, "strict": LEAF, "schema": SCHEMA}},
     "chat_template_kwargs": {"enable_thinking": LEAF},
 }
+# The same while the engine takes pictures, where a content may be a list of parts.
+VISION_SHAPE: dict[str, Any] = CHAT_SHAPE | {
+    "messages": [{"role": LEAF, "content": [{"type": LEAF, "text": LEAF, "image_url": {"url": LEAF}}]}]}
+# A picture is a data URL, which vLLM 0.30.0 decodes itself. It would fetch an http URL, and read a file URL under
+# --allowed-local-media-path, so the gateway passes on neither. vLLM tells the type by the bytes and ignores the URL's
+# (vllm/multimodal/media/connector.py and image.py), so the gateway checks that the two agree.
+PICTURE = re.compile(r"data:image/(png|jpeg|webp);base64,([A-Za-z0-9+/]*={0,2})")
+SIGNATURES = {"png": b"\x89PNG\r\n\x1a\n", "jpeg": b"\xff\xd8\xff"}  # WebP's is split, as RIFF....WEBP
+# The most of the picture, decoded. Gemma 4 sees at most 2520 patches of 16 by 16 pixels, about 800 by 800, so what a
+# larger picture holds beyond that only costs the card its decoding.
+PICTURE_BYTES = 1 << 20
 
 
 @dataclass(frozen=True)
 class ChatRequest:
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]  # each content a string, or while the engine takes pictures a list of parts
     max_tokens: int
     sampling: dict[str, int | float]  # the optional sampling fields the client sent
     response_format: dict[str, Any] | None
     enable_thinking: bool
+    pictures: int = 0  # 0 or 1
 
 
 def parse_json(raw: bytes) -> Any:
@@ -56,27 +73,34 @@ def parse_json(raw: bytes) -> Any:
     return value
 
 
-def check_chat(body: Any, alias: str) -> ChatRequest:
+def check_chat(body: Any, alias: str, *, vision: bool = False) -> ChatRequest:
+    """A body of generation or counting. `vision` says that the engine takes pictures; whether the key may send one
+    is checked after this (routes.py)."""
     if not isinstance(body, dict):
         raise ServiceError("invalid_request")
-    if _has_unknown_field(body, CHAT_SHAPE):
+    if _has_unknown_field(body, VISION_SHAPE if vision else CHAT_SHAPE):
         raise ServiceError("unsupported_field")
     _require(body.get("model") == alias)
     messages: Any = body.get("messages")
     _require(isinstance(messages, list) and len(messages) > 0)
     for message in messages:
-        _require(isinstance(message, dict) and message.get("role") in ROLES and isinstance(message.get("content"), str))
+        _require(isinstance(message, dict) and message.get("role") in ROLES)
+        _require(isinstance(message.get("content"), str) or (vision and message["role"] == "user" and _parts(message)))
+    pictures = sum(part["type"] == "image_url" for message in messages if isinstance(message["content"], list)
+                   for part in message["content"])
+    _require(pictures <= 1)
     max_tokens: Any = body.get("max_tokens")
     _require(_is_integer(max_tokens) and max_tokens >= 1)
     _require(body.get("stream") is True)
     stream_options = body.get("stream_options")
     _require(isinstance(stream_options, dict) and stream_options.get("include_usage") is True)
     return ChatRequest(
-        messages=[{"role": message["role"], "content": message["content"]} for message in messages],
+        messages=[{"role": message["role"], "content": _content(message["content"])} for message in messages],
         max_tokens=max_tokens,
         sampling=_sampling(body),
         response_format=_response_format(body),
         enable_thinking=_enable_thinking(body),
+        pictures=pictures,
     )
 
 
@@ -89,6 +113,44 @@ def check_open(body: Any) -> tuple[str, int]:
     """The `boot_id` and `drain_generation` of an open."""
     boot_id, generation = _control(body, ("boot_id", "drain_generation"))
     return boot_id, generation
+
+
+def _parts(message: dict[str, Any]) -> bool:
+    """Whether a message's content is a list of parts, each text or a picture."""
+    parts = message.get("content")
+    return isinstance(parts, list) and len(parts) > 0 and all(_part(part) for part in parts)
+
+
+def _part(part: Any) -> bool:
+    if not isinstance(part, dict):
+        return False
+    if part.keys() == {"type", "text"}:
+        return part["type"] == "text" and isinstance(part["text"], str)
+    return part.keys() == {"type", "image_url"} and part["type"] == "image_url" and _picture(part["image_url"])
+
+
+def _picture(image_url: Any) -> bool:
+    """Whether an `image_url` holds a picture: a data URL of PNG, JPEG or WebP in base64, as strict as vLLM decodes
+    it, whose bytes are of the type it names and at most PICTURE_BYTES."""
+    url = image_url.get("url") if isinstance(image_url, dict) else None
+    found = PICTURE.fullmatch(url) if isinstance(url, str) else None
+    if found is None:
+        return False
+    try:
+        data = base64.b64decode(found[2], validate=True)
+    except binascii.Error:
+        return False
+    kind = "webp" if data[:4] == b"RIFF" and data[8:12] == b"WEBP" else next(
+        (name for name, signature in SIGNATURES.items() if data.startswith(signature)), None)
+    return len(data) <= PICTURE_BYTES and kind == found[1]
+
+
+def _content(content: str | list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+    """A content as the engine gets it: the string, or each part built anew from its own fields."""
+    if isinstance(content, str):
+        return content
+    return [{"type": "text", "text": part["text"]} if part["type"] == "text"
+            else {"type": "image_url", "image_url": {"url": part["image_url"]["url"]}} for part in content]
 
 
 def _sampling(body: dict[str, Any]) -> dict[str, int | float]:
