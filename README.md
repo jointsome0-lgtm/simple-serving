@@ -48,8 +48,8 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
   with stand-ins for vLLM, the gateway, pip, aria2c, curl and flock;
 - `tests/test_cli.py`: the command on the owner's machine, against a fake Vast and a fake SSH that forwards to the
   gateway;
-- `tests/test_smoke.py`: the first rental's smoke: the privacy probe's verdict, and the whole smoke through the dev
-  launcher, whose output holds no key, no prompt and nothing of the model's text;
+- `tests/test_smoke.py`: the first rental's smoke: the verdicts of the privacy probe and of the vision probe, and the
+  whole smoke through the dev launcher, whose output holds no key, no prompt and nothing of the model's text;
 - `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher.
 
 Three kinds of test stay apart (contract section 14). A client's adapter runs the public steps of the cases in its own
@@ -232,15 +232,15 @@ again and a new start, and `/v1/state` then names its size among the versions.
 
 `VISION` in the manifest lets the card's own Gemma 4 read a picture, so that the captions of the bot's pose
 references are written here and no picture goes to a hosted API, as the owner wants since 2026-09-28. It is 0, off,
-until a rental measures it, and vLLM then gets `--language-model-only`, which keeps the vision tower off the GPU, as
-before. With 1 the launcher gives vLLM `--limit-mm-per-prompt '{"image": 1, "video": 0, "audio": 0}'` and
-`--mm-processor-cache-gb 0` instead: a prompt holds one picture at most, and vLLM keeps no processed picture once its
-request has ended. The preparation copies the tokenizer's `processor_config.json`, `tokenizer.json` and
-`tokenizer_config.json` beside the weights, where vLLM 0.30.0 builds Gemma 4's picture processor, and checks each
-against its pin. The gateway then takes one picture a request from the client key (contract section 4), and
-`/v1/state` names `vision` among the versions. It is switched as the drafter is: `VISION=1` in the checkout, the
-preparation again with nothing on stdin, `--stop` and a new start. `VISION=0` and the same steps turn it off, and the
-preparation removes the three files.
+until a rental measures it ([docs/vision-smoke.md](docs/vision-smoke.md)), and vLLM then gets `--language-model-only`,
+which keeps the vision tower off the GPU, as before. With 1 the launcher gives vLLM
+`--limit-mm-per-prompt '{"image": 1, "video": 0, "audio": 0}'` and `--mm-processor-cache-gb 0` instead: a prompt holds
+one picture at most, and vLLM keeps no processed picture once its request has ended. The preparation copies the
+tokenizer's `processor_config.json`, `tokenizer.json` and `tokenizer_config.json` beside the weights, where vLLM 0.30.0
+builds Gemma 4's picture processor, and checks each against its pin. The gateway then takes one picture a request from
+the client key (contract section 4), and `/v1/state` names `vision` among the versions. It is switched as the drafter
+is: `VISION=1` in the checkout, the preparation again with nothing on stdin, `--stop` and a new start. `VISION=0` and
+the same steps turn it off, and the preparation removes the three files.
 
 What the tower costs is estimated, not measured. The NVFP4 checkpoint leaves it unquantized, and vLLM 0.30.0 builds
 it in bfloat16: 0.58 billion parameters, 1.07 GiB, which come out of the KV cache. At the 6011 MiB for 104492 tokens
@@ -377,6 +377,16 @@ The probes run in this order, each within a time bound of its own, and the first
   half of step 2 of contract section 15. On the card it stands for the check that request and output logging is off:
   whatever vLLM prints, nothing of a request may reach a log. The cache-scope half is not needed for this trial, which
   has one internal client.
+- `vision`, only when `--only` names it, on a card whose manifest has `VISION=1`: Gemma 4 reads pictures that the
+  probe makes itself, never a reader's. With the client key it sends a plain red square and a blue one, each counted
+  and then captioned in one word, which must name its colour and whose `usage.prompt_tokens` must be the count; the
+  same question without a picture, so that `picture_tokens` gives what a picture adds, above 0 and at most 282 (258 for
+  a square on the card); a picture of four colours described in up to 192 tokens, for the drafter's acceptance; and a
+  request with two pictures and one with an `https` URL, each 400 `invalid_request`. Then, whatever failed before, its
+  privacy part: each picture holds a fresh marker, as the text of a PNG chunk and in its data URL, whose base64 spells
+  the marker, and no file in the card's `logs/` may hold it, as for `privacy`. A card without the tower fails it with
+  `versions` and gets no picture. The rental's job around it, with what it reads by hand of the launcher and of vLLM,
+  is [docs/vision-smoke.md](docs/vision-smoke.md).
 
 A probe of parts stops at its first part that fails. On a card that works the whole smoke should take minutes; its
 bounds add up to just over an hour. It prints one JSON object per probe, read as "The first rental" below says, and
@@ -404,21 +414,10 @@ uv run python -m simple_serving.smoke --config keys.json --public-port 8201 --co
 ```
 
 The pause after each event holds a stream open while the abort probe looks for it. With multi-token prediction on in
-the manifest, the pins make the gateway refuse the `min_p` of the `fields` probe, as the card's does.
-
-The smoke has no probe of pictures yet, and with `VISION=1` it runs as it does without. Before the bot sends a
-picture, a card with the tower must also show, with synthetic pictures made for it and never a reader's:
-- the tower's cost: the launcher's `kv_cache_tokens` beside the 104492 without it ("The card" above), and the time to
-  ready;
-- a completion with one picture and a short text part: `[DONE]`, and an answer that says something true of the
-  picture, such as the colour of a plain square;
-- counts: for a body with a picture, the count equals `usage.prompt_tokens`, as the count matrix checks it for text,
-  and exceeds the count of the same body without the picture by at most 282, by 258 for a square one;
-- refusals: a second picture and an `http` URL get 400 `invalid_request` from the gateway, and vLLM sees neither;
-- privacy: the probe's marker written into the picture itself, in a text chunk of a PNG, is in no file of `logs/`,
-  and neither is a piece of the picture's base64;
-- with the drafter on, the share of drafted tokens that vLLM keeps in an answer about a picture, against one about
-  text, and the time to the first token of each.
+the manifest, the pins make the gateway refuse the `min_p` of the `fields` probe, as the card's does. With
+`"vision": "1"` among the launcher's versions in `dev.json` and `"vision": true` on the client key, `--only vision`
+runs the vision probe the same way: the fake counts a picture as 282 tokens, and `caption` and `equal` stay
+unchecked. Without `--only vision` the smoke runs as it did, on a card with `VISION=1` too.
 
 ## The first rental
 
@@ -483,8 +482,10 @@ an object per part, each with its own `ok`, and pass when every part passes. A n
 stream, such as `model` for a chunk without the alias or `done` for a stream without `[DONE]`, or a check of the probe:
 `equal` for a count that differs from `usage.prompt_tokens`, `answer` for an answer that breaks its schema, whose field
 `answer` lists the keywords it breaks, or `json` for one that is not JSON; `pair`, `boot` or `deadline` in the
-lifecycle; `ready`, `status`, `first_event`, `held`, `freed`, `unlogged`, `inconclusive` or `drained` in the abort; and
-`code`, `unlogged` or `marker` in the privacy probe. `left_drained` means that the open undoing the abort's drain was
+lifecycle; `ready`, `status`, `first_event`, `held`, `freed`, `unlogged`, `inconclusive` or `drained` in the abort;
+`code`, `unlogged` or `marker` in the privacy probe; and in the vision probe `versions` for a card without the tower,
+`caption` for an answer that does not name the colour, `picture_tokens` for a picture's count out of bounds, and
+`unlogged` or `marker` in its privacy part. `left_drained` means that the open undoing the abort's drain was
 not read back as `ready`, so the gateway may be left drained; `no_answer` that the gateway did not answer,
 `no_report` that the card's report did not come or came in another form, `time_bound` that the probe ran past its
 bound, and `smoke_error` an error in the smoke itself, whose class `error` names. With `no_report`, `report` says
@@ -495,9 +496,10 @@ the lengths of the answer and of the reasoning in characters, the usage, and the
 `max_tokens` that fills it and the counts the search took; in the lifecycle the `launchers`, their `children` and the
 seconds left to the guard's deadline; in the abort `held`, `freed_ms` and `cancelled`; in the privacy probe the
 marker's count in each log under `found`, the request's rows under `logged`, and `echoed`, the times the answer
-repeated the marker, which passes nothing. `versions` shows each pin as this checkout has it, or `false` where the
-card shows another, and the card's Python. `seed_repeats` passes nothing. No line holds a key, a prompt, the marker,
-an answer or reasoning, so the lines may be kept.
+repeated the marker, which passes nothing; in the vision probe `picture_tokens`, the description's `decode_per_s`, its
+tokens a second after the first, and its privacy part's `found` and `logged`. `versions` shows each pin as this
+checkout has it, or `false` where the card shows another, and the card's Python. `seed_repeats` passes nothing. No
+line holds a key, a prompt, the marker, a picture, an answer or reasoning, so the lines may be kept.
 
 Exit 0, with `simple-serving smoke: 11 of 11 probes passed` on standard error, ends section 15's step 1, and its last
 probe, `privacy`, is the marker half of its step 2. After it the trial's internal work is the texts of

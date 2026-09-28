@@ -1,6 +1,6 @@
 """The smoke of the first rental (simple_serving/smoke.py), where a fault of its own would pass unseen on the card: the
-privacy probe's verdict, and the whole smoke through the dev launcher, whose output holds no key, no prompt and nothing
-of the model's text."""
+privacy probe's verdict and the vision probe's, and the whole smoke through the dev launcher, whose output holds no key,
+no prompt and nothing of the model's text."""
 
 from __future__ import annotations
 
@@ -69,6 +69,39 @@ async def test_the_privacy_probe_fails_on_its_marker_in_any_log_and_on_a_request
     failed = ([] if row else ["unlogged"]) + (["marker"] if body_to else [])  # a silent log proves nothing
     assert line == {"ok": not failed, "status": 200, **({"failed": failed} if failed else {}), "found": found,
                     "logged": int(row), "echoed": 0}
+    assert MARKER not in json.dumps(line)
+
+
+@pytest.mark.parametrize("leak", [False, True])
+async def test_the_vision_probe_fails_on_its_pictures_in_a_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                               leak: bool) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        """A gateway with the tower, as far as the probe sees one: it refuses a second picture and a URL that is not a
+        data URL, counts a picture as 258 tokens, logs a row of each generation and, with `leak`, each request's body,
+        whose pictures hold the marker only as a PNG's text and base64 of its bytes."""
+        if request.url.path == "/v1/state":
+            return httpx.Response(200, json={"versions": {"vision": "1"}})
+        body = request.content.decode()
+        urls = [part["image_url"]["url"] for part in json.loads(body)["messages"][0]["content"]
+                if isinstance(part, dict) and "image_url" in part]
+        with (logs / "gateway.jsonl").open("a") as file:
+            file.write(body + "\n" if leak else "")
+            if len(urls) > 1 or not all(url.startswith("data:") for url in urls):
+                return httpx.Response(400, json={"error": {"code": "invalid_request"}})
+            if request.url.path == smoke.COUNT:
+                return httpx.Response(200, json={"input_tokens": 12 + 258 * len(urls)})
+            file.write(json.dumps({"event": "request", "route": smoke.CHAT, "cancelled": False}) + "\n")
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=ANSWER)
+
+    monkeypatch.setattr(smoke, "new_marker", lambda: MARKER)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        line = await smoke.probe_vision(smoke.Smoke(client, "http://gateway", "http://gateway", BOT, CONTROL, ALIAS,
+                                                    4096, fake=True, card=smoke.CardFiles(directory=tmp_path)))
+    assert line["ok"] is not leak and line["tokens"]["picture_tokens"] == 258
+    assert bool(line["privacy"]["found"]["gateway.jsonl"]) is leak
     assert MARKER not in json.dumps(line)
 
 

@@ -32,6 +32,11 @@ The probes run in this order, each within a time bound of its own, and the first
   equal usage.prompt_tokens: plain, system and user, turns, a schema, thinking on and off, and near the context.
 - privacy: one completion whose prompt holds a fresh random marker, which no log that the gateway or the engine's
   filter writes on the card may hold (section 15, step 2).
+- vision, only when --only names it, for a card whose manifest loads Gemma 4's vision tower: pictures made here, each
+  holding a fresh marker. A plain red square and a blue one, each counted, then captioned in one word, whose usage
+  must be the count; the same question without a picture, for what the picture adds to the count; a picture of four
+  colours described at length; two pictures in a request, and a picture's https URL, refused; and then, whatever
+  failed before, the marker in no log on the card.
 
 Each probe prints one JSON object on a line of its own: its name, `ok`, the gateway's code where one came, the checks
 that failed, and numbers. A probe of parts stops at its first part that fails. Strings in it are only names from this
@@ -52,13 +57,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import re
 import secrets
+import struct
 import sys
 import time
+import zlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -69,6 +77,7 @@ from typing import Any, NoReturn
 import httpx
 
 from . import CONTRACT, bot_schemas, card, cli
+from .config import VISION
 from .errors import STATUS
 from .service import PINNED_PACKAGES
 
@@ -76,11 +85,12 @@ CHAT, COUNT = "/v1/chat/completions", "/v1/chat/completions/input_tokens"
 HEADERS = {"X-Simple-Serving-Class": "internal"}  # without a scope header, the class's own cache scope
 # Each probe's time bound on the card, generous: the first requests after a start may wait for kernels to compile.
 BOUND_S = {"lifecycle": 60, "state": 30, "completion": 300, "fields": 600, "reasoning": 300, "finish": 180,
-           "refusal": 120, "abort": 120, "schemas": 900, "counts": 900, "privacy": 120}
+           "refusal": 120, "abort": 120, "schemas": 900, "counts": 900, "privacy": 120, "vision": 300}
 UNDO_S = {"abort": 30}  # of a probe's bound, what it keeps for undoing its change: three control calls
-CARD_PROBES = ("lifecycle", "abort", "privacy")  # the probes that read the card's report
+CARD_PROBES = ("lifecycle", "abort", "privacy", "vision")  # the probes that read the card's report
 # What the fake engine cannot answer truthfully, and --fake leaves unchecked. The seed's repeat is no check anyway.
-NOT_VERIFIABLE = {"fields": ["answer", "seed_repeats"], "schemas": ["answer"], "counts": ["equal"]}
+NOT_VERIFIABLE = {"fields": ["answer", "seed_repeats"], "schemas": ["answer"], "counts": ["equal"],
+                  "vision": ["caption", "equal"]}
 CALL_S = 10  # a call to the control listener, from connecting to the end of its answer
 ANSWER_BYTES = 16384  # the most of an answer that is not a stream
 STREAM_BYTES = 2_000_000  # the most of a stream, as the bot reads one
@@ -123,6 +133,14 @@ CELL_TOKENS = 8  # a count cell's generation
 NEAR = 16  # the near-context cell aims this many tokens below the context...
 NEAR_BAND = 64  # ...and takes a count up to this far below it
 SCHEMA_TOKENS = 2048  # the most any bot schema's answer may take here; the bot's own caps go up to 16384
+# The vision probe's pictures, made here and never a reader's: blocks of one colour, BLOCK pixels a side.
+RED, GREEN, BLUE, YELLOW = (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)
+BLOCK = 64
+COLOUR = "What colour fills this picture? Answer with one word."
+DESCRIBE = "Describe this picture in about a hundred words: its colours, and where each one is."
+DESCRIBE_TOKENS = 192  # an answer long enough for the drafter's acceptance to be read in vLLM's counters
+REMOTE = "https://example.invalid/picture.png"  # a URL the gateway refuses, in a domain that never resolves
+PICTURE_TOKENS = 282  # the most a picture adds to a prompt (contract section 5), 258 for a square one
 
 
 class NoAnswer(Exception):
@@ -432,7 +450,7 @@ class Smoke:
             return {"Authorization": f"Bearer {self.control_key}"}
         return {"Authorization": f"Bearer {self.client_key}", **HEADERS}
 
-    def body(self, messages: list[dict[str, str]], max_tokens: int, **fields: Any) -> dict[str, Any]:
+    def body(self, messages: list[dict[str, Any]], max_tokens: int, **fields: Any) -> dict[str, Any]:
         return {"model": self.alias, "messages": messages, "max_tokens": max_tokens, "stream": True,
                 "stream_options": {"include_usage": True}, **fields}
 
@@ -800,8 +818,9 @@ async def probe_counts(smoke: Smoke) -> dict[str, Any]:
     return combined(parts)
 
 
-async def count_cell(smoke: Smoke, body: dict[str, Any], **numbers: Any) -> dict[str, Any]:
-    """The count of a body, then its generation, whose usage.prompt_tokens must be that count."""
+async def count_cell(smoke: Smoke, body: dict[str, Any], word: str = "", **numbers: Any) -> dict[str, Any]:
+    """The count of a body, then its generation, whose usage.prompt_tokens must be that count, and whose answer must
+    hold `word`, in any case, where one is given."""
     counted = await smoke.count(body)
     input_tokens = counted.field("input_tokens")
     if counted.status != 200 or not is_count(input_tokens):
@@ -811,6 +830,8 @@ async def count_cell(smoke: Smoke, body: dict[str, Any], **numbers: Any) -> dict
     failed = []
     if stream.ok and stream.usage is not None and stream.usage["prompt_tokens"] != input_tokens and not smoke.fake:
         failed.append("equal")
+    if stream.ok and word not in stream.content.lower() and not smoke.fake:
+        failed.append("caption")
     return verdict(stream, failed, input_tokens=input_tokens, **numbers)
 
 
@@ -865,12 +886,86 @@ async def probe_privacy(smoke: Smoke) -> dict[str, Any]:
             "logged": len(report["cancelled"] or []), "echoed": stream.content.count(marker)}
 
 
+async def probe_vision(smoke: Smoke) -> dict[str, Any]:
+    versions = (await smoke.view()).get("versions")
+    if not isinstance(versions, dict) or versions.get(VISION) != "1":
+        return {"ok": False, "failed": ["versions"]}  # an engine without the tower gets no picture
+    since = (await smoke.card.inspect())["logs"]["gateway.jsonl"]["rows"]
+    marker = new_marker()
+    parts = await picture_parts(smoke, marker)
+    # Whatever failed before, pictures went out, each holding the marker, and no log on the card may hold it.
+    report = await logged(smoke, since, marker)
+    found = {name: counts["found"] for name, counts in report["logs"].items()}
+    failed = (["unlogged"] if not report["cancelled"] else []) + (["marker"] if any(found.values()) else [])
+    parts["privacy"] = {"ok": not failed, **({"failed": failed} if failed else {}), "found": found,
+                        "logged": len(report["cancelled"] or [])}
+    return combined(parts)
+
+
+async def picture_parts(smoke: Smoke, marker: str) -> dict[str, dict[str, Any]]:
+    """The vision probe's parts before its privacy part, up to the first that fails."""
+    red, blue = picture([[RED]], marker), picture([[BLUE]], marker)
+
+    def body(urls: list[str], text: str, max_tokens: int = 8) -> dict[str, Any]:
+        """A user message of the pictures, then the text; without a picture, the text alone, as the bot sends it."""
+        content = [*({"type": "image_url", "image_url": {"url": url}} for url in urls), {"type": "text", "text": text}]
+        return smoke.body([{"role": "user", "content": content if urls else text}], max_tokens, temperature=0,
+                          chat_template_kwargs={"enable_thinking": False})
+
+    parts: dict[str, dict[str, Any]] = {}
+    # The first picture since the engine started, then one that no cache holds, for the time to a first token.
+    for name, url in (("red", red), ("blue", blue)):
+        parts[name] = await count_cell(smoke, body([url], COLOUR), word=name)
+        if not parts[name]["ok"]:
+            return parts
+    parts["text"] = await count_cell(smoke, body([], COLOUR))
+    if not parts["text"]["ok"]:
+        return parts
+    added = parts["red"]["input_tokens"] - parts["text"]["input_tokens"]
+    fits = 0 < added <= PICTURE_TOKENS
+    parts["tokens"] = {"ok": fits, **({} if fits else {"failed": ["picture_tokens"]}), "picture_tokens": added}
+    if not fits:
+        return parts
+    stream = await smoke.generate(body([picture([[RED, GREEN], [BLUE, YELLOW]], marker)], DESCRIBE, DESCRIBE_TOKENS))
+    parts["describe"] = verdict(stream, ["content"] if stream.ok and not stream.content else [], finish=stream.finish,
+                                **decoding(stream))
+    if not parts["describe"]["ok"]:
+        return parts
+    for name, urls in (("two_pictures", [red, blue]), ("remote", [REMOTE])):
+        parts[name] = refused(await smoke.generate(body(urls, COLOUR)), "invalid_request")
+        if not parts[name]["ok"]:
+            break
+    return parts
+
+
+def picture(blocks: list[list[tuple[int, int, int]]], marker: str) -> str:
+    """A PNG of square blocks of colour, as a data URL, that holds the privacy marker twice: as the text of a tEXt
+    chunk, and in the URL itself. The marker is also base64 of 24 bytes, which a private chunk holds after one byte
+    of padding from byte 42 on, a multiple of three, so that the URL's base64 spells it in characters 56 to 87."""
+    rows = b"".join(b"\0" + b"".join(bytes(colour) * BLOCK for colour in row) for row in blocks for _ in range(BLOCK))
+    header = struct.pack(">IIBBBBB", BLOCK * len(blocks[0]), BLOCK * len(blocks), 8, 2, 0, 0, 0)  # 8-bit RGB
+    png = b"\x89PNG\r\n\x1a\n" + b"".join(
+        struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        for kind, data in ((b"IHDR", header), (b"mrKr", b"\0" + base64.b64decode(marker)),
+                           (b"tEXt", b"Comment\0" + marker.encode()), (b"IDAT", zlib.compress(rows)), (b"IEND", b"")))
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+def decoding(stream: Stream) -> dict[str, int]:
+    """The answer's tokens a second after its first, which the drafter raises by each drafted token vLLM keeps."""
+    usage = stream.usage or {}
+    tokens, measured = usage.get("completion_tokens", 0), usage.get("simple_serving", {})
+    ms = measured.get("total_ms", 0) - measured.get("first_token_ms", 0)
+    return {"decode_per_s": round((tokens - 1) * 1000 / ms)} if tokens > 1 and ms > 0 else {}
+
+
 PROBES: dict[str, Callable[[Smoke], Awaitable[dict[str, Any]]]] = {
     "lifecycle": probe_lifecycle, "state": probe_state, "completion": probe_completion, "fields": probe_fields,
     "reasoning": probe_reasoning, "finish": probe_finish, "refusal": probe_refusal, "abort": probe_abort,
-    "schemas": probe_schemas, "counts": probe_counts, "privacy": probe_privacy,
+    "schemas": probe_schemas, "counts": probe_counts, "privacy": probe_privacy, "vision": probe_vision,
 }
 CHOSEN = tuple(name for name in PROBES if name != "lifecycle")  # what --only may name; --before and --after add it
+USUAL = tuple(name for name in CHOSEN if name != "vision")  # without --only: the pictures only when it names them
 
 
 async def run(smoke: Smoke, names: list[str]) -> int:
@@ -936,8 +1031,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=cli.CONFIG,
                         help="the command's configuration, with client_key and control_key, and ssh_host for the "
                              "card's report (default: %(default)s)")
-    parser.add_argument("--only", type=probe_names, default=list(CHOSEN), metavar="NAME[,NAME]",
-                        help=f"run these probes alone: {', '.join(CHOSEN)}")
+    parser.add_argument("--only", type=probe_names, default=list(USUAL), metavar="NAME[,NAME]",
+                        help=f"run these probes alone: {', '.join(CHOSEN)}; vision runs only when named")
     lifecycle = parser.add_mutually_exclusive_group()
     lifecycle.add_argument("--before", type=Path, metavar="FILE",
                            help="before the stop of section 15's step 1: first check the pair and the guard's "
