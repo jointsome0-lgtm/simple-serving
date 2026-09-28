@@ -14,6 +14,7 @@ from typing import Any
 from .asgi import ClientGone, Exchange
 from .errors import ServiceError
 from .inference import Count, Generation
+from .metrics import CONTENT_TYPE
 from .service import Service
 from .validation import check_boot, check_chat, check_open, parse_json
 
@@ -83,6 +84,33 @@ async def state(service: Service, exchange: Exchange) -> None:
         await exchange.send_json(200, service.state(control=key.control))
     except ServiceError as error:
         await exchange.send_error(error.code)
+
+
+async def metrics(service: Service, exchange: Exchange) -> None:
+    """The gateway's metrics (docs/metrics.md). Like /v1/state, they hold nothing awake (section 8)."""
+    try:
+        _may_read_metrics(service, exchange)
+        await exchange.send_text(200, service.metrics.render(service), CONTENT_TYPE)
+    except ServiceError as error:
+        await exchange.send_error(error.code)
+
+
+async def engine_metrics(service: Service, exchange: Exchange) -> None:
+    """The engine's own /metrics, relayed: the engine listens on loopback, and its port is not forwarded, since that
+    would open its API without a key to the owner's machine (section 1)."""
+    try:
+        _may_read_metrics(service, exchange)
+        body, content_type = await service.engine.metrics()
+        await exchange.send_text(200, body, content_type)
+    except ServiceError as error:
+        await exchange.send_error(error.code)
+
+
+def _may_read_metrics(service: Service, exchange: Exchange) -> None:
+    """A key with the metrics right, which reads the metrics and nothing else, or the control key."""
+    key = service.authenticate(exchange)
+    if not (key.metrics or key.control):
+        raise ServiceError("forbidden")
 
 
 async def drain(service: Service, exchange: Exchange) -> None:

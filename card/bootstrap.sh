@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The card's preparation, once per rental and never at a resume (contract section 12). Run it over SSH with the
-# SHA-256 of the client key and of the control key on stdin, one per line, or with nothing once the card holds them:
+# SHA-256 of the client key, of the control key and of the metrics key on stdin, one per line, or with nothing once the
+# card holds them:
 #
 #   uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh
 #
@@ -10,8 +11,9 @@
 # own onstart runs it (README, "The card"): the preparation changes no onstart, which the platform may restore at a
 # start. A second run changes nothing that is in place, and no run prints a hash. Exit codes: 0 prepared and started;
 # 1 a download or a check failed; 3 a pin or a lock is missing, or MTP_SPECULATIVE_TOKENS or KV_OFFLOADING_GIB is not a
-# count; 4 no keys, or not two different SHA-256 digests; 5 the card holds other keys, which stay. The last step is the
-# launcher's start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
+# count; 4 no keys, or not two or three different SHA-256 digests; 5 the card holds other keys, which stay. A card that
+# holds the first two alone takes the metrics key beside them, for its next start. The last step is the launcher's
+# start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
 # SIMPLE_SERVING_CARD_DIR and SIMPLE_SERVING_CARD_ROOT move the state and /root, for tests.
 set -euo pipefail
 umask 077
@@ -36,10 +38,21 @@ mkdir -p "$model" "$state/tokenizer"
 
 read -r client || true
 read -r control || true
-if [[ -n $client$control ]]; then
+read -r metrics || true
+if [[ -n $client$control$metrics ]]; then
   [[ $client =~ ^[0-9a-f]{64}$ && $control =~ ^[0-9a-f]{64}$ && $client != "$control" ]] || exit 4
-  keys="{\"client\": \"$client\", \"control\": \"$control\"}"
-  [[ -e $state/keys.json ]] || printf '%s\n' "$keys" > "$state/keys.json"
+  pair="{\"client\": \"$client\", \"control\": \"$control\"}"
+  keys=$pair
+  if [[ -n $metrics ]]; then  # the metrics key reads the metrics alone (README, "Monitoring")
+    [[ $metrics =~ ^[0-9a-f]{64}$ && $metrics != "$client" && $metrics != "$control" ]] || exit 4
+    keys="{\"client\": \"$client\", \"control\": \"$control\", \"metrics\": \"$metrics\"}"
+  fi
+  # Written when the card holds no keys, or the same two keys without the metrics key; never over other keys. The
+  # new file takes the old one's place in one step.
+  if [[ ! -e $state/keys.json ]] || [[ $keys != "$pair" && $(< "$state/keys.json") == "$pair" ]]; then
+    printf '%s\n' "$keys" > "$state/keys.json.new"
+    mv -f "$state/keys.json.new" "$state/keys.json"
+  fi
   [[ $(< "$state/keys.json") == "$keys" ]] || exit 5
 fi
 [[ -s $state/keys.json ]] || exit 4

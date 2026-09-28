@@ -1,0 +1,13 @@
+# Grafana's one datasource: the Prometheus beside it, on the host's loopback (compose.yaml).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s  # prometheus.yml's scrape interval: $__rate_interval then spans at least four scrapes

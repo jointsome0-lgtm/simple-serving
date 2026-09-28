@@ -50,6 +50,11 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
   gateway;
 - `tests/test_smoke.py`: the first rental's smoke: the privacy probe's verdict, and the whole smoke through the dev
   launcher, whose output holds no key, no prompt and nothing of the model's text;
+- `tests/test_metrics.py`: the gateway's metrics, scraped over HTTP: each outcome counted once, the queues back where
+  they were, no first token without one, the rights of the metrics key, and a scrape that holds nothing awake;
+- `tests/test_monitoring.py`: the metric catalog, [docs/metrics.md](docs/metrics.md), against the families the gateway
+  serves and against every name that the dashboards, the alert rules and `prometheus.yml` use; with
+  `SIMPLE_SERVING_VLLM_SOURCE` naming a checkout of vLLM at the pinned tag, its vLLM names against vLLM's source;
 - `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher.
 
 Three kinds of test stay apart (contract section 14). A client's adapter runs the public steps of the cases in its own
@@ -141,7 +146,9 @@ never the key:
 (2 000 000), `max_connections` (64), `idle_timeout_s` (780), `health_interval_s` (5) and `versions`, which the control
 key sees in `/v1/state` next to the gateway's own. One of them is also a switch: `mtp_speculative_tokens`, a count
 above 0 that the card's launcher writes only while vLLM drafts tokens, makes the gateway refuse the `min_p` that vLLM
-would refuse then ("The card" below). An outside key has the classes `["external"]` and no scopes. To hash a key
+would refuse then ("The card" below). An outside key has the classes `["external"]` and no scopes. A key with
+`"metrics": true`, no classes and neither scopes nor control reads the control listener's `/metrics` and
+`/metrics/engine` and has no other right; the control key reads them too ([Monitoring](#monitoring)). To hash a key
 without printing it:
 
 ```
@@ -170,13 +177,23 @@ The preparation, once per rental and never at a resume:
 
 1. Copy the checkout to `/workspace/simple-serving`.
 2. `uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh`. `keys`
-   makes the client key and the control key once, and prints only the SHA-256 of each, one per line.
+   makes the client key, the control key and the metrics key once, and prints only the SHA-256 of each, one per line.
 
 bootstrap.sh installs each lock into a venv of its own, wheels only and every hash checked, and runs `pip check`
 there. It fetches the weights and the tokenizer files at their pinned revisions over 16 connections with aria2c,
 which it installs with apt-get when the card lacks it, and checks their hashes. It keeps the key hashes in
 `keys.json` and starts the service. It refuses while a pin or a lock is missing, or when vLLM's lock is for another
 version than the pin, and it never replaces the keys the card holds.
+
+The metrics key reads the gateway's metrics and the engine's, and has no other right ([Monitoring](#monitoring)). A card
+prepared before it holds the client key and the control key alone, and works as it did: its metrics answer the control
+key only. The preparation run again with the three hashes, the first two the card's own, puts the metrics key beside
+them, and the gateway takes it at the pair's next start, a resume or `card.py --stop` and a start as for the drafter
+below:
+
+```
+uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh
+```
 
 The locks, `card/gateway-requirements.txt` and `card/vllm-requirements.txt`, each name in their header the command
 that made them: the gateway's is exported from `uv.lock`, and vLLM's is resolved for the pinned version. A change of
@@ -284,7 +301,8 @@ uv run python -m simple_serving.cli up | sleep | status | keys | trial --ssh-hos
   reports the instance stopped.
 - `status` shows the instance's state in Vast and, through a forward of its own, the gateway's status, whether it
   serves the manifest's model, and its counts. Nothing of an answer is printed as it came.
-- `keys` makes the two gateway keys once, for the preparation above.
+- `keys` makes the three gateway keys once, for the preparation above. `keys --metrics-file PATH` also writes the
+  metrics key alone into that file, open to its owner only, for Prometheus ([Monitoring](#monitoring)).
 - `trial --ssh-host HOST` is for a trial rental. It reads the card's instance id over SSH and writes it, with the
   host, into the configuration, printing neither.
 
@@ -292,14 +310,126 @@ The configuration is `~/.config/simple-serving/config.json`, open to its owner o
 names:
 
 ```json
-{"instance_id": "...", "vast_api_key": "...", "ssh_host": "...", "client_key": "...", "control_key": "..."}
+{"instance_id": "...", "vast_api_key": "...", "ssh_host": "...", "client_key": "...", "control_key": "...",
+ "metrics_key": "..."}
 ```
 
-`keys` writes the last two. `vast_api_key` is a Vast key allowed GET and PUT on that instance alone, never the account
-key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. On a trial rental `trial` writes `instance_id`
-and `ssh_host`, and `vast_api_key` stays the owner's key: Vast answers the card's own container key on the card, and
-refuses it from the owner's machine with 401 (measured 2026-09-25). The bot's model profile takes the address
-`http://127.0.0.1:8080` and the client key; it holds neither the control key nor a Vast key.
+`keys` writes the last three, and on a configuration that holds the first two of them adds the metrics key alone. `up`,
+`sleep`, `status` and the smoke need no metrics key. `vast_api_key` is a Vast key allowed GET and PUT on that instance
+alone, never the account key, and `ssh_host` a host of `~/.ssh/config` whose host key is known. On a trial rental
+`trial` writes `instance_id` and `ssh_host`, and `vast_api_key` stays the owner's key: Vast answers the card's own
+container key on the card, and refuses it from the owner's machine with 401 (measured 2026-09-25). The bot's model
+profile takes the address `http://127.0.0.1:8080` and the client key; it holds neither the control key nor a Vast key.
+
+## Monitoring
+
+Prometheus and Grafana run on the owner's machine, from `monitoring/`, and keep the history there, so it outlives every
+card. They read the names of [docs/metrics.md](docs/metrics.md) and nothing else, so a gateway written in another
+language that serves the same names needs no change here. They collect:
+
+- the gateway's own metrics, `GET /metrics` on the control listener: each generation's and each count's outcome,
+  counted once at its end, the HTTP statuses apart from them, the gateway's queues, its times and its state;
+- vLLM's own metrics, which the gateway relays at `GET /metrics/engine` on the same listener, since vLLM's port is not
+  forwarded;
+- the card's host and GPU, once exporters run there, which is a later change (below).
+
+Prometheus scrapes both routes every 15 seconds through the tunnel of `up`, at `127.0.0.1:8081`, with the metrics
+key. That key reads the metrics and, as any key may, `/v1/models` and `/v1/state`. It cannot generate, name a scope,
+drain, sleep or open, so a Prometheus that leaks it, or a stranger's listener on 8081 while no tunnel runs, gets
+nothing that costs money or stops the card. A scrape is not work of ours: it holds no card awake and does not restart
+the idle interval (contract section 8), and the monitoring never sends a generation of its own. While no `up` runs,
+both jobs are down; that is what a card asleep or not rented looks like, and it raises no alert. Each scrape writes one
+row to the gateway's log on the card, 8 rows a minute while `up` runs.
+
+To set it up, once:
+
+1. `uv run python -m simple_serving.cli keys --metrics-file ~/.config/simple-serving/metrics.key` writes the metrics key
+   into that file, open to its owner only. A configuration that holds the client key and the control key alone gets the
+   metrics key first, and the card takes it at its next preparation ("The card" above). Until then that card answers
+   its metrics to the control key alone, and Prometheus's scrapes get 401.
+2. Pin the images. `monitoring/compose.yaml` names `prom/prometheus:v3.5.0` and `grafana/grafana:12.1.0`, each with a
+   placeholder digest of 64 zeros: it was written without network access, and neither the tags nor the digests were
+   checked. A zero digest makes every pull fail, so nothing unpinned runs. Choose the versions and write in the digest
+   that the registry gives for each tag, for instance from
+   `docker buildx imagetools inspect docker.io/prom/prometheus:v3.5.0`.
+3. `mkdir -p monitoring/data/prometheus monitoring/data/grafana` for the history, which git ignores. Prometheus keeps
+   ten years or 20 GB of it, whichever comes first.
+
+Then, from `monitoring/`, with Docker as the owner's own user:
+
+```
+METRICS_KEY_FILE=$HOME/.config/simple-serving/metrics.key MONITORING_USER="$(id -u):$(id -g)" docker compose up -d
+```
+
+With rootless Podman, whose root in a container is the owner, `MONITORING_USER=0:0` and `podman compose up -d`, with
+the same key file. Both containers use the host's network, since the tunnel listens on the host's loopback alone, and
+listen on 127.0.0.1 alone: Prometheus at http://127.0.0.1:9090, with its alerts at http://127.0.0.1:9090/alerts, and
+Grafana at http://127.0.0.1:3000. Grafana shows the dashboards to a viewer without a login; editing needs its admin
+login, admin and admin until the first login changes it. The datasource and the dashboards are provisioned read-only
+from `monitoring/grafana/`, so a change is made in the files. `docker compose down` stops both and keeps the history.
+
+### The overview
+
+`simple-serving: overview` has six rows, and every panel's description says what it reads.
+
+- State: the status of `/v1/state`, whether the last scrape of each job came, the idle interval left before the card
+  falls asleep, the requests of ours in flight that hold it, whether a sleep has begun and the drain generation, when
+  the gateway started (a new start is a new boot, whose counters begin at 0), and the alerts that fire.
+- Outcomes: generations and counts per interval by outcome, `success`, `rejected`, `unavailable`, `draining`,
+  `timeout`, `engine_error`, `internal_error` or `client_disconnect`, each counted once at its end; docs/metrics.md
+  gives the codes of each. A stream that fails after its 200, with an error event, is an `engine_error`, not a success.
+  A table lists what did not succeed over the whole range by route, class, outcome and code, and another the HTTP
+  statuses, a separate counter, where that stream is a 200. Beside them: tokens a second by class, the share of the
+  input that vLLM read from its prefix cache, and the counts that differed from the engine's `prompt_tokens`.
+- The gateway's own queues: generation places active and waiting by class against the caps of contract section 7;
+  count places active and waiting against those of section 5; accepted work not answered yet, the shared places, and
+  work of ours. vLLM's own queue is in the engine row, apart: a generation there already holds a gateway place.
+- The gateway's times: six histograms by class at p50, p90 and p99, each with its observations as bars on a right
+  axis, since a percentile of a handful says little. The wait for a count place, the count, the wait for a generation
+  place, the whole wait (the row's `wait_ms`), the first token (`first_token_ms`) and the total (`total_ms`), then a
+  table of all six over the whole range with their counts. A stage is observed only when it ends: a request cancelled
+  before its first token adds no first token, and a stream that failed adds no total.
+- The engine: vLLM's running and waiting requests, its KV cache and preemptions, the prefix cache, its queue time and
+  time to first token with their observations, tokens a second, and the share of drafted tokens accepted.
+- The machine: the GPU's use, memory, temperature and power, and the host's CPU, memory, disk and network. It stays
+  empty until the exporters run.
+
+The link at the top opens `simple-serving: vLLM`, vLLM's own example dashboard adapted: latencies, throughput, the
+scheduler's queue, the KV cache, the lengths of prompts and answers, finish reasons, queue, prefill and decode times
+and preemptions, with the observations beside every percentile. It is vLLM v0.30.0's
+`examples/observability/prometheus_grafana/grafana.json` with parts of its Performance Statistics dashboard, Copyright
+contributors to the vLLM project, under the Apache License 2.0, whose text is
+`monitoring/grafana/dashboards/LICENSE-vllm.txt`; its description lists what changed.
+
+### Whose times these are
+
+Every time on these dashboards is the gateway's or vLLM's, never the reader's. The gateway's times start at
+acceptance, once the body has arrived and passed its checks (contract section 11), and end at an event in the gateway:
+a place, the first token received from vLLM, the end of vLLM's stream. The reader waits longer. Before acceptance come
+Telegram, the bot's own work and queue, the tunnel and the upload of the body; after the gateway's event come the way
+back through the tunnel, the bot's edits of its message and Telegram. The first token counts reasoning, which the
+reader does not see. vLLM's times start later still, when vLLM's server takes the request after the gateway's wait.
+So the dashboards answer "why did a reader wait?" for the gateway's part, in order: the wait for a count place, the
+count, the wait for a generation place, then vLLM's queue, prefill and preemptions inside the first token. The bot's
+part is in the bot's own log.
+
+### Alerts
+
+`monitoring/prometheus/rules.yml` alerts on a service that reports `failed`; on requests refused because the engine
+was unavailable; on vLLM's metrics missing for 5 minutes while the gateway is ready; on two engine errors in 15
+minutes, two timeouts in 30 or any internal error; on readers queued in the gateway for 5 minutes, or refused with
+`queue_full`; and on readers' wait over 10 seconds or first token over 30, at the 90th percentile of 15 minutes and of
+at least 5 observations. Not alerts: a card asleep or not rented, a start, a planned drain or sleep, and requests that
+the gateway's own shutdown cut. The thresholds are provisional until the card has served readers. No notifier is set
+up: the alerts show in Prometheus and in the overview's first row.
+
+### The exporters, a later change
+
+The machine row reads the names of node_exporter and of utkuozdemir's nvidia_gpu_exporter, and `prometheus.yml` holds
+their two jobs commented out and marked optional. Nothing installs them yet, and installing them is a change of its
+own, pinned as vLLM is: each exporter's release and its SHA-256 in `card/manifest.env`, fetched and checked by the
+preparation, run by the launcher on the card's loopback beside the pair, and forwarded by the tunnel of `up` to local
+ports 9100 and 9835, after which the two jobs are uncommented. Until then the row stays empty and raises no alert.
 
 ## The smoke
 

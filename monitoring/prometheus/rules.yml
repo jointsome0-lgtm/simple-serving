@@ -1,0 +1,112 @@
+# Alert rules for the card's gateway and engine (README, "Monitoring"). Prometheus evaluates them and shows them at
+# http://127.0.0.1:9090/alerts and in the overview's first row; no notifier is set up. They read the names of
+# docs/metrics.md alone.
+#
+# Not alerts: a card that is not rented or not reached (no samples, `up` 0), a start (status starting, requests
+# refused with `starting`), a planned drain or sleep (status draining or drained, outcome draining, sleep_requested),
+# and requests that the gateway's own shutdown cut (outcome unavailable with code none). The thresholds are
+# provisional until the card has served readers.
+
+groups:
+  - name: unavailability
+    rules:
+      - alert: ServiceFailed
+        expr: max(simple_serving_status{status="failed"}) == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: The gateway reports its service as failed.
+          description: >-
+            /v1/state says failed: the engine failed its start or its health checks, and every generation and count
+            is refused with engine_unavailable. The card stays paid for until it is stopped.
+      - alert: RefusedEngineUnavailable
+        expr: sum(increase(simple_serving_requests_total{outcome="unavailable", code="engine_unavailable"}[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Requests were refused because the engine was unavailable.
+          description: >-
+            In the last 15 minutes the gateway refused generations or counts before accepting them, with
+            engine_unavailable: the service had failed when they came, even if a scrape did not see it.
+      - alert: EngineMetricsMissing
+        expr: (max(simple_serving_status{status="ready"}) == 1) and on() (max(up{job="engine"}) == 0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The gateway is ready, yet vLLM's metrics have not come for 5 minutes.
+          description: >-
+            /metrics/engine answers 503 or does not answer while the gateway serves: vLLM's /metrics failed, took
+            more than 5 s or was larger than 8 MB. The engine's panels are empty meanwhile.
+
+  - name: errors
+    rules:
+      - alert: EngineErrors
+        expr: sum(increase(simple_serving_requests_total{outcome="engine_error"}[15m])) >= 2
+        labels:
+          severity: critical
+        annotations:
+          summary: The engine failed accepted requests more than once in 15 minutes.
+          description: >-
+            Accepted generations or counts ended with engine_unavailable: an error event after the 200, an engine
+            that went away, or a change of engine under them.
+      - alert: Timeouts
+        expr: sum(increase(simple_serving_requests_total{outcome="timeout"}[30m])) >= 2
+        labels:
+          severity: warning
+        annotations:
+          summary: Accepted requests reached their wall time more than once in 30 minutes.
+          description: >-
+            Generations or counts were stopped at their class's wall time, 300 s for readers and 900 s for agent and
+            internal work on the card, whether they were waiting, streaming or sending their end.
+      - alert: InternalErrors
+        expr: sum(increase(simple_serving_requests_total{outcome="internal_error"}[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: The gateway failed a request with internal_error.
+          description: The gateway's log names the exception's class in the request's row.
+
+  - name: reader-waits
+    rules:
+      - alert: ReadersQueued
+        expr: sum(simple_serving_generations_waiting{class="reader"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Readers' generations have waited in the gateway for a place for 5 minutes on end.
+          description: >-
+            Every reader place is taken and readers queue in the gateway's own queue, not vLLM's. A drain empties
+            the queue, so this is not a planned stop.
+      - alert: ReadersRefusedQueueFull
+        expr: sum(increase(simple_serving_requests_total{class="reader", code="queue_full"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Readers were refused with queue_full.
+          description: >-
+            The readers' waiting queue in the gateway was full, so readers got 429 instead of a turn.
+      - alert: ReaderWaitLong
+        expr: >-
+          (histogram_quantile(0.9, sum by (le) (rate(simple_serving_wait_seconds_bucket{class="reader"}[15m]))) > 10)
+          and on() (sum(increase(simple_serving_wait_seconds_count{class="reader"}[15m])) >= 5)
+        labels:
+          severity: warning
+        annotations:
+          summary: Readers' generations waited over 10 s in the gateway, at the 90th percentile of 15 minutes.
+          description: >-
+            The gateway's wait from acceptance to a generation place, the count included, over at least 5 readers'
+            generations. It is the gateway's time: the reader waits longer.
+      - alert: ReaderFirstTokenLong
+        expr: >-
+          (histogram_quantile(0.9, sum by (le)
+          (rate(simple_serving_time_to_first_token_seconds_bucket{class="reader"}[15m]))) > 30)
+          and on() (sum(increase(simple_serving_time_to_first_token_seconds_count{class="reader"}[15m])) >= 5)
+        labels:
+          severity: warning
+        annotations:
+          summary: Readers' first tokens took over 30 s, at the 90th percentile of 15 minutes.
+          description: >-
+            The gateway's time from acceptance to the first token from vLLM, reasoning included, over at least 5
+            readers' first tokens. The reader sees the first words later.

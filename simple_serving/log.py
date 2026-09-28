@@ -28,6 +28,7 @@ FIELDS = frozenset({
     "process", "exit_code", "load_ms", "weights_mib", "weights_load_ms", "kv_cache_mib", "kv_cache_tokens",
     "concurrency_x100",
 })
+UNLOGGED = frozenset({"accepted", "stop"})  # fields of a request's record that stay out of its row
 
 
 @dataclass
@@ -52,10 +53,13 @@ class RequestRecord:
     first_token_ms: int | None = None
     total_ms: int | None = None
     exception: str | None = None  # the class of an unexpected exception, never its text
+    # For the metrics' outcome alone (metrics.py), not in the row: section 10 lists what a row holds.
+    accepted: bool = False  # the service accepted the request (contract section 4)
+    stop: str | None = None  # the first stop of accepted work: "disconnect", "timeout", "draining", ...
 
     def emit(self) -> None:
         fields = {("class" if name == "cls" else name): value for name, value in asdict(self).items()
-                  if value is not None}
+                  if value is not None and name not in UNLOGGED}
         row("request", **fields)
 
 

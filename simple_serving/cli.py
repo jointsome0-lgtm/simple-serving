@@ -1,7 +1,8 @@
 """simple-serving's command on the owner's machine: it starts the card, holds the tunnel and asks for sleep
 (contract section 8).
 
-    python -m simple_serving.cli [--config PATH] up | sleep | status | keys | trial --ssh-host HOST
+    python -m simple_serving.cli [--config PATH] up | sleep | status | keys [--metrics-file PATH]
+    python -m simple_serving.cli [--config PATH] trial --ssh-host HOST
 
 `up` waits out a stop in flight, resumes the instance once if it is stopped, and waits for it to run. Then it opens
 the tunnel, local 8080 to the gateway's public listener and 8081 to its control listener, waits for the gateway to be
@@ -12,15 +13,18 @@ starting a service; once the card has stopped, `up` ends.
 `sleep` asks the gateway to sleep, through a short control-only forward of its own, and reads `stopped` back from
 Vast. Without the gateway it stops nothing, since a stop through Vast would skip the drain. `status` tells the
 instance's state in Vast apart from what the gateway answers. Nothing of an answer is printed as it came: only the
-contract's codes and statuses, numbers, and the manifest's alias. `keys` creates the client key and the control key,
-never over existing ones, and prints only the SHA-256 of each, for the card's preparation:
+contract's codes and statuses, numbers, and the manifest's alias. `keys` creates the client key, the control key and
+the metrics key, never over existing ones, and prints only the SHA-256 of each, for the card's preparation:
 
     python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh
 
+With `--metrics-file` it also writes the metrics key alone into that file, open to its owner only, for Prometheus on
+the owner's machine (README, "Monitoring"); the metrics key reads the metrics and nothing else.
+
 The configuration is the owner's alone: a JSON object in `~/.config/simple-serving/config.json`, or the file that
-`--config` names, open to its owner only. `keys` writes `client_key` and `control_key` into it. The owner adds
-`instance_id`, `vast_api_key`, a Vast key allowed GET and PUT on that instance alone, and `ssh_host`, a host of
-~/.ssh/config whose host key is known. The owner copies the client key into the bot's model profile.
+`--config` names, open to its owner only. `keys` writes `client_key`, `control_key` and `metrics_key` into it. The
+owner adds `instance_id`, `vast_api_key`, a Vast key allowed GET and PUT on that instance alone, and `ssh_host`, a host
+of ~/.ssh/config whose host key is known. The owner copies the client key into the bot's model profile.
 
 On a trial rental, `trial` writes the id and the host instead: it reads the card's instance id over SSH from the file
 card/onstart.sh keeps, checks its form, and writes it with the host it read it through. The key stays the owner's:
@@ -54,7 +58,7 @@ from .config import CLASSES, IDLE_TIMEOUT_S
 from .errors import STATUS
 
 CONFIG = Path.home() / ".config/simple-serving/config.json"
-KEYS = ("client_key", "control_key")
+KEYS = ("client_key", "control_key", "metrics_key")
 LOCAL = {"public": 8080, "control": 8081}  # the tunnel's ports on the owner's machine (contract section 3)
 SSH_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SSH = ("ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ExitOnForwardFailure=yes",
@@ -217,19 +221,32 @@ def write_config(path: Path, config: Mapping[str, Any]) -> None:
     new.replace(path)
 
 
-def keys(path: Path) -> int:
-    """Create the keys that are missing, keep the others, and print the SHA-256 of each."""
+def keys(path: Path, metrics_file: Path | None = None) -> int:
+    """Create the keys that are missing, keep the others, and print the SHA-256 of each. With `metrics_file`, write
+    the metrics key into it as well, for Prometheus's credentials_file."""
     config = read_config(path)
     created = [name for name in KEYS if name not in config]
     for name in created:
         config[name] = secrets.token_urlsafe(32)
     if not all(isinstance(config[name], str) and config[name] for name in KEYS):
-        raise Refusal(f"{path} has a client_key or control_key that is not a string")
+        raise Refusal(f"{path} has a {', '.join(KEYS[:-1])} or {KEYS[-1]} that is not a string")
     if created:
         write_config(path, config)
+    if metrics_file is not None:
+        write_secret(metrics_file, config["metrics_key"])
     print(*(hashlib.sha256(config[name].encode()).hexdigest() for name in KEYS), sep="\n")
-    print(f"keys: {' and '.join(created) + ' created' if created else 'both kept'} in {path}", file=sys.stderr)
+    print(f"keys: {', '.join(created) + ' created' if created else 'all kept'} in {path}", file=sys.stderr)
     return 0
+
+
+def write_secret(path: Path, secret: str) -> None:
+    """Replace a file with one secret and nothing else, open to its owner only, in a directory open to its owner."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    new = path.with_name(path.name + ".new")
+    new.unlink(missing_ok=True)
+    with os.fdopen(os.open(new, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
+        file.write(secret)
+    new.replace(path)
 
 
 async def trial(path: Path, host: str) -> int:
@@ -515,14 +532,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m simple_serving.cli", description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path, default=CONFIG, help="the configuration file (default: %(default)s)")
     parser.add_argument("--ssh-host", help="trial's card: a host of ~/.ssh/config whose host key is known")
+    parser.add_argument("--metrics-file", type=Path, help="keys: also write the metrics key into this file")
     parser.add_argument("command", choices=("up", "sleep", "status", "keys", "trial"))
     args = parser.parse_args(argv)
     if (args.command == "trial") != (args.ssh_host is not None):
         parser.error("--ssh-host goes with trial, and trial needs it")
+    if args.metrics_file is not None and args.command != "keys":
+        parser.error("--metrics-file goes with keys")
     commands = {"up": up, "sleep": sleep, "status": status}
     try:
         if args.command == "keys":
-            return keys(args.config)
+            return keys(args.config, args.metrics_file)
         if args.command == "trial":
             return asyncio.run(trial(args.config, args.ssh_host))
         return asyncio.run(commands[args.command](load(args.config)))
