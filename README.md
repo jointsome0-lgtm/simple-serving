@@ -230,6 +230,28 @@ against 57 to 67 without the drafter, and vLLM accepted 21718 of 34343 drafted t
 rental measures it ([docs/speed.md](docs/speed.md), item 5). It is switched as the drafter is, by the preparation
 again and a new start, and `/v1/state` then names its size among the versions.
 
+`VISION` in the manifest lets the card's own Gemma 4 read a picture, so that the captions of the bot's pose
+references are written here and no picture goes to a hosted API, as the owner wants since 2026-09-28. It is 0, off,
+until a rental measures it, and vLLM then gets `--language-model-only`, which keeps the vision tower off the GPU, as
+before. With 1 the launcher gives vLLM `--limit-mm-per-prompt '{"image": 1, "video": 0, "audio": 0}'` and
+`--mm-processor-cache-gb 0` instead: a prompt holds one picture at most, and vLLM keeps no processed picture once its
+request has ended. The preparation copies the tokenizer's `processor_config.json`, `tokenizer.json` and
+`tokenizer_config.json` beside the weights, where vLLM 0.30.0 builds Gemma 4's picture processor, and checks each
+against its pin. The gateway then takes one picture a request from the client key (contract section 4), and
+`/v1/state` names `vision` among the versions. It is switched as the drafter is: `VISION=1` in the checkout, the
+preparation again with nothing on stdin, `--stop` and a new start. `VISION=0` and the same steps turn it off, and the
+preparation removes the three files.
+
+What the tower costs is estimated, not measured. The NVFP4 checkpoint leaves it unquantized, and vLLM 0.30.0 builds
+it in bfloat16: 0.58 billion parameters, 1.07 GiB, which come out of the KV cache. At the 6011 MiB for 104492 tokens
+of 2026-09-26, with the drafter and the fp8 cache, that is about 19000 tokens, so some 85000 would be left, fewer by
+what the encoder takes while it runs, which vLLM's profile at the start takes out too. The launcher's
+`kv_cache_tokens` gives the number. A picture takes at most 282 tokens of the context: vLLM scales any
+picture to about 800 by 800 pixels, 280 tokens, and rounds its sides down to 48 pixels, so a square one takes 258. A
+step of 1024 tokens (`MAX_NUM_BATCHED_TOKENS`) holds a picture whole and encodes three at most. The drafter stays
+on: vLLM's MTP drafts from the text alone and warns at the start that the drafter takes no pictures; how many of its
+tokens vLLM keeps in an answer about a picture is to be measured.
+
 What else might make the card faster, not measured yet, is in [docs/speed.md](docs/speed.md).
 
 At every later start of the container the rental's own onstart starts the service. Its last line runs the service's
@@ -383,6 +405,20 @@ uv run python -m simple_serving.smoke --config keys.json --public-port 8201 --co
 
 The pause after each event holds a stream open while the abort probe looks for it. With multi-token prediction on in
 the manifest, the pins make the gateway refuse the `min_p` of the `fields` probe, as the card's does.
+
+The smoke has no probe of pictures yet, and with `VISION=1` it runs as it does without. Before the bot sends a
+picture, a card with the tower must also show, with synthetic pictures made for it and never a reader's:
+- the tower's cost: the launcher's `kv_cache_tokens` beside the 104492 without it ("The card" above), and the time to
+  ready;
+- a completion with one picture and a short text part: `[DONE]`, and an answer that says something true of the
+  picture, such as the colour of a plain square;
+- counts: for a body with a picture, the count equals `usage.prompt_tokens`, as the count matrix checks it for text,
+  and exceeds the count of the same body without the picture by at most 282, by 258 for a square one;
+- refusals: a second picture and an `http` URL get 400 `invalid_request` from the gateway, and vLLM sees neither;
+- privacy: the probe's marker written into the picture itself, in a text chunk of a PNG, is in no file of `logs/`,
+  and neither is a piece of the picture's base64;
+- with the drafter on, the share of drafted tokens that vLLM keeps in an answer about a picture, against one about
+  text, and the time to the first token of each.
 
 ## The first rental
 
