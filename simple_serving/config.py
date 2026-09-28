@@ -32,6 +32,9 @@ IDLE_TIMEOUT_S = 780  # without work of ours, before the service falls asleep (c
 # prediction, their count (card.pinned_versions). The gateway takes it as the sign that vLLM runs speculative decoding,
 # and then refuses a min_p that vLLM would refuse (service.py).
 DRAFTED_TOKENS = "mtp_speculative_tokens"
+# The entry of `versions`, "on", that the card's launcher writes while it passes vLLM the markers of a thinking budget
+# (card.pinned_versions). Only then does the gateway pass a request's thinking_token_budget on (service.py).
+THINKING_BUDGET = "thinking_budget"
 # The provisional values of contract section 7, which the dev launcher and the card use until the card has measured
 # its own (section 15, step 4).
 PROVISIONAL: dict[str, Any] = {
@@ -105,6 +108,7 @@ class Config:
     health_interval_s: float
     versions: Mapping[str, str]
     speculative: bool  # vLLM drafts tokens: `versions` names their count
+    thinking_budget: bool  # vLLM holds a thought to a request's budget: `versions` says so
 
 
 def load(path: str) -> Config:
@@ -162,6 +166,8 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
     drafted = versions.get(DRAFTED_TOKENS)
     if drafted is not None and not re.fullmatch(r"[1-9][0-9]*", drafted):
         raise ConfigError(f"versions.{DRAFTED_TOKENS} must be a count above 0, or left out while nothing drafts")
+    if versions.get(THINKING_BUDGET, "on") != "on":
+        raise ConfigError(f"versions.{THINKING_BUDGET} must be \"on\", or left out while the budget is off")
     return Config(
         alias=_string(data.get("alias"), "alias"),
         engine_url=engine_url.rstrip("/"),
@@ -184,6 +190,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
         health_interval_s=_seconds(data.get("health_interval_s", 5), "health_interval_s"),
         versions=MappingProxyType(dict(versions)),
         speculative=drafted is not None,
+        thinking_budget=THINKING_BUDGET in versions,
     )
 
 

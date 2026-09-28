@@ -135,6 +135,7 @@ reads, chunked bodies included, and stops reading past the limit with 413 `body_
 | `seed`                 | integer                                          | optional                           |
 | `response_format`      | `{"type": "json_schema", "json_schema": {"name": string, "strict": boolean, "schema": object}}` | optional |
 | `chat_template_kwargs` | `{"enable_thinking": boolean}`                   | optional, default `false`          |
+| `thinking_token_budget` | integer from 0 to the class's `max_tokens`      | optional; only while the card turns the budget on, see below |
 
 Any other field, at any depth, is refused with 400 `unsupported_field`. The rule does not look inside `schema`, which
 the gateway passes on as it is. A value of the wrong type or out of range is refused with 400 `invalid_request`. So is
@@ -149,10 +150,23 @@ stage, with 400 `min_p_unavailable`, and the engine sees nothing of it. A `min_p
 drafted tokens among its pinned versions (section 12), which the card's launcher writes only then. While the engine
 does not draft, `min_p` goes to the engine as it is.
 
+`thinking_token_budget` is the most tokens that the thought may take, counted from its opening marker `<|channel>`. Once
+they are spent, vLLM 0.30.0 writes the closing marker `<channel|>` itself, and the model goes on to its answer;
+`max_tokens` still counts the thought and the answer together. With thinking off there is no thought to hold. The
+gateway passes it on only while `THINKING_BUDGET` in `card/manifest.env` is 1: the card's launcher then gives vLLM the
+markers (`--reasoning-config`) and writes `"thinking_budget": "on"` among the pinned versions (section 12), which is how
+the gateway and the control key know. Otherwise the gateway refuses a generation with the field, whatever its value,
+with 400 `thinking_budget_unavailable`, before its count stage, and the engine sees nothing of it, so that a client
+never takes a budget that goes nowhere for one that holds. It is 0 until a card has shown that vLLM holds Gemma 4's
+thought to it, since vLLM names Qwen3, DeepSeek and Nemotron as tested with the budget and not Gemma 4
+([thinking-budget.md](thinking-budget.md)). A value that is not an integer from 0 up is `invalid_request` in either
+case, and so, while the budget is on, is one above the class's `max_tokens`.
+
 ### Before the stream starts
 
 The gateway checks, in this order: the route, the key, the service status, the class, the scope, the body (its size,
-then JSON, then the fields), `max_tokens` against the class limit, and `min_p` while the engine drafts tokens (above).
+then JSON, then the fields), `max_tokens` against the class limit, `min_p` while the engine drafts tokens, and
+`thinking_token_budget` (above).
 Then it accepts the request, checking the service status once more, since a drain may have begun while the body was
 read. From acceptance on, the wall time and the measurements of section 11 run, and a drain sees the request as work
 (section 8). Before acceptance a fixed bound applies instead, 30 seconds from the request's arrival, and it is not a
@@ -219,8 +233,8 @@ event. The gateway then ends its stream with the error event `engine_unavailable
   most 2 counts at once, waiting ones included; a third is refused with 429 `queue_full`. The count stage of a
   generation shares these limits.
 - The gateway sends the engine only what renders the prompt: the model alias, the messages and the template arguments,
-  never the rest of the body. So a count does not apply the rule of section 4 on `min_p` while the engine drafts
-  tokens.
+  never the rest of the body. So a count does not apply the rules of section 4 on `min_p` while the engine drafts
+  tokens and on `thinking_token_budget`, beyond the field's type.
 - A count applies neither the class limits of section 7 nor the context. A body whose `n` plus `max_tokens` exceeds
   the context is still counted. The answer is the count.
 
@@ -439,6 +453,7 @@ body. FastAPI's default validation answer echoes the input, so it is replaced.
 | 400    | `limit_exceeded`                                  | input or `max_tokens` over the class limit   |
 | 400    | `context_limit`                                   | input plus `max_tokens` over the context     |
 | 400    | `min_p_unavailable`                               | a `min_p` that the engine refuses while it drafts tokens (section 4) |
+| 400    | `thinking_budget_unavailable`                     | a `thinking_token_budget` while the card has the budget off (section 4) |
 | 401    | `unauthorized`                                    | no key or an unknown key                     |
 | 403    | `class_not_allowed`, `scope_not_allowed`          | the key may not use the class or the scope   |
 | 403    | `forbidden`                                       | a key without the control right on a control route |
@@ -480,8 +495,8 @@ Cancellation:
   fixed category of failure or warning and a few numbers: load time, memory and KV cache capacity. The gateway's rows
   are checked again on the way to their file. Request and access logging, core dumps and usage statistics are off.
 - A log row may hold the time, route, key label, class, scope kind (`reader`, `agent`, `internal` or `external`, never
-  the opaque part), status, error code, token counts, the measurements of section 11, whether the request was
-  cancelled, and the finish reason.
+  the opaque part), status, error code, token counts, a generation's `thinking_token_budget` as a number, the
+  measurements of section 11, whether the request was cancelled, and the finish reason.
 - Cache scopes and salts are described in section 2. They close the timing channel between scopes. They do not limit
   memory.
 - Tests and load use synthetic stories only, never a real reader's story.
@@ -505,7 +520,8 @@ Before any contract run on the card, this repository pins:
 - FastAPI, Starlette, the ASGI server and the rest of the gateway, in `uv.lock`;
 - the model's files at one revision, each with its hash;
 - the revision of the tokenizer and the chat template;
-- the files of the drafter for speculative decoding at one revision, each with its hash, fetched only when it is on.
+- the files of the drafter for speculative decoding at one revision, each with its hash, fetched only when it is on;
+- whether vLLM holds a thought to a request's budget, `THINKING_BUDGET`, and the markers it then gets.
 
 `card/manifest.env` holds the card's pins and parameters. The card's preparation installs each lock into a venv of its
 own, checks every hash and runs `pip check`, once per rental and never at a resume. `/v1/state` shows the versions to
@@ -722,3 +738,8 @@ GPTQ or NVFP4, a separate configuration, measured again.
   stopped at `fields`, whose `min_p` of 0.05 vLLM refused, and which the gateway answered as it answers any refusal of
   the engine, with 400 `invalid_request`. The card then ran with `MTP_SPECULATIVE_TOKENS=0`, where the smoke passed 10
   of 10. Multi-token prediction stays on by default.
+- 2026-09-28, the owner: the card may hold Gemma 4's thought to a token budget, so that a scene can think briefly
+  instead of not at all or at length. The gateway takes `thinking_token_budget` and passes it to vLLM while
+  `THINKING_BUDGET` is 1 (section 4), and refuses it with 400 `thinking_budget_unavailable` while it is 0, the
+  default until a card has shown that vLLM holds Gemma 4's thought to the budget, with multi-token prediction on.
+  The bot sends no budget until then.

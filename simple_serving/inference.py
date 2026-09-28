@@ -188,6 +188,7 @@ class Generation(Work):
 
     async def run(self) -> None:
         record = self.exchange.record
+        record.thinking_budget = self.request.thinking_token_budget
         record.input_tokens = await self.count()
         self.service.check_input(self.caller, record.input_tokens, self.request.max_tokens)
         self.ticket = self.service.admission.enter(self.caller.cls, self.caller.outside_key)

@@ -139,9 +139,11 @@ never the key:
 
 `context_tokens` is the gateway's own limit, or `null` for the engine's. Optional fields: `body_limit_bytes`
 (2 000 000), `max_connections` (64), `idle_timeout_s` (780), `health_interval_s` (5) and `versions`, which the control
-key sees in `/v1/state` next to the gateway's own. One of them is also a switch: `mtp_speculative_tokens`, a count
-above 0 that the card's launcher writes only while vLLM drafts tokens, makes the gateway refuse the `min_p` that vLLM
-would refuse then ("The card" below). An outside key has the classes `["external"]` and no scopes. To hash a key
+key sees in `/v1/state` next to the gateway's own. One of them is also a switch: `mtp_speculative_tokens`, a count above
+0 that the card's launcher writes only while vLLM drafts tokens, makes the gateway refuse the `min_p` that vLLM would
+refuse then ("The card" below). So is `thinking_budget`, `"on"`, which the launcher writes only while it gives vLLM the
+markers of a thinking budget: the gateway then passes a request's `thinking_token_budget` on, and without it refuses the
+field with 400 `thinking_budget_unavailable`. An outside key has the classes `["external"]` and no scopes. To hash a key
 without printing it:
 
 ```
@@ -223,6 +225,16 @@ against 57 to 67 without the drafter, and vLLM accepted 21718 of 34343 drafted t
 `KV_OFFLOADING_GIB` in the manifest gives vLLM a copy of the KV cache in the card's RAM, and it is 0, off, until a
 rental measures it ([docs/speed.md](docs/speed.md), item 5). It is switched as the drafter is, by the preparation
 again and a new start, and `/v1/state` then names its size among the versions.
+
+`THINKING_BUDGET` in the manifest lets a request hold Gemma 4's thought to a number of tokens, its
+`thinking_token_budget`, after which vLLM writes the thought's closing marker itself and the model goes on to its answer
+(contract section 4). At 1 the launcher passes vLLM `--reasoning-config` with the markers, `<|channel>` and
+`<channel|>`, and writes `"thinking_budget": "on"` among the versions, and the gateway passes the budget on; at 0 the
+gateway refuses it with 400 `thinking_budget_unavailable`. vLLM 0.30.0 derives the same markers from `--reasoning-parser
+gemma4` without the flag, so the flag pins them and changes neither the engine's start nor its compile cache; what the
+switch turns on is the gateway's side. It is 0 until a card has shown that vLLM holds Gemma 4's thought to the budget
+with multi-token prediction on: vLLM names other models as tested with it, not Gemma 4. It is switched as the drafter
+is, and the job that would show it is [docs/thinking-budget.md](docs/thinking-budget.md).
 
 What else might make the card faster, not measured yet, is in [docs/speed.md](docs/speed.md).
 
@@ -325,8 +337,9 @@ The probes run in this order, each within a time bound of its own, and the first
   usage chunk, then `[DONE]`.
 - `fields`: each optional field of section 4 alone, at a legal value, and the answer with `response_format` follows
   its schema. While the manifest turns multi-token prediction on, the 0.05 of `min_p` is due to be refused instead,
-  and its part passes on the gateway's 400 `min_p_unavailable` alone. Beside them, two answers with one seed at
-  temperature 0.8, compared by hash: an observation, which passes nothing.
+  and its part passes on the gateway's 400 `min_p_unavailable` alone, and so does the `thinking_token_budget` of 64
+  on 400 `thinking_budget_unavailable` while the manifest leaves the budget off. Beside them, two answers with one
+  seed at temperature 0.8, compared by hash: an observation, which passes nothing.
 - `reasoning`: thinking on gives reasoning and an answer, thinking off an answer alone.
 - `finish`: `length` after exactly 8 tokens, and `stop`.
 - `refusal`: a schema whose `pattern` does not compile is 400 `invalid_request`, before any stream. The comment at
@@ -342,6 +355,13 @@ The probes run in this order, each within a time bound of its own, and the first
 - `counts`: the count matrix. For plain text, a system and a user turn, system, user, assistant and user turns, a
   schema, thinking on, thinking off, and a prompt just below the context, found by counting: the count, then a
   generation of a few tokens, whose `usage.prompt_tokens` must equal the count.
+- `budget`: while the manifest turns the thinking budget on, budgets of 128, 300 and 1024 tokens with thinking on,
+  beside thinking off and thinking to its own end, on three synthetic prompts with a schema: a puzzle and the bot's
+  `frame` and `scene_judge`. A budget's answer ends in `stop` and follows its schema, and its thought took at most the
+  budget and 8 tokens, the completion's tokens less the answer's counted apart (`within`). The seconds of each call,
+  the thought's tokens, whether the thought without a budget ran past the budget (`bound`) and whether the puzzle came
+  out right are observations. It makes every call even after one failed. While the budget is off, the gateway's 400
+  `thinking_budget_unavailable` to one budget is the probe.
 - `privacy`: one completion whose prompt holds a fresh random marker, which no file in the card's `logs/` may hold:
   the gateway's rows, the launcher's rows with what it keeps of vLLM's output, the older file beside each, and
   anything else there. The probe counts the marker in each and prints only the counts. One occurrence fails it, and
@@ -375,8 +395,9 @@ uv run python -m simple_serving.dev --config dev.json --engine-port 8200 --publi
 uv run python -m simple_serving.smoke --config keys.json --public-port 8201 --control-port 8202 --fake --card-dir logs/dry-run
 ```
 
-The pause after each event holds a stream open while the abort probe looks for it. With multi-token prediction on in
-the manifest, the pins make the gateway refuse the `min_p` of the `fields` probe, as the card's does.
+The pause after each event holds a stream open while the abort probe looks for it. With multi-token prediction on in the
+manifest, the pins make the gateway refuse the `min_p` of the `fields` probe, as the card's does, and with the thinking
+budget off, the budget of `fields` and of `budget`.
 
 ## The first rental
 
@@ -436,26 +457,26 @@ of "The card" above has started the service:
    pipeline ends with the smoke's own exit code, which `tee` would otherwise hide.
 
 Each line of the smoke is one probe: `probe`, `ok`, the gateway's HTTP `status` and the contract's `code` where one
-came, `failed` with the names of what broke, and numbers. `fields`, `reasoning`, `finish`, `schemas` and `counts` hold
-an object per part, each with its own `ok`, and pass when every part passes. A name in `failed` is a rule of section 4's
-stream, such as `model` for a chunk without the alias or `done` for a stream without `[DONE]`, or a check of the probe:
-`equal` for a count that differs from `usage.prompt_tokens`, `answer` for an answer that breaks its schema, whose field
-`answer` lists the keywords it breaks, or `json` for one that is not JSON; `pair`, `boot` or `deadline` in the
-lifecycle; `ready`, `status`, `first_event`, `held`, `freed`, `unlogged`, `inconclusive` or `drained` in the abort; and
-`code`, `unlogged` or `marker` in the privacy probe. `left_drained` means that the open undoing the abort's drain was
-not read back as `ready`, so the gateway may be left drained; `no_answer` that the gateway did not answer,
-`no_report` that the card's report did not come or came in another form, `time_bound` that the probe ran past its
-bound, and `smoke_error` an error in the smoke itself, whose class `error` names. With `no_report`, `report` says
+came, `failed` with the names of what broke, and numbers. `fields`, `reasoning`, `finish`, `schemas`, `counts` and
+`budget` hold an object per part, each with its own `ok`, and pass when every part passes. A name in `failed` is a rule
+of section 4's stream, such as `model` for a chunk without the alias or `done` for a stream without `[DONE]`, or a check
+of the probe: `equal` for a count that differs from `usage.prompt_tokens`, `answer` for an answer that breaks its
+schema, whose field `answer` lists the keywords it breaks, or `json` for one that is not JSON; `pair`, `boot` or
+`deadline` in the lifecycle; `ready`, `status`, `first_event`, `held`, `freed`, `unlogged`, `inconclusive` or `drained`
+in the abort; and `code`, `unlogged` or `marker` in the privacy probe. `left_drained` means that the open undoing the
+abort's drain was not read back as `ready`, so the gateway may be left drained; `no_answer` that the gateway did not
+answer, `no_report` that the card's report did not come or came in another form, `time_bound` that the probe ran past
+its bound, and `smoke_error` an error in the smoke itself, whose class `error` names. With `no_report`, `report` says
 how: `timeout`, `pipe`, `exit` with the command's code in `exit` (255 is ssh's own), `size`, `json`, `shape` or
-`no_host`, and `call` names the request: `plain`, `marker` or `since`. The numbers are the stream's chunks,
-the lengths of the answer and of the reasoning in characters, the usage, and the gateway's `wait_ms`,
-`first_token_ms` and `total_ms`; in the count matrix `input_tokens` beside `prompt_tokens`, and near the context the
-`max_tokens` that fills it and the counts the search took; in the lifecycle the `launchers`, their `children` and the
-seconds left to the guard's deadline; in the abort `held`, `freed_ms` and `cancelled`; in the privacy probe the
-marker's count in each log under `found`, the request's rows under `logged`, and `echoed`, the times the answer
-repeated the marker, which passes nothing. `versions` shows each pin as this checkout has it, or `false` where the
-card shows another, and the card's Python. `seed_repeats` passes nothing. No line holds a key, a prompt, the marker,
-an answer or reasoning, so the lines may be kept.
+`no_host`, and `call` names the request: `plain`, `marker` or `since`. The numbers are the stream's chunks, the lengths
+of the answer and of the reasoning in characters, the usage, and the gateway's `wait_ms`, `first_token_ms` and
+`total_ms`; in the count matrix `input_tokens` beside `prompt_tokens`, and near the context the `max_tokens` that fills
+it and the counts the search took; in the lifecycle the `launchers`, their `children` and the seconds left to the
+guard's deadline; in the abort `held`, `freed_ms` and `cancelled`; in the privacy probe the marker's count in each log
+under `found`, the request's rows under `logged`, and `echoed`, the times the answer repeated the marker, which passes
+nothing. `versions` shows each pin as this checkout has it, or `false` where the card shows another, and the card's
+Python. `seed_repeats` passes nothing. No line holds a key, a prompt, the marker, an answer or reasoning, so the lines
+may be kept.
 
 Exit 0, with `simple-serving smoke: 11 of 11 probes passed` on standard error, ends section 15's step 1, and its last
 probe, `privacy`, is the marker half of its step 2. After it the trial's internal work is the texts of

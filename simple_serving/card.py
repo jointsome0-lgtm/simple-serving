@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from . import log, vast
-from .config import DRAFTED_TOKENS, IDLE_TIMEOUT_S, PROVISIONAL
+from .config import DRAFTED_TOKENS, IDLE_TIMEOUT_S, PROVISIONAL, THINKING_BUDGET
 
 CODE = Path(__file__).resolve().parent.parent  # the checkout
 STATE = Path(os.environ.get("SIMPLE_SERVING_CARD_DIR", "/workspace/simple-serving-card"))
@@ -74,6 +74,10 @@ CARD_LOG_BYTES, GATEWAY_LOG_BYTES = 1 << 20, 8 << 20
 GATEWAY_GRACE_S, ENGINE_GRACE_S = 10, 30  # from SIGTERM to SIGKILL
 POLL_S, HOLD_START_S, STOP_WAIT_S = 2, 60, 60
 ENGINE_ENV = {"VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+# The markers of Gemma 4's thought, <|channel>thought\n...<channel|>: the pinned tokenizer's soc_token and eoc_token
+# (tokenizer_config.json), and vLLM 0.30.0's CHANNEL_START and CHANNEL_END (vllm/parser/gemma4.py:38-39). vLLM counts
+# a budget's tokens from the first, and writes the second once they are spent.
+THOUGHT_MARKERS = {"reasoning_start_str": "<|channel>", "reasoning_end_str": "<channel|>"}
 
 # vLLM's wording of the numbers kept, as in the source of vLLM 0.30.0, and provisional until the first rental checks
 # each against its output. A field's last word names its unit, and SCALE turns vLLM's GiB, seconds and factors into it.
@@ -146,7 +150,7 @@ class Card:
             # Sampling defaults from vLLM: the model's generation_config.json is pinned for its stop ids alone.
             "--generation-config", "vllm",
             "--disable-uvicorn-access-log", "--uvicorn-log-level", "warning",
-            *self.speculation(), *self.offloading(),
+            *self.speculation(), *self.offloading(), *self.reasoning(),
         ], {name: value for name, value in os.environ.items() if name != "CONTAINER_API_KEY"} | ENGINE_ENV)
 
     def speculation(self) -> list[str]:
@@ -164,6 +168,13 @@ class Card:
         backend, and none while that is 0."""
         gib = int(self.manifest["KV_OFFLOADING_GIB"])
         return ["--kv-offloading-size", str(gib)] if gib else []
+
+    def reasoning(self) -> list[str]:
+        """vLLM's argument for a thinking budget while THINKING_BUDGET is 1, and none while it is 0. vLLM 0.30.0 takes
+        the same markers from --reasoning-parser gemma4 without it (vllm/config/reasoning.py:83-95), so the argument
+        pins them rather than turns the budget on: with or without it, the gateway is what refuses a budget while the
+        switch is 0. It is not among the factors of vLLM's compile cache (VllmConfig.compute_hash)."""
+        return ["--reasoning-config", json.dumps(THOUGHT_MARKERS)] if int(self.manifest["THINKING_BUDGET"]) else []
 
     def gateway(self) -> Command:
         return Command([str(self.state / "gateway/bin/python"), "-m", "simple_serving"],
@@ -204,7 +215,8 @@ def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
     """The engine's pins that the gateway shows the control key in /v1/state, beside its own (contract section 12).
     With multi-token prediction on they name the drafter and its tokens too, and with the KV cache's copy in RAM its
     size, so that a record says which it measured. The count of drafted tokens also tells the gateway that vLLM
-    drafts, and so which min_p it refuses (config.DRAFTED_TOKENS)."""
+    drafts, and so which min_p it refuses (config.DRAFTED_TOKENS), and the thinking budget's entry that it may pass
+    a budget on (config.THINKING_BUDGET)."""
     pins = {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
             "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
     if int(manifest["MTP_SPECULATIVE_TOKENS"]):
@@ -212,6 +224,8 @@ def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
                  DRAFTED_TOKENS: manifest["MTP_SPECULATIVE_TOKENS"]}
     if int(manifest["KV_OFFLOADING_GIB"]):
         pins |= {"kv_offloading_gib": manifest["KV_OFFLOADING_GIB"]}
+    if int(manifest["THINKING_BUDGET"]):
+        pins |= {THINKING_BUDGET: "on"}
     return pins
 
 

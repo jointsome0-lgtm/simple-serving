@@ -125,6 +125,17 @@ class Service:
         if self.config.speculative and sampling.get("min_p", 0) > MIN_P_EPS and sampling.get("temperature", 1) != 0:
             raise ServiceError("min_p_unavailable")
 
+    def check_thinking_budget(self, caller: Caller, request: ChatRequest) -> None:
+        """A thinking budget goes on only while the card's launcher has given vLLM its markers, so that a client never
+        takes a budget that nothing holds the thought to for one that is held; and at most the class's max_tokens."""
+        budget = request.thinking_token_budget
+        if budget is None:
+            return
+        if not self.config.thinking_budget:
+            raise ServiceError("thinking_budget_unavailable")
+        if budget > self.config.limits[caller.cls].max_tokens:
+            raise ServiceError("invalid_request")
+
     def accept(self, work: Work) -> None:
         """Take on a checked request, if the service still serves."""
         self.check_serving()

@@ -267,6 +267,34 @@ async def test_a_min_p_that_vllm_refuses_while_it_drafts_is_refused_before_the_e
     assert view.get("unavailable_fields") == (["min_p"] if drafting else None)
 
 
+@pytest.mark.parametrize("enabled", [True, False], ids=["budget on", "budget off"])
+async def test_a_thinking_budget_reaches_the_engine_as_sent_and_only_while_the_card_enables_it(enabled: bool) -> None:
+    """It guards against money lost unnoticed: a budget dropped on the way, or passed on while the card has not given
+    vLLM its markers, lets a thought run to its own end on a paid card while the client believes it held."""
+    most = SERVICE["limits"]["internal"]["max_tokens"]
+    budgets = {"zero": 0, "the class's most": most, "none": None}
+    invalid = {"over the class's": most + 1, "negative": -1, "boolean": True, "float": 128.0, "text": "128"}
+    versions = {"thinking_budget": "on"} if enabled else {}
+    async with running(versions=versions) as stack, httpx.AsyncClient(timeout=10) as client:
+        answers = {name: await generate(client, stack, user_body(name, **(
+            {} if budget is None else {"thinking_token_budget": budget}))) for name, budget in budgets.items()}
+        refusals = {name: await generate(client, stack, user_body(name, thinking_token_budget=budget))
+                    for name, budget in invalid.items()}
+        view = (await control(client, stack, "/v1/state", method="GET")).json()
+    sent = {prompt_of(made.body): made.body for made in stack.fake.calls_of("generate")}
+    assert sent.keys() == ({*budgets} if enabled else {"none"})  # nothing else reached the engine, not even a count
+    assert {prompt_of(made.body) for made in stack.fake.calls_of("tokenize")} == sent.keys()
+    for name, budget in budgets.items():
+        if name in sent:
+            assert answers[name].done and sent[name].get("thinking_token_budget") == budget
+        else:
+            assert_refused(answers[name], 400, "thinking_budget_unavailable")
+    for name, answer in refusals.items():
+        over = name == "over the class's" and not enabled  # the switch is checked before the class's limit
+        assert_refused(answer, 400, "thinking_budget_unavailable" if over else "invalid_request")
+    assert view["versions"].get("thinking_budget") == ("on" if enabled else None)  # how the control key tells
+
+
 async def test_a_body_nested_past_the_limit_is_invalid_even_inside_the_schema() -> None:
     def with_schema(schema: Any) -> dict[str, Any]:
         return chat_body(response_format={"type": "json_schema",

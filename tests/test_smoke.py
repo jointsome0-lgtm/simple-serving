@@ -91,10 +91,14 @@ async def test_the_dry_run_passes_every_probe_and_prints_no_key_no_prompt_and_no
             str(logs.parent), "--public-port", launch.public.rsplit(":", 1)[1], "--control-port",
             launch.control.rsplit(":", 1)[1], cwd=ROOT, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, err = await asyncio.wait_for(process.communicate(), 120)
-    assert (process.returncode, err) == (0, b"simple-serving smoke: 10 of 10 probes passed\n")  # each one printed
-    min_p = next(line for line in map(json.loads, out.splitlines()) if line["probe"] == "fields")["min_p"]
+    assert (process.returncode, err) == (0, b"simple-serving smoke: 11 of 11 probes passed\n")  # each one printed
+    lines = {line["probe"]: line for line in map(json.loads, out.splitlines())}
+    min_p, budget = lines["fields"]["min_p"], lines["fields"]["thinking_token_budget"]
     drafting = int(manifest["MTP_SPECULATIVE_TOKENS"]) > 0  # the gateway refuses the min_p that vLLM would
     assert (min_p["status"], min_p.get("code")) == ((400, "min_p_unavailable") if drafting else (200, None))
-    for secret in (BOT, CONTROL, smoke.SHORT, smoke.FILLER.strip(), smoke.COUNTING, smoke.ECHO, "keeper", *SENTENCE,
-                   *THOUGHT):
+    held = int(manifest["THINKING_BUDGET"]) > 0  # off, the gateway refuses the budget
+    assert (budget["status"], budget.get("code")) == ((200, None) if held else (400, "thinking_budget_unavailable"))
+    assert held or lines["budget"]["code"] == "thinking_budget_unavailable"
+    for secret in (BOT, CONTROL, smoke.SHORT, smoke.PUZZLE, smoke.FILLER.strip(), smoke.COUNTING, smoke.ECHO, "keeper",
+                   *SENTENCE, *THOUGHT):
         assert secret.encode() not in out
