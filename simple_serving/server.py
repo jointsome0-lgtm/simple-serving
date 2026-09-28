@@ -1,4 +1,5 @@
-"""Running the gateway: the service and two uvicorn servers, public and control, in one process and one event loop."""
+"""Running the gateway: the service and two uvicorn servers, public and control, in one process and one event loop.
+The picture lane runs the same way (`pictures/server.py`)."""
 
 from __future__ import annotations
 
@@ -10,16 +11,16 @@ import socket
 import sys
 from collections.abc import Iterator
 from types import TracebackType
-from typing import Self
+from typing import Any, Self
 
 import uvicorn
 from starlette.types import ASGIApp
 
 from . import log, vast
-from .app import control_app, public_app
+from .app import Guard, control_app, public_app
 from .config import ENV_VAR, Config, ConfigError, Listener, load
 from .engine import EngineClient
-from .service import Service
+from .service import Lifecycle, Service
 
 GRACEFUL_SHUTDOWN_S = 5
 
@@ -49,9 +50,11 @@ def bind(listener: Listener) -> socket.socket:
 class Servers:
     """ASGI applications served by uvicorn on sockets that are already bound, started and stopped together."""
 
-    def __init__(self, apps: list[tuple[ASGIApp, socket.socket]], *, graceful_s: int = GRACEFUL_SHUTDOWN_S) -> None:
-        # No access log: the gateway writes its own rows. No lifespan: the owner starts and stops the service.
-        self.servers = [Server(uvicorn.Config(app, http="h11", ws="none", lifespan="off", log_config=None,
+    def __init__(self, apps: list[tuple[ASGIApp, socket.socket]], *, graceful_s: int = GRACEFUL_SHUTDOWN_S,
+                 ws: str = "none") -> None:
+        # No access log: the gateway writes its own rows. No lifespan: the owner starts and stops the service. No
+        # websockets but a fake ComfyUI's (`pictures/fake_comfy.py`).
+        self.servers = [Server(uvicorn.Config(app, http="h11", ws=ws, lifespan="off", log_config=None,
                                               access_log=False, proxy_headers=False, server_header=False,
                                               timeout_graceful_shutdown=graceful_s)) for app, _ in apps]
         self._sockets = [sock for _, sock in apps]
@@ -75,31 +78,35 @@ class Servers:
             sock.close()
 
 
-class Gateway:
-    """The service and its two listeners. `async with Gateway(config, stop=...)` starts them; leaving the block stops
-    them. `stop` is how the service stops its instance when it falls asleep."""
+class Lane:
+    """A lane's service and its two listeners. `async with` starts them; leaving the block stops them."""
 
-    def __init__(self, config: Config, *, stop: vast.Stop, graceful_s: int = GRACEFUL_SHUTDOWN_S) -> None:
-        self.config = config
-        self.service = Service(config, EngineClient(config.engine_url), stop)
+    def __init__(self, lifecycle: Lifecycle, public: Listener, control: Listener, *, graceful_s: int,
+                 **row: Any) -> None:
+        self._lifecycle = lifecycle
+        self._listeners = {"public": public, "control": control}
+        self._row = row  # what the boot row adds, such as the picture lane's name
         self.ports: dict[str, int] = {}
         self._graceful_s = graceful_s
         self._servers: Servers | None = None
 
+    def _apps(self) -> tuple[Guard, Guard]:
+        raise NotImplementedError
+
     async def __aenter__(self) -> Self:
-        sockets = {"public": bind(self.config.public), "control": bind(self.config.control)}
+        sockets = {name: bind(listener) for name, listener in self._listeners.items()}
         self.ports = {name: sock.getsockname()[1] for name, sock in sockets.items()}
-        public, control = public_app(self.service), control_app(self.service)
+        public, control = self._apps()
         self._servers = Servers([(public, sockets["public"]), (control, sockets["control"])],
                                 graceful_s=self._graceful_s)
         public_server = self._servers.servers[0]
         public.open_connections = lambda: len(public_server.server_state.connections)
-        log.row("boot", boot_id=self.service.boot_id)
-        self.service.start()
+        log.row("boot", boot_id=self._lifecycle.boot_id, **self._row)
+        self._lifecycle.start()
         try:
             await self._servers.start()
         except BaseException:
-            await self.service.close()
+            await self._lifecycle.close()
             raise
         for name, port in self.ports.items():
             log.row("listening", listener=name, port=port)
@@ -109,7 +116,20 @@ class Gateway:
                         traceback: TracebackType | None) -> None:
         if self._servers is not None:
             await self._servers.stop()
-        await self.service.close()
+        await self._lifecycle.close()
+
+
+class Gateway(Lane):
+    """The text lane's service and its two listeners. `async with Gateway(config, stop=...)` starts them; leaving the
+    block stops them. `stop` is how the service stops its instance when it falls asleep."""
+
+    def __init__(self, config: Config, *, stop: vast.Stop, graceful_s: int = GRACEFUL_SHUTDOWN_S) -> None:
+        self.config = config
+        self.service = Service(config, EngineClient(config.engine_url), stop)
+        super().__init__(self.service, config.public, config.control, graceful_s=graceful_s)
+
+    def _apps(self) -> tuple[Guard, Guard]:
+        return public_app(self.service), control_app(self.service)
 
 
 def main() -> None:

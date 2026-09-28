@@ -48,6 +48,7 @@ class Exchange:
         self._receive = receive
         self._send = send
         self.headers = header_map(scope)
+        self.path_params: dict[str, str] = scope.get("path_params", {})  # a route's own parts, such as `{job}`
         self.record: RequestRecord = scope[RECORD]
         self.started = False  # the status and headers are sent
         self.ending = False  # the terminal message has begun: nothing may follow it, even if its send was cut short
@@ -84,6 +85,12 @@ class Exchange:
         for message in json_response(status, payload):
             await self._send(message)
 
+    async def send_empty(self, status: int) -> None:
+        """A response without a body, such as the picture lane's 204."""
+        self.started = self.ending = True
+        await self._send({"type": "http.response.start", "status": status, "headers": []})
+        await self._send({"type": "http.response.body", "body": b"", "more_body": False})
+
     async def send_error(self, code: str) -> None:
         """An error of section 9: a plain HTTP error before the stream started, the error event after it. Nothing is
         sent once the terminal message has begun."""
@@ -106,3 +113,10 @@ class Exchange:
         if last:
             self.ending = True
         await self._send({"type": "http.response.body", "body": f"data: {text}\n\n".encode(), "more_body": not last})
+
+    async def end_stream(self) -> None:
+        """End a stream without a terminal event, as a picture's ends after its client's own stop, so that the
+        connection is left whole. Nothing is sent once the terminal message has begun."""
+        if self.started and not self.ending:
+            self.ending = True
+            await self._send({"type": "http.response.body", "body": b"", "more_body": False})

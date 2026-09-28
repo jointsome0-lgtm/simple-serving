@@ -27,26 +27,24 @@ from .stream import Translator, first_error
 from .validation import ChatRequest
 
 if TYPE_CHECKING:
-    from .service import Service
+    from .service import Lifecycle, Service
 
 # What the client is told when its request is stopped. A client that left is told nothing.
 STOP_CODES = {"timeout": "timeout", "draining": "draining", "engine_changed": "engine_unavailable"}
 
 
 class Work:
-    """The part of a request that may be stopped from outside."""
+    """The part of a request that may be stopped from outside, in either lane."""
 
-    def __init__(self, service: Service, exchange: Exchange, caller: Caller, request: ChatRequest) -> None:
+    def __init__(self, service: Lifecycle, exchange: Exchange, caller: Caller) -> None:
         self.service = service
         self.exchange = exchange
         self.caller = caller
-        self.request = request
         self.accepted_at: float | None = None
         self.stop_reason: str | None = None
         self._stopped_at: float | None = None  # the event loop's time of the stop
         self._task: asyncio.Task[None] | None = None
         self._terminal_send: asyncio.Timeout | None = None  # while the terminal message is sent; a stop cuts it
-        self._count_place: Ticket | None = None
 
     @property
     def active(self) -> bool:
@@ -99,16 +97,6 @@ class Work:
     def _stopping(self) -> None:
         """Runs as the work is stopped, before its task is cancelled."""
 
-    async def count(self) -> int:
-        """The engine's count of the prompt, taken in a count place (section 5)."""
-        places = self.service.count_places
-        self._count_place = places.enter(self.caller.cls, self.caller.outside_key)
-        try:
-            await self._count_place.granted
-            return await self.service.engine.count(self.service.config.alias, self.request)
-        finally:
-            places.leave(self._count_place)  # the engine call has ended: it returned, failed or was cancelled
-
     async def _run(self) -> asyncio.Task[None]:
         """Run the work's task to its end, then clean up."""
         task = self._task = asyncio.create_task(self.run())
@@ -157,7 +145,28 @@ class Work:
             await self.exchange.send_error("internal_error")
 
 
-class Count(Work):
+class TextWork(Work):
+    """A request of the text lane: a chat request, counted by the engine."""
+
+    service: Service
+
+    def __init__(self, service: Service, exchange: Exchange, caller: Caller, request: ChatRequest) -> None:
+        super().__init__(service, exchange, caller)
+        self.request = request
+        self._count_place: Ticket | None = None
+
+    async def count(self) -> int:
+        """The engine's count of the prompt, taken in a count place (section 5)."""
+        places = self.service.count_places
+        self._count_place = places.enter(self.caller.cls, self.caller.outside_key)
+        try:
+            await self._count_place.granted
+            return await self.service.engine.count(self.service.config.alias, self.request)
+        finally:
+            places.leave(self._count_place)  # the engine call has ended: it returned, failed or was cancelled
+
+
+class Count(TextWork):
     """`POST /v1/chat/completions/input_tokens`: no class limits and no context (section 5)."""
 
     @property
@@ -171,7 +180,7 @@ class Count(Work):
         await self.exchange.send_json(200, {"input_tokens": self.exchange.record.input_tokens})
 
 
-class Generation(Work):
+class Generation(TextWork):
     """`POST /v1/chat/completions`: counted, checked against the limits, then a place and the engine's stream."""
 
     def __init__(self, service: Service, exchange: Exchange, caller: Caller, request: ChatRequest) -> None:

@@ -7,8 +7,9 @@ import hashlib
 import hmac
 import re
 from dataclasses import dataclass
+from typing import Protocol
 
-from .config import Config, Key
+from .config import Key
 from .errors import ServiceError
 
 CLASS_HEADER = "x-simple-serving-class"
@@ -42,7 +43,14 @@ class Caller:
         return self.key if self.key.outside else None
 
 
-def find_key(config: Config, authorization: bytes | None) -> Key | None:
+class Keyring(Protocol):
+    """A lane's configuration, of which the keys are read here."""
+
+    @property
+    def keys(self) -> tuple[Key, ...]: ...
+
+
+def find_key(config: Keyring, authorization: bytes | None) -> Key | None:
     """The key of an `Authorization: Bearer <key>` header, found by its hash and compared in constant time."""
     scheme, _, presented = (authorization or b"").partition(b" ")
     if scheme.lower() != b"bearer" or not presented:

@@ -9,6 +9,9 @@ import asyncio
 import contextlib
 import copy
 import json
+import os
+import signal
+import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -321,6 +324,49 @@ class RawClient:
         with contextlib.suppress(OSError):
             await self.writer.wait_closed()
         return self.left_at
+
+
+class Process:
+    """A gateway as a child process, `python -m simple_serving` or the picture lane's `simple_serving.pictures`, with
+    its configuration file."""
+
+    def __init__(self, config: Path, module: str = "simple_serving") -> None:
+        self.config = config
+        self.module = module
+        self.lines: list[bytes] = []
+        self.ports: dict[str, int] = {}
+
+    async def start(self) -> None:
+        # Without Vast's two values, a sleep of this process could never stop a real instance.
+        env = {name: value for name, value in os.environ.items() if not name.startswith("CONTAINER_")}
+        env["SIMPLE_SERVING_CONFIG"] = str(self.config)
+        self.process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", self.module, cwd=ROOT, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        self._readers = [asyncio.create_task(self._read(stream))
+                         for stream in (self.process.stdout, self.process.stderr)]
+        await until(lambda: len(self.ports) == 2 or self.process.returncode is not None, timeout=15)
+        assert len(self.ports) == 2, b"".join(self.lines)[-2000:]
+
+    async def stop(self) -> None:
+        if self.process.returncode is None:
+            self.process.send_signal(signal.SIGTERM)
+        await asyncio.wait_for(self.process.wait(), 15)
+        await asyncio.gather(*self._readers)
+
+    def url(self, listener: str) -> str:
+        return f"http://127.0.0.1:{self.ports[listener]}"
+
+    def rows(self) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in self.lines if line.strip()]
+
+    async def _read(self, stream: asyncio.StreamReader | None) -> None:
+        assert stream is not None
+        while line := await stream.readline():
+            self.lines.append(line)
+            if b'"listening"' in line:
+                row = json.loads(line)
+                self.ports[row["listener"]] = row["port"]
 
 
 async def eventually(awaitable: Awaitable[Any], timeout: float = 5.0) -> Any:

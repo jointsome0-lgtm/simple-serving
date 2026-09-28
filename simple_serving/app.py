@@ -10,7 +10,9 @@ go out.
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -53,7 +55,7 @@ def control_app(service: Service) -> Guard:
 class Endpoint:
     """A route handled on raw ASGI. Starlette passes requests to a class instance as they are."""
 
-    def __init__(self, service: Service, handler: Handler) -> None:
+    def __init__(self, service: Any, handler: Callable[[Any, Exchange], Awaitable[None]]) -> None:
         self._service = service
         self._handler = handler
 
@@ -64,22 +66,30 @@ class Endpoint:
 class Guard:
     """The outermost layer of a listener: the log row of every request, the public listener's cap on open
     connections, and a last answer to an error that nothing else caught. No exception reaches the ASGI server,
-    whose log would print its text."""
+    whose log would print its text. A route with a part of its own, such as the picture lane's `{name}`, is logged as
+    the table writes it, never with the part the client sent."""
 
-    def __init__(self, app: ASGIApp, listener: str, table: list[tuple[str, str, Handler]], *,
+    def __init__(self, app: ASGIApp, listener: str, table: list[tuple[str, str, Any]], *,
                  max_connections: int | None = None) -> None:
         self._app = app
         self._listener = listener
-        self._paths = frozenset(path for path, _, _ in table)
+        self._paths = frozenset(path for path, _, _ in table if "{" not in path)
+        self._templates = [(re.compile(re.sub(r"\\{[a-z]+\\}", "[^/]+", re.escape(path))), path)
+                           for path in dict.fromkeys(path for path, _, _ in table if "{" in path)]
+        self._methods = frozenset(("GET", "POST", *(method for _, method, _ in table)))
         self._max_connections = max_connections
         self.open_connections: Callable[[], int] = lambda: 0  # set by the server that runs the listener
+
+    def route(self, path: str) -> str | None:
+        if path in self._paths:
+            return path
+        return next((template for pattern, template in self._templates if pattern.fullmatch(path)), None)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":  # no lifespan and no websockets
             return
-        record = RequestRecord(listener=self._listener,
-                               route=scope["path"] if scope["path"] in self._paths else None,
-                               method=scope["method"] if scope["method"] in ("GET", "POST") else "other")
+        record = RequestRecord(listener=self._listener, route=self.route(scope["path"]),
+                               method=scope["method"] if scope["method"] in self._methods else "other")
         scope[RECORD] = record
 
         async def send_noting_status(message: Message) -> None:
@@ -108,7 +118,8 @@ class Guard:
             await send(message)
 
 
-def _application(service: Service, table: list[tuple[str, str, Handler]]) -> FastAPI:
+def _application(service: Any, table: list[tuple[str, str, Any]]) -> FastAPI:
+    """A listener's application for either lane: each route of `table` handled by its own endpoint."""
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None, redirect_slashes=False)
     for path, method, handler in table:
         app.router.routes.append(Route(path, Endpoint(service, handler), methods=[method]))

@@ -7,12 +7,15 @@ Status: the gateway of contract v2 is written and tested against a fake engine. 
 that happens on the first rental (contract section 15), whose smoke is written and dry-run against the fake engine.
 The API is in [docs/contract-v2.md](docs/contract-v2.md), the shared cases in [contract/](contract/README.md).
 
-Version 2 serves one text model. Pictures stay in simple-story-chat for now: the owner decided on 2026-09-26 that
-they move here after round two of simple-story-chat's action measurement, with ComfyUI inside and the engine
-unchanged, so that the bot has one service for both lanes. vLLM could not take ComfyUI's place on that date:
-vLLM-Omni had Qwen-Image 2.1 only in open pull requests (#7759 and #8099), took at most 4 reference images where a
-frame needs up to 7, loaded only the 33 GB diffusers weights, and could neither start from an image nor redraw under
-a mask.
+Version 2 serves one text model. Pictures are on their way here: the owner decided on 2026-09-26 that they move
+here after round two of simple-story-chat's action measurement, with ComfyUI inside and the engine unchanged, so that
+the bot has one service for both lanes, and asked on 2026-09-28 to begin. vLLM could not take ComfyUI's place on
+2026-09-26: vLLM-Omni had Qwen-Image 2.1 only in open pull requests (#7759 and #8099), took at most 4 reference images
+where a frame needs up to 7, loaded only the 33 GB diffusers weights, and could neither start from an image nor redraw
+under a mask. The picture lane's design is [docs/pictures.md](docs/pictures.md). Its first phase is written and tested
+against a fake ComfyUI and has not run on a card: the gateway in `simple_serving/pictures/`
+(`python -m simple_serving.pictures.dev` runs it on loopback), the card's files in `card/pictures/`, and `--lane
+pictures` of the command. Until its card test, the bot draws as before.
 
 ## Install
 
@@ -23,7 +26,8 @@ uv sync
 ```
 
 The first sync needs the network; after it everything, the tests included, runs offline. `uv.lock` pins FastAPI,
-Starlette, uvicorn and httpx, the gateway's part of contract section 12.
+Starlette, uvicorn and httpx, the gateway's part of contract section 12, and websockets in the group `pictures`, the
+picture gateway's alone (docs/pictures.md, section 12).
 
 ## Tests
 
@@ -33,8 +37,8 @@ uv run ruff check .
 uv run mypy .
 ```
 
-No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback ports, in front of a fake vLLM
-(`simple_serving/fake_engine.py`), and call it over HTTP:
+No network, GPU, vLLM or ComfyUI. The tests start the gateway in uvicorn on loopback ports, in front of a fake vLLM
+(`simple_serving/fake_engine.py`) or a fake ComfyUI (`simple_serving/pictures/fake_comfy.py`), and call it over HTTP:
 
 - `tests/test_cases.py`: every case of `contract/cases-v2.json`, each on a new gateway;
 - `tests/test_scenarios.py`: the scenarios of the cases file: a client that leaves in every phase, places and lines,
@@ -50,7 +54,13 @@ No network, GPU or vLLM. The tests start the gateway in uvicorn on loopback port
   gateway;
 - `tests/test_smoke.py`: the first rental's smoke: the privacy probe's verdict, and the whole smoke through the dev
   launcher, whose output holds no key, no prompt and nothing of the model's text;
-- `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher.
+- `tests/test_units.py`, `tests/test_dev.py`: the pieces one by one, and the dev launcher;
+- `tests/test_pictures.py`: the picture gateway: what reaches the card and in which order, a picture's stream, its
+  stops and whether the card confirms them, the drain, the engine it holds itself to, the socket, the readers'
+  uploads, and, as its own process, answers and a log without a marker;
+- `tests/test_pictures_card.py`: the picture card: the copies against `card/pictures/SOURCE`, ComfyUI under the old
+  start's lock with the manifest's settings, what the launcher keeps of its output, the gateway's configuration, and
+  the preparation with stand-ins for ComfyUI's install, pip and git.
 
 Three kinds of test stay apart (contract section 14). A client's adapter runs the public steps of the cases in its own
 repository. The control routes, the sleep and the card are tested here alone. An opt-in test in simple-story-chat runs
@@ -160,7 +170,8 @@ own, a schema's JSON from xgrammar alone, and its request logging off (contract 
 ## The card
 
 `card/` holds what runs on a rented card: `manifest.env` with the pins and parameters, the two locks, `bootstrap.sh`
-for the preparation, and `onstart.sh`, which the rental's own onstart runs at every start. The checkout goes to
+for the preparation, and `onstart.sh`, which the rental's own onstart runs at every start. `card/pictures/` holds the
+same for the picture card, whose preparation and start are docs/pictures.md's section 9. The checkout goes to
 `/workspace/simple-serving`, and the card keeps its state in `/workspace/simple-serving-card`: the key hashes, the
 weights, the two venvs and the logs.
 
@@ -278,6 +289,8 @@ uv run python -m simple_serving.cli up | sleep | status | keys | trial --ssh-hos
 - `keys` makes the two gateway keys once, for the preparation above.
 - `trial --ssh-host HOST` is for a trial rental. It reads the card's instance id over SSH and writes it, with the
   host, into the configuration, printing neither.
+- `--lane pictures` before any of them does the same for the picture card (docs/pictures.md, section 10), with the
+  same keys, an instance of its own under `pictures` in the configuration, local 8084 and 8085, and a lock of its own.
 
 The configuration is `~/.config/simple-serving/config.json`, open to its owner only, or the file that `--config`
 names:

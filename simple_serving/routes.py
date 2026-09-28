@@ -14,7 +14,7 @@ from typing import Any
 from .asgi import ClientGone, Exchange
 from .errors import ServiceError
 from .inference import Count, Generation
-from .service import Service
+from .service import Lifecycle, Service
 from .validation import check_boot, check_chat, check_open, parse_json
 
 CONTROL_BODY_LIMIT = 4096  # a drain, a sleep or an open is a few dozen bytes
@@ -76,7 +76,7 @@ async def models(service: Service, exchange: Exchange) -> None:
         await exchange.send_error(error.code)
 
 
-async def state(service: Service, exchange: Exchange) -> None:
+async def state(service: Lifecycle, exchange: Exchange) -> None:
     try:
         key = service.authenticate(exchange)
         await exchange.send_json(200, service.state(control=key.control))
@@ -84,19 +84,19 @@ async def state(service: Service, exchange: Exchange) -> None:
         await exchange.send_error(error.code)
 
 
-async def drain(service: Service, exchange: Exchange) -> None:
+async def drain(service: Lifecycle, exchange: Exchange) -> None:
     await _control(service, exchange, lambda body: (202, service.drain(check_boot(body))))
 
 
-async def sleep(service: Service, exchange: Exchange) -> None:
+async def sleep(service: Lifecycle, exchange: Exchange) -> None:
     await _control(service, exchange, lambda body: (202, service.sleep(check_boot(body))))
 
 
-async def open_(service: Service, exchange: Exchange) -> None:
+async def open_(service: Lifecycle, exchange: Exchange) -> None:
     await _control(service, exchange, lambda body: (200, service.open(*check_open(body))))
 
 
-async def _control(service: Service, exchange: Exchange, act: Callable[[Any], tuple[int, dict[str, Any]]]) -> None:
+async def _control(service: Lifecycle, exchange: Exchange, act: Callable[[Any], tuple[int, dict[str, Any]]]) -> None:
     """A control route: the control key, the body, then the action. The action takes effect before its answer is
     sent, so a client that loses the answer finds the action done when it asks again."""
     try:

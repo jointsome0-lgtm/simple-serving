@@ -28,6 +28,9 @@ The logs are in `logs/` of the state directory, with one older file beside each.
 opens it; one that it moves aside keeps its mode. `card.jsonl` holds the launcher's rows and, of vLLM's output, only a
 few numbers and fixed categories of failure and warning. `gateway.jsonl` holds the gateway's rows that pass
 `gateway_row`.
+
+The picture lane's launcher is this one with ComfyUI for its engine, in a state of its own (`pictures/card.py`): a
+lane is a `Card` whose class names its module, its state and its files.
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Self
 
 from . import log, vast
 from .config import IDLE_TIMEOUT_S, PROVISIONAL
@@ -114,15 +117,25 @@ class Command:
 
 @dataclass(frozen=True)
 class Card:
-    code: Path  # the checkout, with card/manifest.env
+    code: Path  # the checkout, with the lane's manifest.env
     state: Path
     manifest: Mapping[str, str]
     credential: Mapping[str, str] = field(repr=False)  # CONTAINER_ID and CONTAINER_API_KEY, where known
+    root: Path = ROOT
+
+    # The lane's: its launcher's module, whose `--run` a running launcher's command line holds, where its state is,
+    # and its files in the checkout, of which the preparation stamps these.
+    module: ClassVar[str] = "simple_serving.card"
+    running: ClassVar[bytes] = RUNNING
+    home: ClassVar[Path] = STATE
+    folder: ClassVar[str] = "card"
+    stamped: ClassVar[tuple[str, ...]] = STAMPED
 
     @classmethod
-    def load(cls, code: Path = CODE, state: Path = STATE, environ: Mapping[str, str] = os.environ,
-             root: Path = ROOT) -> Card:
-        return cls(code, state, read_manifest(code), credential(environ, root))
+    def load(cls, code: Path = CODE, state: Path | None = None, environ: Mapping[str, str] = os.environ,
+             root: Path = ROOT) -> Self:
+        return cls(code, cls.home if state is None else state, read_manifest(code, cls.folder),
+                   credential(environ, root), root)
 
     @property
     def ports(self) -> dict[str, int]:
@@ -173,26 +186,37 @@ class Card:
     def config(self) -> dict[str, Any]:
         """The gateway's configuration: the provisional limits, the manifest's model and ports, and the hashes of the
         two keys."""
-        m, keys = self.manifest, json.loads((self.state / "keys.json").read_text())
+        m = self.manifest
         return PROVISIONAL | {
             "alias": m["MODEL_ALIAS"],
             "context_tokens": int(m["CONTEXT_TOKENS"]),
             "engine_url": f"http://127.0.0.1:{m['ENGINE_PORT']}",
-            "listen": {name: {"host": "127.0.0.1", "port": self.ports[name]} for name in ("public", "control")},
-            "keys": [
-                {"sha256": keys["client"], "label": "client", "classes": ["reader", "agent", "internal"],
-                 "default": "internal", "scopes": True, "control": False},
-                {"sha256": keys["control"], "label": "control", "classes": [], "default": None, "scopes": False,
-                 "control": True},
-            ],
+            "listen": self.listen(),
+            "keys": self.keys(),
             "versions": pinned_versions(m),
         }
+
+    def listen(self) -> dict[str, dict[str, Any]]:
+        return {name: {"host": "127.0.0.1", "port": self.ports[name]} for name in ("public", "control")}
+
+    def keys(self) -> list[dict[str, Any]]:
+        """The gateway's two keys, by the hashes that the preparation keeps."""
+        keys = json.loads((self.state / "keys.json").read_text())
+        return [
+            {"sha256": keys["client"], "label": "client", "classes": ["reader", "agent", "internal"],
+             "default": "internal", "scopes": True, "control": False},
+            {"sha256": keys["control"], "label": "control", "classes": [], "default": None, "scopes": False,
+             "control": True},
+        ]
+
+    def pair(self) -> Pair:
+        return Pair(self.state)
 
     def prepared(self) -> bool:
         """Whether bootstrap.sh prepared the card for this manifest and these locks, and the gateway will be able to
         stop the instance."""
         try:
-            stamp = hashlib.sha256(b"".join((self.code / "card" / name).read_bytes() for name in STAMPED))
+            stamp = hashlib.sha256(b"".join((self.code / self.folder / name).read_bytes() for name in self.stamped))
             return ((self.state / "prepared").read_text().strip() == stamp.hexdigest()
                     and (self.state / "keys.json").is_file()
                     and vast.from_environment(self.credential) is not vast.unconfigured)
@@ -214,8 +238,8 @@ def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
     return pins
 
 
-def read_manifest(code: Path = CODE) -> dict[str, str]:
-    lines = (line.strip() for line in (code / "card/manifest.env").read_text().splitlines())
+def read_manifest(code: Path = CODE, folder: str = "card", name: str = "manifest.env") -> dict[str, str]:
+    lines = (line.strip() for line in (code / folder / name).read_text().splitlines())
     return {name: value for name, _, value in (line.partition("=") for line in lines)
             if name and not name.startswith("#")}
 
@@ -231,14 +255,14 @@ def credential(environ: Mapping[str, str], root: Path) -> dict[str, str]:
     return found
 
 
-def launcher(state: Path) -> int | None:
+def launcher(state: Path, running: bytes = RUNNING) -> int | None:
     """The pid of the running launcher, if one runs."""
     try:
         pid = int((state / "launcher.pid").read_text())
-        running = RUNNING in Path(f"/proc/{pid}/cmdline").read_bytes()
+        found = running in Path(f"/proc/{pid}/cmdline").read_bytes()
     except (OSError, ValueError):
         return None
-    return pid if running else None
+    return pid if found else None
 
 
 def taken(port: int) -> bool:
@@ -258,14 +282,14 @@ def start(card: Card, *, dry_run: bool = False) -> int:
     if dry_run:
         print(shlex.join(card.engine().argv), shlex.join(card.gateway().argv), sep="\n")
     given_up = (card.state / GIVEN_UP).exists()
-    if launcher(card.state) is not None:
+    if launcher(card.state, card.running) is not None:
         return GAVE_UP if given_up else 0
     if not given_up and not card.prepared():
         return NOT_PREPARED
     if not given_up and any(taken(port) for port in card.ports.values()):
         return PORT_TAKEN
     if not dry_run:
-        subprocess.Popen([sys.executable, "-m", "simple_serving.card", "--run"], cwd=card.code,
+        subprocess.Popen([sys.executable, "-m", card.module, "--run"], cwd=card.code,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     return GAVE_UP if given_up else 0
@@ -277,12 +301,12 @@ def hold(card: Card, pause: Callable[[float], object] = time.sleep) -> int:
     card with nothing to hold gets no line: one that a marker ends, or one that is not prepared and runs no launcher."""
     if code := marked(card.state):
         return code
-    if launcher(card.state) is None and not card.prepared():
+    if launcher(card.state, card.running) is None and not card.prepared():
         return NOT_PREPARED
     print(HOLDING, flush=True)
     waited, seen = 0, False
     while not (code := marked(card.state)):
-        if launcher(card.state) is not None:
+        if launcher(card.state, card.running) is not None:
             seen = True
         elif seen or waited >= HOLD_START_S:
             return 0
@@ -296,13 +320,13 @@ def marked(state: Path) -> int:
     return STOP_UNCONFIRMED if (state / UNCONFIRMED).exists() else GAVE_UP if (state / GIVEN_UP).exists() else 0
 
 
-def stop_pair(state: Path, pause: Callable[[float], object] = time.sleep) -> int:
+def stop_pair(state: Path, pause: Callable[[float], object] = time.sleep, running: bytes = RUNNING) -> int:
     """End the pair through its launcher, and wait for it. 1 when the launcher still runs after STOP_WAIT_S."""
-    pid = launcher(state)
+    pid = launcher(state, running)
     if pid is not None:
         os.kill(pid, signal.SIGTERM)
     for _ in range(STOP_WAIT_S // POLL_S):
-        if launcher(state) is None:
+        if launcher(state, running) is None:
             return 0
         pause(POLL_S)
     return 1
@@ -343,7 +367,7 @@ async def serve(card: Card) -> None:
 async def launch(card: Card, ended: asyncio.Event, stop: vast.Stop) -> str:
     """Run the pair once, then stop the instance unless a signal ended it. Returns how the pair ended, or `given_up`
     when the card had given up and no retry came."""
-    pair = Pair(card.state)
+    pair = card.pair()
     outcome = await retried(card.state / GIVEN_UP, ended)
     if outcome is None:
         try:
@@ -545,12 +569,13 @@ def private(path: Path, flags: int) -> int:
     return descriptor
 
 
-def inspect(request: Mapping[str, Any], state: Path = STATE, root: Path = ROOT, proc: Path = PROC) -> dict[str, Any]:
+def inspect(request: Mapping[str, Any], state: Path = STATE, root: Path = ROOT, proc: Path = PROC,
+            running: bytes = RUNNING) -> dict[str, Any]:
     """The smoke's report of the card: how many launchers run and how many processes they started, the trial guard's
     deadline, and of each log its rows and, for a `marker`, the times it occurs. With `since`, also the cancelled flag
     of each chat request that gateway.jsonl logged after its first `since` rows. No line of a log leaves the card."""
     marker = request.get("marker")
-    started = launchers(proc)
+    started = launchers(proc, running)
     logs = {name: {"rows": 0, **({"found": 0} if marker else {})} for name in (*LOGS, "other")}
     for path in sorted((state / "logs").rglob("*")):
         if path.is_file() and not path.is_symlink():
@@ -566,7 +591,7 @@ def inspect(request: Mapping[str, Any], state: Path = STATE, root: Path = ROOT, 
     return report
 
 
-def launchers(proc: Path = PROC) -> dict[int, int]:
+def launchers(proc: Path = PROC, running: bytes = RUNNING) -> dict[int, int]:
     """The launchers that run, each with the number of its processes that run: the pair's two."""
     found: dict[int, int] = {}
     parents: dict[int, int] = {}
@@ -576,7 +601,7 @@ def launchers(proc: Path = PROC) -> dict[int, int]:
     for entry in entries:
         if entry.name.isdigit():
             with contextlib.suppress(OSError, ValueError, IndexError):  # a process that ended while it was read
-                if RUNNING in (entry / "cmdline").read_bytes():
+                if running in (entry / "cmdline").read_bytes():
                     found[int(entry.name)] = 0
                 # The name in parentheses may hold spaces and parentheses; the parent is the second field after it.
                 parents[int(entry.name)] = int((entry / "stat").read_bytes().rsplit(b")", 1)[1].split()[1])
@@ -621,7 +646,7 @@ def cancelled_after(path: Path, since: int) -> list[bool] | None:
             if row is not None and row.get("event") == "request" and row.get("route") == "/v1/chat/completions"]
 
 
-def inspect_command() -> int:
+def inspect_command(state: Path = STATE, running: bytes = RUNNING) -> int:
     """--inspect: one request on standard input, `{"marker": ..., "since": ...}` with either or neither, and one line
     of report on standard output."""
     try:
@@ -634,12 +659,13 @@ def inspect_command() -> int:
     if (marker is not None and not (isinstance(marker, str) and MARKER.fullmatch(marker))) or type(since) is not int \
             or since < 0:
         return 2
-    print(json.dumps(inspect(request)), flush=True)
+    print(json.dumps(inspect(request, state, running=running)), flush=True)
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m simple_serving.card", description=__doc__.split("\n\n")[0])
+def main(argv: list[str] | None = None, lane: type[Card] = Card) -> int:
+    parser = argparse.ArgumentParser(prog=f"python -m {lane.module}",
+                                     description=(sys.modules[lane.__module__].__doc__ or "").split("\n\n")[0])
     options = parser.add_mutually_exclusive_group()
     options.add_argument("--hold", action="store_true", help="wait while the pair runs: the remote command of a tunnel")
     options.add_argument("--stop", action="store_true", help="end the pair, and leave the instance running")
@@ -650,17 +676,17 @@ def main(argv: list[str] | None = None) -> int:
     options.add_argument("--run", action="store_true", help=argparse.SUPPRESS)  # the launcher that start() spawns
     args = parser.parse_args(argv)
     if args.stop:  # before the manifest is read, which ending the pair does not need
-        return stop_pair(STATE)
+        return stop_pair(lane.home, running=lane.running)
     if args.inspect:  # as well
-        return inspect_command()
-    card = Card.load()
+        return inspect_command(lane.home, lane.running)
+    card = lane.load()
     if args.hold:
         return hold(card)
     if args.run:
         return run(card)
     if args.retry:
         (card.state / GIVEN_UP).unlink(missing_ok=True)
-        if launcher(card.state) is not None:
+        if launcher(card.state, card.running) is not None:
             print(f"simple-serving card: a launcher runs. If it still waits for a retry, it runs the pair within "
                   f"{POLL_S} seconds; if it already stops the instance, the retry is deferred to the next start. up "
                   "tells which.", flush=True)

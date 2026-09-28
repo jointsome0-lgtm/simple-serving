@@ -1,0 +1,14 @@
+# The copies in card/pictures/ of simple-story-chat's gpu/ files, byte for byte, at the commit below
+# (docs/pictures.md, section 9): the scripts that install and start ComfyUI, and the files they read beside themselves.
+# bootstrap.sh refuses a copy whose SHA-256 is not the one here, and so does a test, so a change comes only as a new
+# copy of a new commit, in simple-story-chat's checkout:
+#   for name in <the files below>; do git show <commit>:gpu/$name > <this directory>/$name; done
+repository https://github.com/jointsome0-lgtm/simple-story-chat
+commit ddd2850ec4d1364e7d793bc90ec2cb3de0485d18
+530b7c5c2369e8b70b7239a35654473f71a8ed48012f58347edd08e43a7bf100  image-bootstrap.sh
+653bcb584e5fb145a3d6681bf685178a9bf96299daff2215989e3134082195aa  image-serve.sh
+9ba959a8876b9cd8d71bb36cde8645a3ba5673b88537e453b0664ea38cbaa3ce  image-sweeper.py
+c4e7c9613a8f001b0900528347d83c7bd4a819fbf715f12234ee3341b1c00071  image-manifest.env
+f9cee5337e77e966df3b604f0996c97b4aa275a11973ef699bdc4a56d6e50613  image-workflow.json
+07afd33342563488f142fbe9c93bc6a5729347511c7b18379223763b7126855c  image-workflow-qwen.json
+965cbea2a8b61978edbc6b9fef9e78f46858838c46049bea297ab80cae06b284  image-workflow-qwen-edit.json

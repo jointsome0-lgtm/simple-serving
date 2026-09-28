@@ -444,7 +444,8 @@ def test_a_retry_leaves_the_pair_to_a_running_launcher_and_stop_ends_it(state: P
         raise OSError("a checkout whose manifest cannot be read")
 
     monkeypatch.setattr(Card, "load", unreadable)
-    monkeypatch.setattr(card, "stop_pair", lambda at: 0 if at == card.STATE else 1)
+    monkeypatch.setattr(card, "stop_pair",
+                        lambda at, running: 0 if (at, running) == (card.STATE, card.RUNNING) else 1)
     assert card.main(["--stop"]) == 0
 
 

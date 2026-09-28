@@ -17,6 +17,10 @@ dev = [
     "mypy==2.3.1",
     "pytest",
     "ruff==0.16.6",
+    {include-group = "pictures"},
+]
+pictures = [
+    "websockets==17.1",
 ]
 
 [tool.pytest.ini_options]
@@ -26,6 +30,8 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+# simple-story-chat's sweeper, copied byte for byte (card/pictures/SOURCE): that repository's code, checked there.
+extend-exclude = ["card/pictures/image-sweeper.py"]
 
 [tool.ruff.lint]
 # Named in full: ruff's default set changes between versions and has no name to select it by. This holds every rule
@@ -51,3 +57,4 @@ ignore = [
 [tool.mypy]
 python_version = "3.12"
 check_untyped_defs = true
+exclude = ["^card/pictures/image-sweeper\\.py$"]  # as for ruff

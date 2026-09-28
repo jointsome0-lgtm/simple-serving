@@ -12,10 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import secrets
-import signal
-import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -35,10 +32,10 @@ from .support import (
     CONTROL,
     OUTSIDE_A,
     OUTSIDE_B,
-    ROOT,
     SCOPE,
     SERVICE,
     Answer,
+    Process,
     RawClient,
     call,
     chat_body,
@@ -63,47 +60,6 @@ def body(name: str, **patch: Any) -> dict[str, Any]:
     """A generation body whose every message carries the marker."""
     messages = [{"role": "system", "content": f"System {MARKER}."}, {"role": "user", "content": text(name)}]
     return chat_body(**{"messages": messages, **patch})
-
-
-class Process:
-    """The gateway as a child process: `python -m simple_serving` with its configuration file."""
-
-    def __init__(self, config: Path) -> None:
-        self.config = config
-        self.lines: list[bytes] = []
-        self.ports: dict[str, int] = {}
-
-    async def start(self) -> None:
-        # Without Vast's two values, a sleep of this process could never stop a real instance.
-        env = {name: value for name, value in os.environ.items() if not name.startswith("CONTAINER_")}
-        env["SIMPLE_SERVING_CONFIG"] = str(self.config)
-        self.process = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "simple_serving", cwd=ROOT, env=env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        self._readers = [asyncio.create_task(self._read(stream))
-                         for stream in (self.process.stdout, self.process.stderr)]
-        await until(lambda: len(self.ports) == 2 or self.process.returncode is not None, timeout=15)
-        assert len(self.ports) == 2, b"".join(self.lines)[-2000:]
-
-    async def stop(self) -> None:
-        if self.process.returncode is None:
-            self.process.send_signal(signal.SIGTERM)
-        await asyncio.wait_for(self.process.wait(), 15)
-        await asyncio.gather(*self._readers)
-
-    def url(self, listener: str) -> str:
-        return f"http://127.0.0.1:{self.ports[listener]}"
-
-    def rows(self) -> list[dict[str, Any]]:
-        return [json.loads(line) for line in self.lines if line.strip()]
-
-    async def _read(self, stream: asyncio.StreamReader | None) -> None:
-        assert stream is not None
-        while line := await stream.readline():
-            self.lines.append(line)
-            if b'"listening"' in line:
-                row = json.loads(line)
-                self.ports[row["listener"]] = row["port"]
 
 
 @asynccontextmanager

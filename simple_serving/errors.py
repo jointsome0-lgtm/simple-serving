@@ -1,4 +1,5 @@
-"""The error codes of contract section 9 and the one body every error has."""
+"""The error codes of contract section 9 and the one body every error has, with the picture lane's own
+(docs/pictures.md, section 4)."""
 
 import json
 
@@ -7,6 +8,8 @@ STATUS = {
     "unsupported_field": 400,
     "limit_exceeded": 400,
     "context_limit": 400,
+    "graph_refused": 400,  # the picture lane: a graph the gateway's checks refuse
+    "graph_rejected": 400,  # and one that ComfyUI refuses
     "unauthorized": 401,
     "class_not_allowed": 403,
     "scope_not_allowed": 403,
@@ -18,10 +21,13 @@ STATUS = {
     "body_too_large": 413,
     "queue_full": 429,
     "internal_error": 500,
+    "picture_failed": 500,
     "starting": 503,
     "draining": 503,
     "drained": 503,
     "engine_unavailable": 503,
+    "socket_unavailable": 503,
+    "stop_unconfirmed": 503,
     "timeout": 504,
 }
 

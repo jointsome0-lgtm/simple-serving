@@ -11,6 +11,7 @@ import json
 import signal
 import stat
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 
 from simple_serving import card, cli
+from simple_serving.pictures.card import PictureCard
 from tests.support import ALIAS, CONTROL, FakeVast, running, until
 
 VIEW = {"contract": "2", "boot_id": "synthetic-boot", "status": "ready", "model": ALIAS, "context_tokens": 4096,
@@ -377,6 +379,74 @@ async def test_status_tells_vast_apart_from_the_gateway_and_prints_nothing_as_it
     printed = capsys.readouterr().out
     assert printed.splitlines() == [f"vast: {vast}", *([f"gateway: {line}"] if line else [])]
     assert CONTROL not in printed and strangers == [] and len(ssh.opened) == (vast == "running")
+
+
+# the picture lane
+
+PICTURES, PICTURE_ALIAS = cli.LANES["pictures"], "qwen-image-2.1"
+
+
+def test_the_picture_lane_is_an_instance_of_its_own_with_the_same_keys_and_ports_and_a_lock_of_its_own(
+        tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    text = {"instance_id": "123", "vast_api_key": "synthetic-vast-key", "ssh_host": "card", "control_key": "c"}
+    path.write_text(json.dumps(text))
+    path.chmod(0o600)
+    with pytest.raises(cli.Refusal, match=r"has no pictures\.instance_id, pictures\.vast_api_key, pictures\.ssh_host$"):
+        cli.load(path, PICTURES)
+    pictures = {"instance_id": "456", "vast_api_key": "synthetic-picture-key", "ssh_host": "picture-card"}
+    path.write_text(json.dumps(text | {"pictures": pictures}))
+    setup = cli.load(path, PICTURES)
+    assert (setup.alias, setup.card_ports, setup.local, setup.lane, setup.control_key) == (
+        PICTURE_ALIAS, {"public": 8094, "control": 8095}, {"public": 8084, "control": 8085}, "pictures", "c")
+    assert isinstance(setup.show, partial) and isinstance(setup.connect, partial)
+    assert setup.show.args == ("456", "synthetic-picture-key")
+    assert (setup.connect.args, setup.connect.keywords) == (("picture-card",), {"hold": cli.HOLD_PICTURES})
+    assert f"{PictureCard.home}/gateway/bin/python -m {PictureCard.module} --hold" in cli.HOLD_PICTURES
+    assert "synthetic-picture-key" not in repr(setup) and cli.load(path).card_ports == {"public": 8090, "control": 8091}
+    with contextlib.ExitStack() as held:
+        held.enter_context(cli.up_lock(path))
+        held.enter_context(cli.up_lock(path, setup.lock))  # both lanes may be up at once
+        with pytest.raises(cli.Refusal, match="another up runs"):
+            held.enter_context(cli.up_lock(path, setup.lock))  # each once
+
+
+def test_trial_of_the_picture_lane_writes_its_own_object_and_leaves_the_text_lanes(tmp_path: Path,
+                                                                                    card_answer: Path) -> None:
+    path = tmp_path / "config.json"
+    before = {"instance_id": "123", "ssh_host": "card", "vast_api_key": KEY, "pictures": {"vast_api_key": KEY}}
+    cli.write_config(path, before)
+    card_answer.write_bytes(f"{INSTANCE}\n".encode())
+    assert cli.main(["--config", str(path), "--lane", "pictures", "--ssh-host", "picture-card", "trial"]) == 0
+    assert json.loads(path.read_text()) == before | {
+        "pictures": {"vast_api_key": KEY, "instance_id": INSTANCE, "ssh_host": "picture-card"}}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("lane", "view", "serves"), [
+    ("pictures", VIEW | {"lane": "pictures", "model": PICTURE_ALIAS}, True),
+    ("pictures", VIEW, False),  # the text gateway, through the picture lane's tunnel
+    ("text", VIEW | {"lane": "pictures"}, False),  # another lane, whatever its model
+])
+async def test_up_holds_a_gateway_of_its_own_lane_alone(tmp_path: Path, clock: Clock, lane: str, view: dict[str, Any],
+                                                        serves: bool) -> None:
+    async with gateway(body=view) as (port, _):
+        ssh = Ssh(port)
+        setup = setup_for(tmp_path, Instance("running"), ssh)
+        if lane == "pictures":
+            setup = replace(setup, alias=PICTURE_ALIAS, card_ports={"public": 8094, "control": 8095},
+                            lane="pictures", lock=PICTURES.lock)
+        if serves:
+            task = asyncio.create_task(cli.up(setup))
+            await until(ssh.holding)
+            with cli.up_lock(setup.path):  # the text lane's up may run beside it
+                pass
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(cli.Refusal, match="another contract, lane or model"):
+                await cli.up(setup)
 
 
 # the real tunnel, with a stand-in for ssh

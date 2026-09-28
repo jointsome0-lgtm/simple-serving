@@ -1,5 +1,10 @@
 """The service's own state: its boot, status, drain and sleep (contract sections 6 and 8), the engine's health, the
-checks that every inference request passes (sections 4, 5 and 7), and the work it has accepted."""
+checks that every inference request passes (sections 4, 5 and 7), and the work it has accepted.
+
+`Lifecycle` is what both lanes share, the text lane's `Service` here and the picture lane's in `pictures/service.py`:
+the boot, the status, the drain, the sleep and the idle interval, the key and the class of a request, and the work
+that a drain must see end. Each lane adds its engine's health and its own checks.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +12,9 @@ import asyncio
 import contextlib
 import platform
 import secrets
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from importlib import metadata
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from . import CONTRACT, log, vast
 from .admission import Admission, CountPlaces
@@ -28,23 +33,43 @@ FORCED_STOP_S = 120  # from the start of a sleep; the one place where the instan
 PINNED_PACKAGES = ("fastapi", "starlette", "uvicorn", "httpx")
 
 
-class Service:
-    def __init__(self, config: Config, engine: EngineClient, stop: vast.Stop) -> None:
+class WallLimit(Protocol):
+    @property
+    def wall_s(self) -> float: ...
+
+
+class LaneConfig(Protocol):
+    """What `Lifecycle` and `Work` read of a lane's configuration."""
+
+    @property
+    def keys(self) -> tuple[Key, ...]: ...
+    @property
+    def limits(self) -> Mapping[str, WallLimit]: ...
+    @property
+    def drain_deadline_s(self) -> float: ...
+    @property
+    def idle_timeout_s(self) -> float: ...
+    @property
+    def health_interval_s(self) -> float: ...
+    @property
+    def versions(self) -> Mapping[str, str]: ...
+
+
+class Lifecycle:
+    """The boot, status, drain, sleep and work of a lane's service. A lane watches its engine in `_watch_engine`."""
+
+    pinned_packages: tuple[str, ...] = PINNED_PACKAGES
+
+    def __init__(self, config: LaneConfig, stop: vast.Stop) -> None:
         self.config = config
-        self.engine = engine
         self._stop = stop
         self.boot_id = secrets.token_hex(16)
-        self._salt_secret = secrets.token_bytes(32)  # made at every start, never shown
         self.drain_generation = 0
         self.draining = False
         self.sleep_requested = False  # once set it stays: the instance is being stopped
         self.engine_status = "starting"  # then "ready", and "failed" while checks fail or once the engine has changed
-        self.context_tokens: int | None = None
-        self._engine_length: int | None = None  # the engine's own context length, as this boot verified it
         self._engine_changed = False
-        self.admission = Admission(config)
-        self.count_places = CountPlaces(config)
-        self.work: set[Work] = set()  # accepted generations and counts that have not answered yet
+        self.work: set[Work] = set()  # accepted work that has not answered yet
         self.ours_inflight = 0  # requests of ours between their authorization and their end, accepted or not
         self.idle_since = 0.0  # the event loop's time when the last of them ended, or of the first ready
         self._no_work = asyncio.Event()  # set while `work` is empty
@@ -65,7 +90,13 @@ class Service:
             if task is not None:
                 task.cancel()
                 await asyncio.wait({task})
-        await self.engine.aclose()
+        await self._close_engine()
+
+    async def _close_engine(self) -> None:
+        """Close the lane's connections to its engine."""
+
+    async def _watch_engine(self) -> None:
+        raise NotImplementedError
 
     @property
     def status(self) -> str:
@@ -109,10 +140,6 @@ class Service:
         if status != "ready":
             raise ServiceError("engine_unavailable" if status == "failed" else status)
 
-    def check_max_tokens(self, caller: Caller, request: ChatRequest) -> None:
-        if request.max_tokens > self.config.limits[caller.cls].max_tokens:
-            raise ServiceError("limit_exceeded")
-
     def accept(self, work: Work) -> None:
         """Take on a checked request, if the service still serves."""
         self.check_serving()
@@ -125,34 +152,10 @@ class Service:
         if not self.work:
             self._no_work.set()
 
-    def check_input(self, caller: Caller, input_tokens: int, max_tokens: int) -> None:
-        limit = self.config.limits[caller.cls].input_tokens
-        if limit is not None and input_tokens > limit:
-            raise ServiceError("limit_exceeded")  # our quota
-        assert self.context_tokens is not None  # known once the engine was verified
-        if input_tokens + max_tokens > self.context_tokens:
-            raise ServiceError("context_limit")  # the model's size
-
-    def payload(self, caller: Caller, request: ChatRequest) -> dict[str, Any]:
-        return generation_payload(self.config.alias, request, priority=self.config.engine_priority[caller.cls],
-                                  cache_salt=cache_salt(self._salt_secret, caller))
-
-    # Models, state and the control routes.
-
-    def models(self) -> dict[str, Any]:
-        if self.context_tokens is None:
-            raise ServiceError("starting")
-        return {"object": "list",
-                "data": [{"id": self.config.alias, "object": "model", "max_model_len": self.context_tokens}]}
+    # State and the control routes.
 
     def state(self, *, control: bool) -> dict[str, Any]:
-        state: dict[str, Any] = {"contract": CONTRACT, "boot_id": self.boot_id, "status": self.status,
-                                 "model": self.config.alias, "context_tokens": self.context_tokens,
-                                 "drain_generation": self.drain_generation}
-        if control:
-            state.update(sleep_requested=self.sleep_requested, active=self.admission.active_counts(),
-                         waiting=self.admission.waiting_counts(), versions=self._versions())
-        return state
+        raise NotImplementedError
 
     def drain(self, boot_id: str) -> dict[str, Any]:
         """Refuse new work, stop waiting work and outside work, and let the rest of our work finish until the
@@ -243,19 +246,19 @@ class Service:
 
     def _versions(self) -> dict[str, str]:
         """The pinned versions of section 12: the gateway's own packages, and the engine's from the configuration."""
-        versions = {name: metadata.version(name) for name in PINNED_PACKAGES}
+        versions = {name: metadata.version(name) for name in self.pinned_packages}
         versions["python"] = platform.python_version()
         versions.update(self.config.versions)
         return versions
 
-    async def _watch_engine(self) -> None:
+    async def _watch_checks(self, check: Callable[[], Awaitable[None]]) -> None:
+        """Run the engine's check every health interval, and every STARTING_RETRY_S while the service starts. A check
+        that raises has failed."""
         while True:
             try:
-                length = await self.engine.context_length(self.config.alias)
+                await check()
             except Exception as error:  # noqa: BLE001 - whatever a check raises, the check has failed
                 self._check_failed(error)
-            else:
-                self._engine_answered(length)
             interval = self.config.health_interval_s
             await asyncio.sleep(min(interval, STARTING_RETRY_S) if self.engine_status == "starting" else interval)
 
@@ -266,23 +269,17 @@ class Service:
             self.engine_status = "failed"
             log.row("engine", service_status="failed", exception=type(error).__name__)
 
-    def _engine_answered(self, length: int | None) -> None:
-        """The engine answered a check with the alias's context length, or with None: it serves another model."""
-        if self._engine_length is None:
-            if length is None:
-                return  # not verified: the service stays starting
-            self._engine_length = length
-            limit = self.config.context_tokens
-            self.context_tokens = min(length, limit) if limit is not None else length
-            self.idle_since = asyncio.get_running_loop().time()  # the first ready starts the idle interval
-            self._idle_check()
-        elif length != self._engine_length:
-            self._engine_changes()
-            return
+    def _first_verified(self) -> None:
+        """The engine is verified for the first time in this boot: the idle interval starts."""
+        self.idle_since = asyncio.get_running_loop().time()
+        self._idle_check()
+
+    def _engine_ready(self, **fields: Any) -> None:
+        """A check found the engine this boot verified."""
         self._engine_changed = False
         if self.engine_status != "ready":
             self.engine_status = "ready"
-            log.row("engine", service_status="ready", context_tokens=self.context_tokens)
+            log.row("engine", service_status="ready", **fields)
 
     def _engine_changes(self) -> None:
         """The engine serves another model or another context than this boot verified. The work in flight was checked
@@ -295,3 +292,74 @@ class Service:
         log.row("engine_changed", service_status="failed")
         for work in list(self.work):
             work.stop("engine_changed")
+
+
+class Service(Lifecycle):
+    """The text lane's service: vLLM behind contract v2."""
+
+    config: Config
+
+    def __init__(self, config: Config, engine: EngineClient, stop: vast.Stop) -> None:
+        super().__init__(config, stop)
+        self.engine = engine
+        self._salt_secret = secrets.token_bytes(32)  # made at every start, never shown
+        self.context_tokens: int | None = None
+        self._engine_length: int | None = None  # the engine's own context length, as this boot verified it
+        self.admission = Admission(config)
+        self.count_places = CountPlaces(config)
+
+    async def _close_engine(self) -> None:
+        await self.engine.aclose()
+
+    def check_max_tokens(self, caller: Caller, request: ChatRequest) -> None:
+        if request.max_tokens > self.config.limits[caller.cls].max_tokens:
+            raise ServiceError("limit_exceeded")
+
+    def check_input(self, caller: Caller, input_tokens: int, max_tokens: int) -> None:
+        limit = self.config.limits[caller.cls].input_tokens
+        if limit is not None and input_tokens > limit:
+            raise ServiceError("limit_exceeded")  # our quota
+        assert self.context_tokens is not None  # known once the engine was verified
+        if input_tokens + max_tokens > self.context_tokens:
+            raise ServiceError("context_limit")  # the model's size
+
+    def payload(self, caller: Caller, request: ChatRequest) -> dict[str, Any]:
+        return generation_payload(self.config.alias, request, priority=self.config.engine_priority[caller.cls],
+                                  cache_salt=cache_salt(self._salt_secret, caller))
+
+    # Models and state.
+
+    def models(self) -> dict[str, Any]:
+        if self.context_tokens is None:
+            raise ServiceError("starting")
+        return {"object": "list",
+                "data": [{"id": self.config.alias, "object": "model", "max_model_len": self.context_tokens}]}
+
+    def state(self, *, control: bool) -> dict[str, Any]:
+        state: dict[str, Any] = {"contract": CONTRACT, "boot_id": self.boot_id, "status": self.status,
+                                 "model": self.config.alias, "context_tokens": self.context_tokens,
+                                 "drain_generation": self.drain_generation}
+        if control:
+            state.update(sleep_requested=self.sleep_requested, active=self.admission.active_counts(),
+                         waiting=self.admission.waiting_counts(), versions=self._versions())
+        return state
+
+    async def _watch_engine(self) -> None:
+        await self._watch_checks(self._check_engine)
+
+    async def _check_engine(self) -> None:
+        self._engine_answered(await self.engine.context_length(self.config.alias))
+
+    def _engine_answered(self, length: int | None) -> None:
+        """The engine answered a check with the alias's context length, or with None: it serves another model."""
+        if self._engine_length is None:
+            if length is None:
+                return  # not verified: the service stays starting
+            self._engine_length = length
+            limit = self.config.context_tokens
+            self.context_tokens = min(length, limit) if limit is not None else length
+            self._first_verified()  # the first ready starts the idle interval
+        elif length != self._engine_length:
+            self._engine_changes()
+            return
+        self._engine_ready(context_tokens=self.context_tokens)

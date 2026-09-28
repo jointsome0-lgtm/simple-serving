@@ -1,7 +1,7 @@
 """simple-serving's command on the owner's machine: it starts the card, holds the tunnel and asks for sleep
 (contract section 8).
 
-    python -m simple_serving.cli [--config PATH] up | sleep | status | keys | trial --ssh-host HOST
+    python -m simple_serving.cli [--config PATH] [--lane pictures] up | sleep | status | keys | trial --ssh-host HOST
 
 `up` waits out a stop in flight, resumes the instance once if it is stopped, and waits for it to run. Then it opens
 the tunnel, local 8080 to the gateway's public listener and 8081 to its control listener, waits for the gateway to be
@@ -25,6 +25,12 @@ The configuration is the owner's alone: a JSON object in `~/.config/simple-servi
 On a trial rental, `trial` writes the id and the host instead: it reads the card's instance id over SSH from the file
 card/onstart.sh keeps, checks its form, and writes it with the host it read it through. The key stays the owner's:
 Vast refuses the card's own key from outside the card.
+
+`--lane pictures` does the same for the picture card (docs/pictures.md, section 10), whose instance is the object
+`pictures` in the configuration, with its own `instance_id`, `vast_api_key` and `ssh_host`, which `trial --lane
+pictures` writes. The keys are the same two. Its tunnel is local 8084 to the picture gateway's public listener and
+8085 to its control listener, its remote command the picture launcher's `--hold`, and its up has a lock of its own, so
+that both lanes may be up at once.
 """
 
 from __future__ import annotations
@@ -61,6 +67,8 @@ SSH = ("ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "Exi
        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=yes",
        "-o", "ControlPath=none")
 HOLD = "cd /workspace/simple-serving && /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --hold"
+HOLD_PICTURES = ("cd /workspace/simple-serving && /workspace/simple-serving-pictures-card/gateway/bin/python "
+                 "-m simple_serving.pictures.card --hold")
 # Prints the instance's id, which card/onstart.sh keeps in a file without a newline, as one line.
 READ_TRIAL = "cat /root/.simple-chat-instance-id || exit 3; echo"
 TRIAL_BYTES = 4096  # the most of the card's answer to READ_TRIAL that `trial` reads
@@ -83,6 +91,23 @@ GIVEN_UP = (f"the card has given up loading the model and stops itself {IDLE_TIM
 UNCONFIRMED = ("the card's stop is not confirmed: Vast has not taken it, and costs may go on. Delete the trial "
                "instance with simple-story-chat's npm run gpu:rent -- --destroy ID (README, 'The first rental')")
 REFUSALS = {card.NOT_PREPARED: NOT_PREPARED, card.GAVE_UP: GIVEN_UP, card.STOP_UNCONFIRMED: UNCONFIRMED}  # of --hold
+
+
+@dataclass(frozen=True)
+class Lane:
+    """What `--lane` changes: where the configuration keeps the lane's instance, the lane's manifest, the tunnel's
+    local ports and remote command, and up's lock."""
+
+    name: str | None  # the configuration's object for the lane, or None for its top level, the text lane's
+    folder: str  # of the lane's manifest.env, in the checkout
+    local: Mapping[str, int]
+    hold: str
+    lock: str  # beside the configuration
+
+
+LANES = {"text": Lane(None, "card", LOCAL, HOLD, "up.lock"),
+         "pictures": Lane("pictures", "card/pictures", {"public": 8084, "control": 8085}, HOLD_PICTURES,
+                          "up-pictures.lock")}
 
 now = time.monotonic  # the command's own clock, which the tests replace
 pause = asyncio.sleep
@@ -116,11 +141,11 @@ class Tunnel:
         self.process = process
 
     @classmethod
-    async def open(cls, host: str, forwards: Mapping[int, int]) -> Tunnel:
+    async def open(cls, host: str, forwards: Mapping[int, int], hold: str = HOLD) -> Tunnel:
         """Return once the remote command has printed its first line, which it does only after ssh has bound every
         forward; raise NoTunnel when ssh ends or does not get that far within CONNECT_S."""
         options = [arg for local, remote in forwards.items() for arg in ("-L", f"127.0.0.1:{local}:127.0.0.1:{remote}")]
-        process = await asyncio.create_subprocess_exec(*SSH, *options, host, HOLD, stdin=asyncio.subprocess.DEVNULL,
+        process = await asyncio.create_subprocess_exec(*SSH, *options, host, hold, stdin=asyncio.subprocess.DEVNULL,
                                                        stdout=asyncio.subprocess.PIPE)
         tunnel = cls(process)
         try:
@@ -172,24 +197,33 @@ class Setup:
     resume: Callable[[], Awaitable[None]] = field(repr=False)
     connect: Callable[[Mapping[int, int]], Awaitable[Tunnel]]
     local: Mapping[str, int] = field(default_factory=lambda: dict(LOCAL))
+    lane: str | None = None  # what the gateway's state must name, as the configuration does
+    lock: str = "up.lock"
 
     def control_url(self, port: int | None = None) -> str:
         return f"http://127.0.0.1:{port or self.local['control']}"
 
 
-def load(path: Path) -> Setup:
+def load(path: Path, lane: Lane = LANES["text"]) -> Setup:
     config = read_config(path)
-    names = ("instance_id", "vast_api_key", "ssh_host", "control_key")
-    if missing := [name for name in names if not isinstance(config.get(name), str) or not config[name]]:
+    block = config if lane.name is None else config.get(lane.name, {})
+    if not isinstance(block, dict):
+        raise Refusal(f"{path} must hold a JSON object as {lane.name}")
+    prefix = "" if lane.name is None else f"{lane.name}."
+    missing = [prefix + name for name in ("instance_id", "vast_api_key", "ssh_host")
+               if not isinstance(block.get(name), str) or not block[name]]
+    missing += [name for name in ("control_key",) if not isinstance(config.get(name), str) or not config[name]]
+    if missing:
         raise Refusal(f"{path} has no {', '.join(missing)}")
-    instance, key, host = config["instance_id"], config["vast_api_key"], config["ssh_host"]
+    instance, key, host = block["instance_id"], block["vast_api_key"], block["ssh_host"]
     if not vast.INSTANCE.fullmatch(instance) or "\r" in key or "\n" in key or not SSH_HOST.fullmatch(host):
-        raise Refusal(f"{path} has an instance_id, vast_api_key or ssh_host of the wrong form")
-    manifest = card.read_manifest()
+        raise Refusal(f"{path} has an {prefix}instance_id, vast_api_key or ssh_host of the wrong form")
+    manifest = card.read_manifest(folder=lane.folder)
     return Setup(path, config["control_key"], manifest["MODEL_ALIAS"],
                  int(manifest["LOAD_DEADLINE_S"]) + READY_MARGIN_S,
                  {name: int(manifest[f"{name.upper()}_PORT"]) for name in LOCAL},
-                 partial(vast.show, instance, key), partial(vast.resume, instance, key), partial(Tunnel.open, host))
+                 partial(vast.show, instance, key), partial(vast.resume, instance, key),
+                 partial(Tunnel.open, host, hold=lane.hold), dict(lane.local), lane.name, lane.lock)
 
 
 def read_config(path: Path) -> dict[str, Any]:
@@ -232,13 +266,16 @@ def keys(path: Path) -> int:
     return 0
 
 
-async def trial(path: Path, host: str) -> int:
+async def trial(path: Path, host: str, lane: Lane = LANES["text"]) -> int:
     """Write the trial instance's id, which card/onstart.sh keeps on the card, and the SSH host it was read from into
-    the configuration, keeping what else it holds, `vast_api_key` included. Nothing read from the card is printed, not
-    even when it is refused."""
+    the configuration, or into the lane's object there, keeping what else it holds, `vast_api_key` included. Nothing
+    read from the card is printed, not even when it is refused."""
     if not SSH_HOST.fullmatch(host):
         raise Refusal("the SSH host has the wrong form")
     config = read_config(path)
+    block = config if lane.name is None else config.get(lane.name, {})
+    if not isinstance(block, dict):
+        raise Refusal(f"{path} must hold a JSON object as {lane.name}")
     # Standard error is dropped unread: whatever the card prints there could hold its key.
     process = await asyncio.create_subprocess_exec(*SSH, host, READ_TRIAL, stdin=asyncio.subprocess.DEVNULL,
                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
@@ -262,13 +299,14 @@ async def trial(path: Path, host: str) -> int:
         instance, rest = "", "?"
     if code is None or rest or not vast.INSTANCE.fullmatch(instance):
         raise Refusal("the card's instance id is missing or of the wrong form")
-    write_config(path, config | {"instance_id": instance, "ssh_host": host})
+    found = block | {"instance_id": instance, "ssh_host": host}
+    write_config(path, found if lane.name is None else config | {lane.name: found})
     say(f"trial: the instance's id and the SSH host are in {path}")
     return 0
 
 
 async def up(setup: Setup) -> int:
-    with up_lock(setup.path):
+    with up_lock(setup.path, setup.lock):
         if busy := [port for port in setup.local.values() if card.taken(port)]:
             raise Refusal(f"local port {busy[0]} is taken, and up leaves another listener alone")
         await start(setup)
@@ -344,8 +382,8 @@ async def ready(setup: Setup, tunnel: Tunnel) -> bool:
         except GatewayError as error:
             raise Refusal(f"the gateway answers {error}") from None
         if state:
-            if state.get("contract") != "2" or state.get("model") != setup.alias:
-                raise Refusal("the gateway on the card serves another contract or model")
+            if (state.get("contract"), state.get("lane"), state.get("model")) != ("2", setup.lane, setup.alias):
+                raise Refusal("the gateway on the card serves another contract, lane or model")
             if state.get("sleep_requested"):
                 raise Refusal("the card is falling asleep: run up again once it has stopped")
             if state["status"] == "ready":
@@ -397,9 +435,10 @@ async def status(setup: Setup) -> int:
         print(f"gateway: {describe(error)}")
         return 0
     counts = {name: {cls: n for cls, n in view.get(name, {}).items() if n} for name in ("active", "waiting")}
-    serves = (view.get("contract"), view.get("model")) == ("2", setup.alias)
+    serves = (view.get("contract"), view.get("lane"), view.get("model")) == ("2", setup.lane, setup.alias)
+    lane = f"lane {setup.lane}, " if setup.lane else ""
     print(f"gateway: {view['status']}{', falling asleep' if view.get('sleep_requested') else ''}; "
-          f"{f'contract 2, model {setup.alias}' if serves else 'another contract or model'}; "
+          f"{f'contract 2, {lane}model {setup.alias}' if serves else 'another contract or model'}; "
           f"active {counts['active'] or 'none'}, waiting {counts['waiting'] or 'none'}")
     return 0
 
@@ -485,10 +524,10 @@ def describe(error: Exception) -> str:
 
 
 @contextlib.contextmanager
-def up_lock(path: Path) -> Iterator[None]:
-    """One up at a time for the configuration's directory: the lock guards the fixed local ports of the tunnel, not
-    a card."""
-    lock = os.open(path.with_name("up.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+def up_lock(path: Path, name: str = "up.lock") -> Iterator[None]:
+    """One up of a lane at a time for the configuration's directory: the lock guards the fixed local ports of the
+    lane's tunnel, not a card."""
+    lock = os.open(path.with_name(name), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -515,17 +554,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m simple_serving.cli", description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path, default=CONFIG, help="the configuration file (default: %(default)s)")
     parser.add_argument("--ssh-host", help="trial's card: a host of ~/.ssh/config whose host key is known")
+    parser.add_argument("--lane", choices=tuple(LANES), default="text", help="the card's lane (default: %(default)s)")
     parser.add_argument("command", choices=("up", "sleep", "status", "keys", "trial"))
     args = parser.parse_args(argv)
     if (args.command == "trial") != (args.ssh_host is not None):
         parser.error("--ssh-host goes with trial, and trial needs it")
     commands = {"up": up, "sleep": sleep, "status": status}
+    lane = LANES[args.lane]
     try:
-        if args.command == "keys":
+        if args.command == "keys":  # the same two for every lane
             return keys(args.config)
         if args.command == "trial":
-            return asyncio.run(trial(args.config, args.ssh_host))
-        return asyncio.run(commands[args.command](load(args.config)))
+            return asyncio.run(trial(args.config, args.ssh_host, lane))
+        return asyncio.run(commands[args.command](load(args.config, lane)))
     except Refusal as error:
         print(f"simple-serving: {error}", file=sys.stderr)
         return 1
