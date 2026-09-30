@@ -13,7 +13,7 @@ import io
 import json
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Coroutine, MutableMapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,14 +22,19 @@ from typing import Any
 import httpx
 import pytest
 
+from simple_serving.asgi import RECORD, Exchange
 from simple_serving.config import Listener
-from simple_serving.pictures import comfy, jobs
+from simple_serving.errors import ServiceError
+from simple_serving.log import RequestRecord
+from simple_serving.pictures import comfy, jobs, routes
+from simple_serving.pictures import uploads as uploads_module
 from simple_serving.pictures.config import CARD_ENGINE, PROVISIONAL, READER_NODES, from_block
 from simple_serving.pictures.fake_comfy import FakeComfy, Script
 from simple_serving.pictures.graphs import PNG_SIGNATURE, strip_png
 from simple_serving.pictures.server import PictureGateway
 from simple_serving.pictures.service import PictureService
-from simple_serving.pictures.uploads import BLANK
+from simple_serving.pictures.uploads import BLANK, Uploads
+from simple_serving.policy import resolve
 from simple_serving.server import Servers, bind
 
 from .support import BOT, CLASS, CONTROL, FakeVast, Process, RawClient, call, reader, until
@@ -356,6 +361,147 @@ async def test_an_upload_is_its_readers_alone_and_is_erased_on_their_word_and_wh
         assert (failed.status, failed.json()) == (503, {"error": {"code": "engine_unavailable"}})
         await until(lambda: stack.fake.files.get(("temp", "bot-references", lost)) == BLANK)
     assert [row.get("references") for row in pictures(logged) if row["status"] == 200] == [1]
+
+
+class UploadComfy(comfy.Comfy):
+    """An upload can reach the card before its answer fails, or wait until this test lets it finish."""
+
+    def __init__(self, hold: bytes | None = None, *, fail: bool = False) -> None:
+        self.hold, self.fail = hold, fail
+        self.started, self.release = asyncio.Event(), asyncio.Event()
+        self.files: dict[str, bytes] = {}
+        self.calls: list[bytes] = []
+
+    async def upload(self, name: str, data: bytes, content_type: str, *, kind: str, subfolder: str) -> None:
+        self.calls.append(data)
+        if data == self.hold:
+            self.started.set()
+            await self.release.wait()
+        self.files[name] = data
+        if data == self.hold and self.fail:
+            raise comfy.ComfyError("synthetic upload failure")
+
+
+@pytest.mark.parametrize("older", ["failed_send", "expired_owner", "sweep"])
+async def test_old_upload_cleanup_cannot_erase_a_newer_send(
+        older: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = from_block({"keys": KEYS}, engine_url="http://127.0.0.1:1")
+    caller, other = (resolve(config.keys[0], "reader", scope) for scope in ("reader.aaaaaaaa", "reader.bbbbbbbb"))
+    first, second, name = REFERENCE + b"old", REFERENCE + b"new", f"{uuid.uuid4()}.png"
+    fake = UploadComfy(first, fail=older != "sweep")
+    background: list[Coroutine[Any, Any, None]] = []  # delay cleanup until the newer request has succeeded
+    uploads = Uploads(fake, config.limits, background.append)
+    absent = asyncio.Event()
+
+    async def answered() -> None:
+        return
+
+    async def gone() -> None:
+        await absent.wait()
+
+    if older in {"expired_owner", "sweep"}:
+        monkeypatch.setattr(uploads_module, "TTL_S", -1)
+    initial = asyncio.create_task(uploads.put(caller, name, first, "image/png", gone, answered))
+    await fake.started.wait()
+    if older == "expired_owner":
+        fake.release.set()
+        with pytest.raises(ServiceError):
+            await initial
+        monkeypatch.setattr(uploads_module, "TTL_S", 600)
+        await uploads.put(other, name, second, "image/png", gone, answered)
+        current = other  # the expired name belongs to a different Upload object and scope now
+    else:
+        sweep = asyncio.create_task(uploads.sweep()) if older == "sweep" else None
+        if sweep is not None:
+            await asyncio.sleep(0)  # the sweep has captured the old expiry and waits for the send's lock
+            monkeypatch.setattr(uploads_module, "TTL_S", 600)
+        newer = asyncio.create_task(uploads.put(caller, name, second, "image/png", gone, answered))
+        await asyncio.sleep(0)  # the new PUT claims the name before the old backend request completes
+        fake.release.set()
+        outcomes = await asyncio.gather(initial, newer, return_exceptions=True)
+        assert outcomes[1] is None
+        assert isinstance(outcomes[0], ServiceError) if older == "failed_send" else outcomes[0] is None
+        if sweep is not None:
+            await sweep
+        current = caller
+    await asyncio.gather(*background)
+    assert uploads.owner(current)(name) and fake.files[name] == second
+    assert BLANK not in fake.calls
+    if older == "expired_owner":
+        assert not uploads.owner(caller)(name)
+
+
+@pytest.mark.parametrize("ending", ["response_complete", "response_failure", "response_disconnect",
+                                    "cancel_during_send"])
+async def test_an_upload_is_kept_only_if_its_http_answer_finishes(ending: str) -> None:
+    config = from_block({"keys": KEYS}, engine_url="http://127.0.0.1:1")
+    caller, name = resolve(config.keys[0], "reader", "reader.aaaaaaaa"), f"{uuid.uuid4()}.png"
+    service = PictureService(config, FakeVast())  # never started: no health checks, sockets or card stop
+    service.engine_status = "ready"
+    fake = UploadComfy(REFERENCE if ending == "cancel_during_send" else None)
+    background: list[Coroutine[Any, Any, None]] = []
+    service.uploads = Uploads(fake, config.limits, background.append)
+    disconnect, response_body, sender_stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    read = False
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        nonlocal read
+        if not read:
+            read = True
+            return {"type": "http.request", "body": REFERENCE, "more_body": False}
+        await disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        sent.append(dict(message))
+        if message["type"] == "http.response.body":
+            response_body.set()
+            if ending == "response_complete":
+                disconnect.set()  # ASGI's disconnect can arrive with a fully completed response
+                return
+            if ending == "response_failure":
+                raise BrokenPipeError("synthetic response failure")
+            try:
+                await asyncio.Event().wait()  # response completion is still outstanding when the client leaves
+            finally:
+                sender_stopped.set()
+
+    exchange = Exchange({"headers": [(b"authorization", f"Bearer {BOT}".encode()),
+                                      (b"content-type", b"image/png"),
+                                      *((key.lower().encode(), value.encode()) for key, value in A.items())],
+                         "path_params": {"name": name}, RECORD: RequestRecord(listener="public", method="PUT")},
+                        receive, send)
+    try:
+        request = asyncio.create_task(routes.put_upload(service, exchange))
+        if ending == "response_failure":
+            with pytest.raises(BrokenPipeError):
+                await request
+        elif ending == "response_complete":
+            await request
+        elif ending == "response_disconnect":
+            await response_body.wait()
+            disconnect.set()
+            await request
+            assert exchange.record.cancelled and sender_stopped.is_set()
+        else:
+            await fake.started.wait()
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            cleanup = asyncio.gather(*background)
+            await asyncio.sleep(0)
+            assert fake.calls == [REFERENCE] and sent == []  # the submitted upload is allowed to finish first
+            fake.release.set()
+            await cleanup
+            background.clear()
+        await asyncio.gather(*background)
+        kept = ending == "response_complete"
+        assert fake.files[name] == (REFERENCE if kept else BLANK)
+        assert service.uploads.owner(caller)(name) == kept
+        assert fake.calls == ([REFERENCE] if kept else [REFERENCE, BLANK])
+    finally:
+        await service.comfy.aclose()
 
 
 # Privacy: the gateway as its own process, as the card's launcher starts it.

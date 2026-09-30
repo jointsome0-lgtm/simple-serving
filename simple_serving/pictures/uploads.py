@@ -37,6 +37,7 @@ class Upload:
     scope: str
     expires: float  # the event loop's time
     state: str = "sending"
+    generation: int = 0  # each PUT owns only its own cleanup, even when the name is sent again
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -60,41 +61,52 @@ class Uploads:
         return owns
 
     async def put(self, caller: Caller, name: str, data: bytes, content_type: str,
-                  gone: Callable[[], Awaitable[None]]) -> None:
-        """Send the caller's upload and return once ComfyUI holds it. The name is the caller's scope's from here, before
-        anything is sent. An upload that fails, or whose client leaves before the answer, is erased at once in the
-        background, whatever the client does next."""
+                  gone: Callable[[], Awaitable[None]], answer: Callable[[], Awaitable[None]]) -> None:
+        """Send the upload and its HTTP answer while watching the client. A failed or abandoned send is erased after
+        its backend request has ended, unless a newer PUT now owns the name. Cancelling this request never abandons
+        an upload already sent to ComfyUI."""
         upload = self._claim(caller, name)
-        send = asyncio.ensure_future(self._send(upload, data, content_type))
+        upload.generation += 1
+        generation = upload.generation
+        upload.state = "sending"
+        send = asyncio.ensure_future(self._send(upload, generation, data, content_type))
         left = asyncio.ensure_future(gone())
+        reply: asyncio.Future[None] | None = None
         kept = False
         try:
             await asyncio.wait({send, left}, return_when=asyncio.FIRST_COMPLETED)
             if left.done():
                 raise ClientGone
             send.result()  # the send's failure, if it failed
+            reply = asyncio.ensure_future(answer())
+            await asyncio.wait({reply, left}, return_when=asyncio.FIRST_COMPLETED)
+            if not reply.done():
+                raise ClientGone
+            reply.result()  # a completed answer wins: ASGI also reports disconnect once the response finishes
             kept = True
         finally:
             left.cancel()
-            if left.done() and not left.cancelled():
-                left.exception()
+            if reply is not None:
+                reply.cancel()
+            await asyncio.gather(left, *([reply] if reply is not None else []), return_exceptions=True)
             if not kept:
-                self._track(self._erase_after(upload, send))
+                self._track(self._erase_after(upload, generation, send))
 
     async def erase(self, caller: Caller, name: str) -> None:
         """The caller's own upload, erased. An erased name may be erased again until its ten minutes are over."""
         upload = self._uploads.get(name)
         if upload is None or upload.scope != caller.scope:
             raise ServiceError("not_found")
-        if not await self._erase(upload):
+        if not await self._erase(upload, upload.generation):
             raise ServiceError("engine_unavailable")
 
     async def sweep(self) -> None:
         """Erase and forget the names whose ten minutes are over. One that cannot be erased is the sweeper's."""
         loop = asyncio.get_running_loop()
-        for upload in [one for one in self._uploads.values() if one.expires <= loop.time()]:
-            await self._erase(upload)
-            if self._uploads.get(upload.name) is upload and upload.expires <= loop.time():
+        expired = [(one, one.generation) for one in self._uploads.values() if one.expires <= loop.time()]
+        for upload, generation in expired:
+            await self._erase(upload, generation, expired=True)
+            if self._current(upload, generation) and upload.expires <= loop.time():
                 del self._uploads[upload.name]
 
     def _claim(self, caller: Caller, name: str) -> Upload:
@@ -119,30 +131,42 @@ class Uploads:
         upload = self._uploads[name] = Upload(name=name, scope=caller.scope, expires=now + TTL_S)
         return upload
 
-    async def _send(self, upload: Upload, data: bytes, content_type: str) -> None:
+    def _current(self, upload: Upload, generation: int) -> bool:
+        return self._uploads.get(upload.name) is upload and upload.generation == generation
+
+    async def _send(self, upload: Upload, generation: int, data: bytes, content_type: str) -> None:
         async with upload.lock:
+            if self._uploads.get(upload.name) is not upload:
+                raise ServiceError("not_found")  # the expired name was reclaimed before this send began
             try:
                 await self._comfy.upload(upload.name, data, content_type, kind="temp", subfolder=SUBFOLDER)
             except ComfyError:
-                upload.state = "stale"
+                if self._current(upload, generation):
+                    upload.state = "stale"
                 raise ServiceError("engine_unavailable") from None
-            upload.state = "live"
+            if self._current(upload, generation):
+                upload.state = "live"
 
-    async def _erase_after(self, upload: Upload, send: asyncio.Future[None]) -> None:
+    async def _erase_after(self, upload: Upload, generation: int, send: asyncio.Future[None]) -> None:
         await asyncio.wait({send})
         if not send.cancelled():
             send.exception()  # retrieved: the client has its answer already, or has gone
-        await self._erase(upload)
+        await self._erase(upload, generation)
 
-    async def _erase(self, upload: Upload) -> bool:
+    async def _erase(self, upload: Upload, generation: int, *, expired: bool = False) -> bool:
         """Whether the name is erased: the blank written over it now, or before."""
         async with upload.lock:
+            if not self._current(upload, generation) \
+                    or (expired and upload.expires > asyncio.get_running_loop().time()):
+                return True  # this cleanup's bytes have been replaced, or the expiry was renewed
             if upload.state == "erased":
                 return True
             try:
                 await self._comfy.upload(upload.name, BLANK, "image/png", kind="temp", subfolder=SUBFOLDER)
             except ComfyError:
-                upload.state = "stale"
+                if self._current(upload, generation):
+                    upload.state = "stale"
                 return False
-            upload.state = "erased"
+            if self._current(upload, generation):
+                upload.state = "erased"
             return True

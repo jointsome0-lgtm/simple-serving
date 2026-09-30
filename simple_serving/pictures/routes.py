@@ -102,15 +102,14 @@ async def put_upload(service: PictureService, exchange: Exchange) -> None:
                 raise ServiceError("invalid_request")
             exchange.record.upload_bytes = len(data)
             service.check_serving()  # a drain that began while the body was read refuses it here
-            await service.uploads.put(caller, name, data, kind, exchange.disconnected)
+            await service.uploads.put(caller, name, data, kind, exchange.disconnected,
+                                      lambda: exchange.send_json(200, {"name": f"{SUBFOLDER}/{name} [temp]"}))
         except ServiceError as error:
             await _refuse(exchange, error.code, deadline)
         except TimeoutError:
             await _refuse(exchange, "timeout", deadline)
         except ClientGone:
             exchange.record.cancelled = True
-        else:
-            await exchange.send_json(200, {"name": f"{SUBFOLDER}/{name} [temp]"})
 
 
 async def erase_upload(service: PictureService, exchange: Exchange) -> None:
