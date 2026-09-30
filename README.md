@@ -20,6 +20,7 @@ Outside-client and unattended operation still have open validation and budget wo
 - [Picture contract and migration](docs/pictures.md): picture API, card procedure, phases and rollback.
 - [Shared cases](contract/README.md): the case format used by the gateway and client adapters.
 - [Decisions and measurements](docs/decisions.md): dated choices, results and superseded plans.
+- [Existing branches](docs/branches.md): where the current groundwork lives, its dependencies and integration limits.
 - [Speed experiments](docs/speed.md): questions for later measurements.
 
 ## Install
