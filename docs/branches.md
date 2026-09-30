@@ -32,7 +32,7 @@ GPU results.
 | `live-2026-09-28` | `940471a` | Includes `8672e62`, then adds dense prefix retention to the text launcher. Review the default change separately. |
 | `thinking-budget` | `466a82d` | Includes `8672e62`. Implements an optional thinking-token budget. Needs integration checks, then a GPU smoke before activation. |
 | `vision-captions` | `47d71ae` | Includes `8672e62`. Implements image input for Gemma, key permissions, launcher/bootstrap and a vision smoke. Needs shared configuration and launcher adaptation, then GPU validation. |
-| `held-criterion` | `a898060` | Includes throughput and fixes its cache-capacity stopping criterion. Best candidate for integrating that tooling. The revised criterion needs a GPU measurement. |
+| `held-criterion` | `a898060` | Includes throughput and fixes its cache-capacity stopping criterion. Workload and metric-selection ideas are reused in the new interference client; its A/B launcher remains separate. The revised criterion needs a GPU measurement. |
 | `sweep` | `b6d4919` | Separate sweep against an already running engine, with a deadline and overlap checks. Independent of the A/B harness; keep it identifiable as an experiment. |
 | `split-kv-wip` | `bd0503e` | Split-KV plugin files on an older throughput base. The launcher does not register the change. Unfinished. |
 | `pictures-two-cards` | `5aa9302` | Design and recorded owner answers only. No distributor or two-card test is implemented. |
@@ -78,6 +78,11 @@ picture configuration/lifecycle. Vision's synthetic color/count/privacy smoke do
 real captions, token counts or MTP throughput.
 
 ### Measurement tools
+
+The [interference client](prefill-interference.md) now measures a long prompt arriving during another request's
+generation through the existing gateway. It reuses selected workload and metric-selection ideas from
+`held-criterion`, without integrating its launcher. Its default command uses a local fake; GPU interference and
+the value of disaggregation remain unmeasured.
 
 Use `held-criterion` once, without separately replaying `throughput`. Its corrected timing sweep distinguishes
 waiting from preemption and explains the stop in its report. Preserve the current card subclassing and log-field

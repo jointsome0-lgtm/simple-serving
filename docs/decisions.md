@@ -115,3 +115,25 @@ parts, cancellation, unresolved stops, class capacity, drain and idle expiry des
 image's `promtool check config` validated the configuration and all 11 rules without networking, using synthetic
 secret files. A final dashboard correction passed the catalog and selector checks again. Independent review found
 no remaining blocker. Grafana rendering, live scrapes and real GPU behavior were not checked in this integration.
+
+## Prefill interference groundwork, 2026-09-30
+
+The owner asked whether to begin Splitwise-style prefill/decode disaggregation and accepted a measurement first.
+The new [interference client](prefill-interference.md) sends synthetic requests through an existing text gateway,
+comparing generation alone with a cold long prompt and its exact warmed repeat. It records chunk pauses, overlap,
+cache usage and selected numeric diagnostics. It selectively reuses workload and metric-selection ideas from
+`held-criterion` at `a898060`; that branch's launcher and remaining throughput work stay separate.
+
+The default command runs against a local fake. A real run requires explicit configuration and a new report file,
+checks ready state, quiet gauges and admission capacity, and has request and whole-run deadlines. It performs no
+card lifecycle operations or retries. Reports omit keys, scopes, aliases, prompts, output and raw metric labels.
+
+The shared check command passed on Python 3.12 and 3.14: ruff, mypy and 334 tests, with the same optional source
+catalog check skipped. Six added tests cover a synthetic cold pause and warm reuse, a full freeze until the second
+request finishes, fragmented SSE and metadata, failure cleanup, CLI boundaries, numeric diagnostics, monitor
+shutdown and the actual gateway contract. Review corrected the full-freeze criterion and a monitor shutdown race.
+The standalone default command also saved a successful owner-only synthetic report.
+
+No GPU result or latency SLO decision exists for this scenario. KV transport and separate prefill/decode workers
+are not implemented. Their value still depends on a controlled reader-pause measurement and a one-card batching
+and cache comparison, followed by compatible-engine and cost checks if the pause warrants disaggregation.
