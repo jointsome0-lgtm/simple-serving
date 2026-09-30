@@ -137,7 +137,7 @@ async def test_a_signal_ends_the_pair_and_leaves_the_instance_running(state: Pat
     assert {"CONTAINER_ID", "CONTAINER_API_KEY", "SIMPLE_SERVING_CONFIG"} <= set(gateway["env"])
 
 
-def test_mtp_and_thinking_budget_reach_vllm_and_the_pins_only_when_on(state: Path) -> None:
+def test_mtp_thinking_budget_and_vision_reach_vllm_and_the_pins_only_when_on(state: Path) -> None:
     off, on = card_at(state, MTP_SPECULATIVE_TOKENS="0"), card_at(state)
     assert on.manifest["MTP_SPECULATIVE_TOKENS"] == "3"  # on by default since the owner's choice of 2026-09-26
     assert "--speculative-config" not in off.engine().argv
@@ -154,6 +154,12 @@ def test_mtp_and_thinking_budget_reach_vllm_and_the_pins_only_when_on(state: Pat
     assert card.pinned_versions(budget.manifest) == card.pinned_versions(on.manifest) | {"thinking_budget": "on"}
     argv = budget.engine().argv
     assert argv[argv.index("--prefix-cache-retention-interval") + 1] == "None"
+    assert on.manifest["VISION"] == "0" and "vision" not in card.pinned_versions(on.manifest)
+    vision = card_at(state, THINKING_BUDGET="1", VISION="1")
+    args = ["--limit-mm-per-prompt", '{"image": 1, "video": 0, "audio": 0}', "--mm-processor-cache-gb", "0"]
+    at = argv.index("--language-model-only")
+    assert vision.engine().argv == [*argv[:at], *args, *argv[at + 1:]]
+    assert card.pinned_versions(vision.manifest) == card.pinned_versions(budget.manifest) | {"vision": "1"}
 
 
 def test_the_kv_cache_copy_in_ram_is_off_by_default_and_reaches_vllm_and_the_pins_only_when_on(state: Path) -> None:
@@ -569,7 +575,7 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     assert bootstrap(f"{keys}{METRICS}\n") == 0
     assert json.loads((state / "keys.json").read_text()) == three
 
-    # The text switch changes only the text preparation stamp. Pictures need no thinking-budget manifest field.
+    # Text switches change only the text preparation stamp. The picture lane needs neither field.
     picture_folder, picture_state = code / PictureCard.folder, tmp_path / "picture-state"
     picture_folder.mkdir(parents=True)
     picture_state.mkdir()
@@ -579,18 +585,23 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     picture_stamp = hashlib.sha256(b"".join((picture_folder / name).read_bytes() for name in PictureCard.stamped))
     (picture_state / "prepared").write_text(picture_stamp.hexdigest() + "\n")
     pictures = PictureCard.load(code=code, state=picture_state, environ=environ, root=root)
-    assert "THINKING_BUDGET" not in pictures.manifest
+    assert not {"THINKING_BUDGET", "VISION"} & pictures.manifest.keys()
     assert "--reasoning-config" not in pictures.engine().argv and "thinking_budget" not in pictures.config()["versions"]
+    assert all("vision" not in key for key in pictures.config()["keys"])
     assert pictures.prepared()
     manifest_path = code / "card/manifest.env"
     base = manifest_path.read_text()
     before_calls, before_prepared = calls.read_bytes(), (state / "prepared").read_bytes()
-    for value in (None, "", "2", "01", "-1", "on"):
-        changed = base.replace("THINKING_BUDGET=0\n", "") if value is None else base + f"THINKING_BUDGET={value}\n"
-        manifest_path.write_text(changed)
-        assert bootstrap("") == 3
-        assert calls.read_bytes() == before_calls and (state / "prepared").read_bytes() == before_prepared
-        assert json.loads((state / "keys.json").read_text()) == three and pictures.prepared()
+    for switch in ("THINKING_BUDGET", "VISION"):
+        for value in (None, "", "2", "01", "-1", "on"):
+            changed = base.replace(f"{switch}=0\n", "") if value is None else base + f"{switch}={value}\n"
+            manifest_path.write_text(changed)
+            assert bootstrap("") == 3
+            assert calls.read_bytes() == before_calls and (state / "prepared").read_bytes() == before_prepared
+            assert json.loads((state / "keys.json").read_text()) == three and pictures.prepared()
+    manifest_path.write_text(base + "VISION=1\n")  # the processor pins are required before any changes
+    assert bootstrap("") == 3 and calls.read_bytes() == before_calls
+    assert (state / "prepared").read_bytes() == before_prepared
     for value in ("1", "0"):
         manifest_path.write_text(base + f"THINKING_BUDGET={value}\n")
         loaded = Card.load(code=code, state=state, environ=environ, root=root)
@@ -598,15 +609,40 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
         assert bootstrap("") == 0 and loaded.prepared() and pictures.prepared()
         assert loaded.config()["versions"].get("thinking_budget") == ("on" if value == "1" else None)
         assert json.loads((state / "keys.json").read_text()) == three
+    processor = ("processor_config.json", "tokenizer.json", "tokenizer_config.json")
+    for name in processor:
+        (state / "tokenizer" / name).write_bytes(tokenizer)
+    pins = {name: hashlib.sha256(tokenizer).hexdigest() for name in processor}
+    base += "TOKENIZER_FILES=" + ",".join(f"{name}:{digest}" for name, digest in pins.items()) + "\n"
+    before_calls, before_prepared = calls.read_bytes(), (state / "prepared").read_bytes()
+    manifest_path.write_text(base.replace("processor_config.json:", "tokenizer_config.json:") + "VISION=1\n")
+    assert bootstrap("") == 3  # three entries must name the three distinct processor assets
+    assert calls.read_bytes() == before_calls and (state / "prepared").read_bytes() == before_prepared
+    (model / ".hidden").write_text("keep")
+    for value in ("1", "1", "0"):
+        manifest_path.write_text(base + f"VISION={value}\n")
+        loaded = Card.load(code=code, state=state, environ=environ, root=root)
+        assert bootstrap("") == 0 and loaded.prepared() and pictures.prepared()
+        assert json.loads((state / "keys.json").read_text()) == three
+        assert loaded.config()["versions"].get("vision") == ("1" if value == "1" else None)
+        assert sorted(path.name for path in model.iterdir()) == sorted(
+            ["model.safetensors", ".hidden", *(processor if value == "1" else ())])
+        if value == "1":
+            assert all(hashlib.sha256((model / name).read_bytes()).hexdigest() == pins[name] for name in processor)
+            (model / "processor_config.json").write_bytes(b"stale processor")  # next run repairs it from the pins
+    assert all((state / "tokenizer" / name).read_bytes() == tokenizer for name in processor)
+    assert not any(line.startswith(("aria2c", "curl")) for line in calls.read_text().splitlines())
 
 
 def test_the_metrics_key_reads_the_metrics_and_has_no_other_right(state: Path) -> None:
     (state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL, "metrics": METRICS}))
-    (state / "gateway.json").write_text(json.dumps(card_at(state).config()))
-    keys = {key.label: key for key in load_config(str(state / "gateway.json")).keys}
-    assert (keys["metrics"].metrics, keys["metrics"].control, keys["metrics"].classes, keys["metrics"].scopes) == (
-        True, False, frozenset(), False)
-    assert not keys["client"].metrics and keys["control"].control
+    for value in ("0", "1"):
+        (state / "gateway.json").write_text(json.dumps(card_at(state, VISION=value).config()))
+        keys = {key.label: key for key in load_config(str(state / "gateway.json")).keys}
+        assert (keys["metrics"].metrics, keys["metrics"].control, keys["metrics"].classes, keys["metrics"].scopes,
+                keys["metrics"].vision) == (True, False, frozenset(), False, False)
+        assert not keys["client"].metrics and keys["control"].control and not keys["control"].vision
+        assert keys["client"].vision is (value == "1")
     (state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL}))  # prepared before it
     assert [key["label"] for key in card_at(state).config()["keys"]] == ["client", "control"]
 
@@ -641,8 +677,8 @@ def test_bootstrap_fetches_the_pinned_drafter_with_mtp_on_and_keeps_a_file_only_
                                 ("TOKENIZER_FILES", [state / "tokenizer/tokenizer.json"]),
                                 ("DRAFTER_FILES", [hub / "model.safetensors", hub / "config.json"]))}
 
-    def bootstrap(tokens: str) -> int:
-        lines = {"VLLM_VERSION": "0.0.1", "MTP_SPECULATIVE_TOKENS": tokens, **pins}.items()
+    def bootstrap(tokens: str, vision: str = "0") -> int:
+        lines = {"VLLM_VERSION": "0.0.1", "MTP_SPECULATIVE_TOKENS": tokens, "VISION": vision, **pins}.items()
         (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in lines))
         return subprocess.run(["bash", str(code / "card/bootstrap.sh")], stdin=subprocess.DEVNULL, env=environ,
                               capture_output=True, timeout=60, check=False).returncode
@@ -660,6 +696,28 @@ def test_bootstrap_fetches_the_pinned_drafter_with_mtp_on_and_keeps_a_file_only_
     assert sorted(path.name for path in drafter.iterdir()) == ["config.json", "model.safetensors"]
     assert (drafter / "model.safetensors").read_bytes() == b"synthetic drafter"
     assert bootstrap("3") == 0 and len(fetched()) == 2  # nothing more to fetch
+    processor = ("processor_config.json", "tokenizer_config.json")
+    for name in processor:
+        (hub / name).write_bytes(b'{"synthetic_processor": true}')
+        pins["TOKENIZER_FILES"] += f",{name}:{hashlib.sha256((hub / name).read_bytes()).hexdigest()}"
+    assert bootstrap("3", "1") == 0
+    assert fetched()[2:] == [f"https://huggingface.co/{loaded['TOKENIZER_REPO']}/resolve/"
+                            f"{loaded['TOKENIZER_REVISION']}/{name}" for name in processor]
+    assert all((model / name).read_bytes() == (state / "tokenizer" / name).read_bytes()
+               for name in (*processor, "tokenizer.json"))
+    started = calls.read_text().count("python -m simple_serving.card")
+    before = (state / "prepared").read_bytes()
+    (state / "tokenizer/processor_config.json").unlink()
+    (hub / "processor_config.json").write_bytes(b'{"wrong": true}')
+    assert bootstrap("3", "1") == 1  # an unpinned processor never reaches the model directory or starts the pair
+    assert not (state / "tokenizer/processor_config.json").exists()
+    assert not (state / "tokenizer/.processor_config.json.part").exists()
+    assert (model / "processor_config.json").read_bytes() == b'{"synthetic_processor": true}'
+    assert (state / "prepared").read_bytes() == before
+    assert calls.read_text().count("python -m simple_serving.card") == started
+    (hub / "processor_config.json").write_bytes(b'{"synthetic_processor": true}')
+    assert bootstrap("3", "1") == 0
+    assert bootstrap("3") == 0 and [path.name for path in model.iterdir()] == ["model.safetensors"]
     (drafter / "config.json").unlink()
     (hub / "config.json").write_bytes(b'{"other": true}')
     assert bootstrap("3") == 1  # the hub's bytes are not the pinned ones

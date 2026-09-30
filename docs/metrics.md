@@ -58,7 +58,7 @@ success.
 | Outcome | Codes | What happened |
 | --- | --- | --- |
 | `success` | `none` | The answer went out whole. Text generation includes its usage chunk and `[DONE]`; a picture job has no failure or cancellation. |
-| `rejected` | `invalid_request`, `unsupported_field`, `limit_exceeded`, `context_limit`, `min_p_unavailable`, `thinking_budget_unavailable`, `graph_refused`, `graph_rejected`, `forbidden`, `not_found`, `stale_boot`, `stale_generation`, `sleep_pending`, `unauthorized`, `class_not_allowed`, `scope_not_allowed`, `body_too_large`, `queue_full`, `timeout` | The request, its key or a cap refused it. `timeout` here is a body that did not arrive before acceptance. |
+| `rejected` | `invalid_request`, `unsupported_field`, `limit_exceeded`, `context_limit`, `min_p_unavailable`, `thinking_budget_unavailable`, `vision_not_allowed`, `graph_refused`, `graph_rejected`, `forbidden`, `not_found`, `stale_boot`, `stale_generation`, `sleep_pending`, `unauthorized`, `class_not_allowed`, `scope_not_allowed`, `body_too_large`, `queue_full`, `timeout` | The request, its key or a cap refused it. `timeout` here is a body that did not arrive before acceptance. |
 | `unavailable` | `starting`, `engine_unavailable`, `socket_unavailable`, `none` | The service could not take it: it was starting, or the engine was unavailable before acceptance. `none` is an accepted request that the gateway's own shutdown cut. |
 | `draining` | `draining`, `drained` | A drain or a sleep refused it, or stopped it while it waited. |
 | `timeout` | `timeout` | An accepted request reached its class's wall time (contract section 7), whether it was waiting, streaming or sending its end. |

@@ -3,8 +3,8 @@
 It answers GET /health, GET /v1/models, POST /tokenize, POST /v1/chat/completions and GET /metrics the way vLLM
 does: the status and headers of a generation go out at once, its first event after the prompt is read, and its metrics
 are a few of vLLM's names. A test scripts it per step from the `engine` block of a case, with gates and delays for the
-scenarios. Without a script it gives default answers: the count
-is ceil(characters of all message contents / 4), and a generation streams a fixed synthetic sentence and stops. As in
+scenarios. Without a script it counts ceil(characters of the messages' text parts / 4), plus PICTURE_TOKENS for each
+picture. That picture allowance is synthetic. A generation streams a fixed sentence and stops. As in
 vLLM, a request that asks for thinking gets a fixed thought first, in the reasoning field, and `max_tokens`, counted
 as characters / 4 too, cuts the answer and finishes it with `length`. A schema that holds a pattern which is not a
 regular expression is refused with 400 before the stream, as vLLM refuses a schema it cannot compile. It records every
@@ -42,6 +42,9 @@ vllm:kv_cache_usage_perc{{engine="0",model_name="{model}"}} 0.0
 # TYPE vllm:num_preemptions_total counter
 vllm:num_preemptions_total{{engine="0",model_name="{model}"}} 0.0
 """
+# A synthetic per-picture allowance, chosen within the pinned 280-soft-token processor's bound plus two markers.
+# It does not simulate resizing, the vision encoder or Gemma's actual tokenization.
+PICTURE_TOKENS = 282
 
 
 @dataclass
@@ -137,7 +140,7 @@ class FakeEngine:
         if status is not None:
             # Engines may quote the prompt in their errors, so this one does; the gateway must never pass it on.
             await _respond_json(send, status, {"error": {
-                "message": "cannot serve: " + _prompt_text(call.body), "type": "BadRequestError", "code": status}})
+                "message": "cannot serve: " + _quoted(call.body), "type": "BadRequestError", "code": status}})
             return
         if call.client_left.is_set():
             return
@@ -150,7 +153,7 @@ class FakeEngine:
         if script.events is not None:
             events = script.events
         elif _uncompilable(call.body):  # vLLM 0.30.0 compiles a schema only after its 200, and refuses in the stream
-            events = [{"error": {"message": "cannot compile: " + _prompt_text(call.body), "type": "BadRequestError",
+            events = [{"error": {"message": "cannot compile: " + _quoted(call.body), "type": "BadRequestError",
                                  "code": 400}}]
         else:
             events = self._default_events(call.body)
@@ -195,7 +198,7 @@ class FakeEngine:
     def _count(self, script: Script, body: Any) -> int:
         if script.input_tokens is not None:
             return script.input_tokens
-        return max(1, math.ceil(len(_prompt_text(body)) / 4))
+        return max(1, math.ceil(len(_prompt_text(body)) / 4) + PICTURE_TOKENS * len(_pictures(body)))
 
     def _default_events(self, body: Any) -> list[dict[str, Any]]:
         """The thought when the request asks for thinking, then the sentence, cut where `max_tokens` runs out."""
@@ -287,10 +290,30 @@ async def _read_json(receive: Receive) -> Any:
 
 
 def _prompt_text(body: Any) -> str:
+    """The text of all messages: a content that is a string, and the text parts of one that is a list."""
+    return "".join(content if isinstance(content, str) else "".join(
+        part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
+        for content in _contents(body))
+
+
+def _pictures(body: Any) -> list[str]:
+    """The URL of each picture among the messages' parts."""
+    return [part["image_url"]["url"] for content in _contents(body) if isinstance(content, list) for part in content
+            if isinstance(part, dict) and isinstance(part.get("image_url"), dict)
+            and isinstance(part["image_url"].get("url"), str)]
+
+
+def _quoted(body: Any) -> str:
+    """What the fake's errors quote: the prompt's text and each picture's URL, as vLLM 0.30.0 quotes the head of a
+    data URL it cannot read (vllm/multimodal/media/connector.py)."""
+    return _prompt_text(body) + "".join(_pictures(body))
+
+
+def _contents(body: Any) -> list[str | list[Any]]:
     messages = body.get("messages") if isinstance(body, dict) else None
     if not isinstance(messages, list):
-        return ""
-    return "".join(m["content"] for m in messages if isinstance(m, dict) and isinstance(m.get("content"), str))
+        return []
+    return [m["content"] for m in messages if isinstance(m, dict) and isinstance(m.get("content"), (str, list))]
 
 
 def _uncompilable(body: Any) -> bool:

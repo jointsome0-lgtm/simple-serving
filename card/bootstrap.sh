@@ -6,14 +6,14 @@
 #   uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/bootstrap.sh
 #
 # It installs each lock into a venv of its own with every hash checked, fetches the weights and the tokenizer files,
-# and the drafter's while MTP_SPECULATIVE_TOKENS is above 0, at their pinned revisions and checks their hashes, keeps
-# the key hashes in keys.json, and then runs card/onstart.sh for the first start. At every later start the rental's
-# own onstart runs it (README, "The card"): the preparation changes no onstart, which the platform may restore at a
-# start. A second run changes nothing that is in place, and no run prints a hash. Exit codes: 0 prepared and started;
-# 1 a download or a check failed; 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS or KV_OFFLOADING_GIB is not a
-# count, or THINKING_BUDGET is neither 0 nor 1; 4 no keys, or not two or three different SHA-256 digests;
-# 5 the card holds other keys, which stay. A card with only the first two keys can add the metrics key for its next
-# start. The last step is the launcher's
+# and the drafter's while MTP_SPECULATIVE_TOKENS is above 0, at their pinned revisions and checks their hashes, puts
+# the picture processor's files beside the weights while VISION is 1, keeps the key hashes in keys.json, and then
+# runs card/onstart.sh for the first start. At every later start the rental's own onstart runs it (README, "The card"):
+# the preparation changes no onstart, which the platform may restore at a start. A second run changes nothing that
+# is in place, and no run prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed;
+# 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS or KV_OFFLOADING_GIB is not a count, or THINKING_BUDGET or VISION
+# is neither 0 nor 1; 4 no keys, or not two or three different SHA-256 digests; 5 the card holds other keys, which stay.
+# A card with only the first two keys can add the metrics key for its next start. The last step is the launcher's
 # start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
 # SIMPLE_SERVING_CARD_DIR and SIMPLE_SERVING_CARD_ROOT move the state and /root, for tests.
 set -euo pipefail
@@ -31,8 +31,22 @@ for file in "${stamped[@]}"; do [[ -s $file ]] || exit 3; done
 [[ ${MTP_SPECULATIVE_TOKENS:-} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3
 [[ ${KV_OFFLOADING_GIB:-} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3  # GiB for the KV cache's copy in RAM, the same way
 [[ ${THINKING_BUDGET:-} =~ ^[01]$ ]] || exit 3  # the thinking budget, on or off
+[[ ${VISION:-} =~ ^[01]$ ]] || exit 3  # 1 loads Gemma 4's vision tower, 0 keeps it off the GPU
 if [[ $MTP_SPECULATIVE_TOKENS != 0 ]]; then
   for pin in DRAFTER_REPO DRAFTER_REVISION DRAFTER_FILES; do [[ -n ${!pin:-} ]] || exit 3; done
+fi
+# With VISION=1 vLLM 0.30.0 builds Gemma 4's picture processor from the weights' directory, and transformers loads a
+# tokenizer from there as well, though vLLM then hands it its own: these three of the tokenizer's pins go there too.
+processor=
+if [[ $VISION == 1 ]]; then
+  IFS=, read -ra entries <<< "$TOKENIZER_FILES"
+  for entry in "${entries[@]}"; do
+    case ${entry%%:*} in processor_config.json | tokenizer.json | tokenizer_config.json) processor+=,$entry ;; esac
+  done
+  [[ $processor =~ ^(,[^,]+){3}$ ]] || exit 3
+  for name in processor_config.json tokenizer.json tokenizer_config.json; do
+    [[ $processor == *,"$name":* ]] || exit 3
+  done
 fi
 grep -Fq "vllm==$VLLM_VERSION " "$code/card/vllm-requirements.txt" || exit 3
 model=$state/models/$MODEL_REVISION
@@ -94,11 +108,18 @@ fetch() {
     mv "$part" "$path"
   done
 }
-# vLLM loads every *.safetensors in the model's directory, so the files there that are not pinned go. Hidden ones
-# stay: this glob skips them, and so does vLLM's.
-for path in "$model"/*; do [[ ,$MODEL_FILES == *,"${path##*/}":* ]] || rm -f "$path"; done
+# vLLM loads every *.safetensors in the model's directory, so the files there that are not pinned go, and so do the
+# processor's while VISION is 0. Hidden ones stay: this glob skips them, and so does vLLM's.
+for path in "$model"/*; do [[ ,$MODEL_FILES$processor == *,"${path##*/}":* ]] || rm -f "$path"; done
 fetch "$MODEL_REPO" "$MODEL_REVISION" "$MODEL_FILES" "$model"
 fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "$TOKENIZER_FILES" "$state/tokenizer"
+# The processor's files are copies of the tokenizer's, which the fetch then checks against their pins. The chat
+# template stays out: vLLM takes it from --tokenizer alone.
+if [[ -n $processor ]]; then
+  IFS=, read -ra entries <<< "${processor#,}"
+  for entry in "${entries[@]}"; do cp "$state/tokenizer/${entry%%:*}" "$model/"; done
+  fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "${processor#,}" "$model"
+fi
 # The drafter in a directory of its own, since the loop above empties the weights' of all it does not pin, and vLLM
 # loads every *.safetensors in each. Off, nothing of it is fetched or removed.
 if [[ $MTP_SPECULATIVE_TOKENS != 0 ]]; then

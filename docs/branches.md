@@ -28,6 +28,7 @@ The dense prefix retention change from `940471a` is now integrated in the text l
 comparison recorded in [speed](speed.md#dense-prefix-retention).
 The thinking budget from `466a82d` is also integrated, with the text manifest switch still 0. Its
 [validation procedure](thinking-budget.md) separates local checks from pending GPU enforcement and quality work.
+Vision from `47d71ae` is now integrated too, with `VISION=0` and an explicit [synthetic smoke](vision-smoke.md).
 
 ## Branch work and integration status
 
@@ -35,7 +36,7 @@ The thinking budget from `466a82d` is also integrated, with the text manifest sw
 |--------|-----|--------------------------|
 | `live-2026-09-28` | `940471a` | Dense prefix retention is integrated in the text launcher. The branch is retained as the source of that change; its history adds no remaining feature. A new GPU comparison is pending. |
 | `thinking-budget` | `466a82d` | Optional thinking-token budgets are integrated and disabled by default. The source branch remains retained, with no unintegrated feature. GPU enforcement and quality evaluation are pending. |
-| `vision-captions` | `47d71ae` | Includes `8672e62`. Implements image input for Gemma, key permissions, launcher/bootstrap and a vision smoke. Needs shared configuration and launcher adaptation, then GPU validation. |
+| `vision-captions` | `47d71ae` | Includes `8672e62`. Implements image input for Gemma, key permissions, launcher/bootstrap and a vision smoke. Integrated into the current shared configuration, launcher and smoke, with `VISION=0`. Source retained; GPU validation is pending. |
 | `held-criterion` | `a898060` | Includes throughput and fixes its cache-capacity stopping criterion. Workload and metric-selection ideas are reused in the new interference client; its A/B launcher remains separate. The revised criterion needs a GPU measurement. |
 | `sweep` | `b6d4919` | Separate sweep against an already running engine, with a deadline and overlap checks. Independent of the A/B harness; keep it identifiable as an experiment. |
 | `split-kv-wip` | `bd0503e` | Split-KV plugin files on an older throughput base. The launcher does not register the change. Unfinished. |
@@ -76,11 +77,12 @@ labels fake enforcement `not_verifiable` and rejects a real check whose baseline
 
 Vision adds a manifest flag, `VISION=0` by default, and a per-key permission. It accepts one PNG/JPEG/WebP data URL
 up to 1 MiB.
-`PictureCard.config()` calls the common `Card.keys()`. Do not make a text-only `VISION` flag mandatory for picture
-manifests. The common key parser also needs a deliberate picture-lane policy for the new permission.
+`Card.keys()` stays independent of the text `VISION` flag; `Card.config()` adds the text client permission.
+Picture manifests do not need that switch, and picture configuration rejects a true text vision permission.
+Outside keys cannot receive vision while upstream encoder embeddings are cached without the scope salt.
 Budget and vision are functionally independent after the shared text fix. Budget's local checks cover the current
-text and picture configuration/lifecycle. Vision still needs that adaptation. Its synthetic color/count/privacy
-smoke does not prove GPU tower capacity,
+text and picture configuration/lifecycle, and vision preserves that behavior. Its synthetic color/count/privacy
+smoke with a fake does not prove GPU tower capacity,
 real captions, token counts or MTP throughput.
 
 ### Measurement tools
@@ -126,8 +128,8 @@ the rehearsal's JSON whitespace ban was subsequently removed. Its E2B model pin 
    up monitoring for the cards.
 4. Carry over `held-criterion` with its dry run and an explicit serving-restoration procedure. The retention
    setting is integrated; measure its current benefit separately from carrying over the tooling.
-5. Budget is integrated but disabled. Check it on a GPU before activation; integrate vision as a separate optional
-   change with its own GPU checks.
+5. Budget and vision are integrated but disabled. Check each on a GPU before activation; their enforcement,
+   captions, memory use and combined MTP behavior remain separate measurements.
 6. Keep the two-card design and split-KV work separate until their first implemented checks exist.
 
 ## Finding the work

@@ -16,6 +16,10 @@ picture card files and `--lane pictures` in the CLI. Its real card test remains 
 stays off by default, so it still draws through its existing ComfyUI path until the card test and activation.
 Outside-client and unattended operation still have open validation and budget work.
 
+The text lane also includes optional Gemma image input from `vision-captions`. `VISION=0` keeps it off. When
+enabled, permitted internal keys can submit one PNG/JPEG/WebP data URL up to 1 MiB and receive text. Real captions,
+image token counts, MTP throughput and GPU memory use still need the [vision check](docs/vision-smoke.md).
+
 ## Documentation
 
 - [Runbook](docs/runbook.md): development, gateway configuration, card preparation, CLI, smoke and trial procedure.
@@ -27,6 +31,7 @@ Outside-client and unattended operation still have open validation and budget wo
 - [Existing branches](docs/branches.md): where the current groundwork lives, its dependencies and integration limits.
 - [Speed experiments](docs/speed.md): questions for later measurements.
 - [Thinking budget](docs/thinking-budget.md): optional per-request reasoning limits, disabled until GPU validation.
+- [Vision smoke](docs/vision-smoke.md): optional Gemma image input, key permission and synthetic validation.
 - [Prefill interference](docs/prefill-interference.md): a synthetic demonstration and client measurements through
   an existing text gateway, before deciding on prefill/decode disaggregation.
 

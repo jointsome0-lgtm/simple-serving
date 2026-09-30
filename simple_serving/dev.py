@@ -6,7 +6,8 @@
 The configuration file is a `service` block in the shape of contract/cases-v2.json, with its test keys in the clear,
 or a file that holds one under "service", such as the cases file itself. Fields it leaves out take the provisional
 values of contract section 7. The fake engine answers every request: the count is ceil(characters of all message
-contents / 4), and a generation streams a fixed synthetic sentence and ends with stop. It answers in milliseconds,
+contents / 4), and 282 more for a picture, which the gateway takes where the file's versions name `vision`; a
+generation streams a fixed synthetic sentence and ends with stop. It answers in milliseconds,
 unless --first-event-delay-ms stands in for a long prompt and --event-delay-ms slows the stream, so that requests
 overlap and wait for places. As on the card, the gateway falls asleep after an idle interval without our work, 780
 seconds unless the file sets another. It has no instance to stop: every attempt fails as `unconfigured`, and the
@@ -110,7 +111,8 @@ def summary(config: Config, engine_port: int, delays: Delays) -> str:
     keys = []
     for key in config.keys:
         rights = [cls for cls in CLASSES if cls in key.classes]
-        rights += ["scopes"] * key.scopes + ["control"] * key.control + ["metrics"] * key.metrics
+        rights += (["scopes"] * key.scopes + ["control"] * key.control
+                   + ["metrics"] * key.metrics + ["vision"] * key.vision)
         keys.append(f"{key.label} ({', '.join(rights)})")
     return "\n".join([
         "simple-serving dev launcher: ready",

@@ -20,6 +20,7 @@ from simple_serving.admission import Admission, CountPlaces
 from simple_serving.config import ConfigError, Listener, from_service_block, load
 from simple_serving.engine import EngineError, refusal
 from simple_serving.errors import STATUS, ServiceError
+from simple_serving.pictures.config import from_block as picture_config
 from simple_serving.policy import cache_salt, find_key, resolve
 from simple_serving.stream import Translator, Usage
 from simple_serving.validation import check_boot, check_chat, check_open, parse_json
@@ -287,6 +288,20 @@ def test_the_configuration_file_holds_hashes_and_refuses_what_it_does_not_know(t
     assert "mtp_speculative_tokens" in refused(lambda d: d.update(versions={"mtp_speculative_tokens": "0"}))
     for value in ("off", "1", "", True, 1):
         assert "versions" in refused(lambda d, value=value: d.update(versions={"thinking_budget": value}))
+    for value in ("0", "on", "", True, 1):
+        assert "versions" in refused(lambda d, value=value: d.update(versions={"vision": value}))
+    assert "vision" in refused(lambda d: d["keys"][0].update(vision=True))
+    assert "vision" in refused(lambda d: d["keys"][0].update(vision="true"))
+    assert "outside key" in refused(lambda d: (d.update(versions={"vision": "1"}),
+                                               d["keys"][2].update(vision=True)))
+    enabled = service_with(versions={"vision": "1", "thinking_budget": "on", "mtp_speculative_tokens": "3"})
+    enabled["keys"][BOT]["vision"] = True
+    settings = from_service_block(enabled, engine_url="http://127.0.0.1:1")
+    assert settings.vision and settings.thinking_budget and settings.speculative
+    assert {key.label for key in settings.keys if key.vision} == {"bot"}
+    assert not loaded.vision and not any(key.vision for key in loaded.keys)
+    with pytest.raises(ConfigError, match=r"picture lane.*vision"):
+        picture_config({"keys": {BOT: enabled["keys"][BOT]}}, engine_url="http://127.0.0.1:1")
     message = refused(lambda d: d.update(secret=MARKER))
     assert "secret" in message and MARKER not in message  # a message names a field, never its value
     path.write_text("{" + MARKER)

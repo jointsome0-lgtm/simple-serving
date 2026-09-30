@@ -48,7 +48,8 @@ HTTP_STATUSES = (*(str(status) for status in sorted({200, 201, 202, 204, *STATUS
 OUTCOMES: Mapping[str, tuple[str, ...]] = {
     "success": (NONE,),
     "rejected": ("invalid_request", "unsupported_field", "limit_exceeded", "context_limit", "min_p_unavailable",
-                 "thinking_budget_unavailable", "unauthorized", "class_not_allowed", "scope_not_allowed",
+                 "thinking_budget_unavailable", "vision_not_allowed", "unauthorized", "class_not_allowed",
+                 "scope_not_allowed",
                  "body_too_large", "queue_full", "timeout",
                  "graph_refused", "graph_rejected", "forbidden", "not_found", "stale_boot", "stale_generation",
                  "sleep_pending"),

@@ -177,7 +177,10 @@ never the key:
 key sees in `/v1/state` next to the gateway's own. For text, `versions.mtp_speculative_tokens` must be a positive
 decimal count string matching `[1-9][0-9]*`, or absent when drafting is off. The launcher writes it while MTP is on;
 it enables the early `min_p` refusal described below. The text entry `versions.thinking_budget` is exactly `"on"`
-when request budgets are enabled, and absent when disabled. Other values are invalid. An outside key has the
+when request budgets are enabled, and absent when disabled. Other values are invalid. `versions.vision` is exactly
+`"1"` when the text engine loads its vision tower, and absent otherwise. Keys default to `vision: false`; a true
+permission requires that version entry and cannot belong to an outside key. The ComfyUI lane rejects text vision
+permissions and does not require the text manifest switch. An outside key has the
 classes `["external"]` and no scopes. To
 hash a key without printing it:
 
@@ -319,6 +322,18 @@ the first start: rent.mjs's default, `--hours 3`, which the first rental uses. T
 key, as the card stops, so a key that Vast refuses defeats both. An onstart for a permanent rental, which writes the
 two files, arms no guard and ends with the same line, is decided before permanent use.
 
+### Optional image input
+
+`VISION=0` is the committed text manifest default. At 1, preparation verifies and copies the pinned processor and
+its tokenizer assets beside the weights. The launcher replaces `--language-model-only` with one-image limits,
+zero audio/video and `--mm-processor-cache-gb 0`. It grants the text client key image permission; control and metrics
+keys remain separate. Preparation rejects any switch value other than 0 or 1 before writing card state.
+
+The gateway accepts one PNG/JPEG/WebP base64 data URL up to 1 MiB of compressed bytes. It refuses network and file
+URLs before any engine call. The decoder and GPU memory use remain the engine's responsibility. Encoder embeddings
+can be reused across internal scopes even though prefix KV is salted. The [vision procedure](vision-smoke.md)
+uses synthetic images and an explicit `--only vision` probe; default smoke does not send images.
+
 ## The command
 
 On the owner's machine, `python -m simple_serving.cli` starts the card, holds the tunnel and asks for sleep:
@@ -401,6 +416,8 @@ The probes run in this order, each within a time bound of its own, and the first
   and budgets of 128, 300 and 1024 across three synthetic prompts. A real pass requires valid capped answers and
   baselines that exercise 128 and 300 on at least two prompts each. It has a 900-second deadline; an unexercised cap
   makes enforcement inconclusive and fails the smoke. With `--fake`, enforcement remains `not_verifiable`.
+- `vision`: explicit-only synthetic image count, color caption, refusal and privacy checks. It requires vision
+  and the checked-in model/tokenizer/vLLM pins. `--fake` checks routing and privacy, leaving model behavior unverified.
 - `privacy`: one completion whose prompt holds a fresh random marker, which no file in the card's `logs/` may hold:
   the gateway's rows, the launcher's rows with what it keeps of vLLM's output, the older file beside each, and
   anything else there. The probe counts the marker in each and prints only the counts. One occurrence fails it, and

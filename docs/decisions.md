@@ -175,3 +175,33 @@ it is not an exact reasoning-token counter. Independent review found no remainin
 No GPU run or activation occurred. Gemma 4 with MTP still needs a real enforcement and structured-output check;
 quality needs a separate evaluation. The [procedure](thinking-budget.md) retains the dated source plan and updates
 its commands for the integrated checkout. The source branch remains retained, with no unintegrated feature.
+
+## Vision integration, 2026-09-30
+
+The owner accepted optional Gemma image input from `vision-captions`, tip `47d71ae`. The integration keeps
+`VISION=0`, MTP, dense prefix retention, disabled thinking-budget defaults and both lanes' monitoring. Shared
+`Card.keys()` does not require text switches; only text `Card.config()` grants the client key vision permission.
+Picture configuration rejects that text permission. Outside keys cannot receive it while upstream encoder cache
+uses image identifiers without the scope salt.
+
+The request accepts one PNG/JPEG/WebP data URL up to 1 MiB of compressed bytes. Strict base64 and signatures are
+checked before the engine, including for counting. Network/file URLs, a second image, extra fields and missing
+permissions fail with fixed codes. The image decoder and its pixel limit remain in vLLM. The tests use synthetic
+images and check that errors and gateway logs contain no image bytes, URLs or digests. Rejection metrics include
+`vision_not_allowed`; budgets still reach generation unchanged and never reach tokenization.
+
+The explicit `vision` smoke checks synthetic images and log privacy. Default smoke remains image-free. Fake runs
+cannot establish caption quality, image token counts, memory capacity or MTP performance. The launcher and processor
+copying are checked locally with fake downloads and hash failures. The [vision procedure](vision-smoke.md) records
+the remaining GPU checks and the historical estimates without treating them as current measurements.
+
+Primary vLLM 0.30.0 source confirms multimodal `/tokenize` preprocessing, model-directory processor loading and
+processor-cache disabling. Prefix KV hashing includes the image identifier and scope salt; the separate encoder
+cache does not include that salt. See [tokenization](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/entrypoints/serve/tokenize/serving.py),
+[processor loading](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/transformers_utils/processor.py) and
+[encoder caching](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/core/encoder_cache_manager.py).
+These source checks support the integration design; they do not establish real GPU behavior.
+
+The final shared check passed on Python 3.12 and 3.14: Ruff, mypy and 350 tests, with one optional vLLM source-catalog
+check skipped. The synthetic smoke includes failure and combined-timeout checks; no GPU, rental or real image was
+used. Both text feature switches remain zero, and the source branch and saved cleanup stash remain retained.

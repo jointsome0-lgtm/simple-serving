@@ -15,6 +15,7 @@ STATUS = {
     "unauthorized": 401,
     "class_not_allowed": 403,
     "scope_not_allowed": 403,
+    "vision_not_allowed": 403,
     "forbidden": 403,
     "not_found": 404,
     "stale_boot": 409,

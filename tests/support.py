@@ -6,13 +6,16 @@ Every test starts its own fake engine and gateway, so every case runs on a new b
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import copy
 import json
 import os
 import signal
+import struct
 import sys
 import time
+import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -210,8 +213,30 @@ async def control(client: httpx.AsyncClient, stack: Stack, path: str, body: Any 
 
 
 def prompt_of(body: Any) -> str:
-    """The text of a request's messages, as the fake engine saw it."""
-    return "".join(message["content"] for message in body["messages"])
+    """The text of a request's messages, as the fake engine saw it: of a content in parts, its text parts."""
+    contents = (message["content"] for message in body["messages"])
+    return "".join(content if isinstance(content, str) else "".join(part.get("text", "") for part in content)
+                   for content in contents)
+
+
+def picture(text: str = "") -> bytes:
+    """A synthetic PNG of one grey pixel, with `text` in a chunk of its own."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    return b"".join((b"\x89PNG\r\n\x1a\n", chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0)),
+                     chunk(b"tEXt", b"Comment\0" + text.encode()), chunk(b"IDAT", zlib.compress(b"\0\x80")),
+                     chunk(b"IEND", b"")))
+
+
+def picture_url(data: bytes, kind: str = "png") -> str:
+    return f"data:image/{kind};base64,{base64.b64encode(data).decode()}"
+
+
+def picture_body(text: str, url: str, **patch: Any) -> dict[str, Any]:
+    """A generation body whose one user message holds a picture, then a question that names the request."""
+    parts = [{"type": "image_url", "image_url": {"url": url}}, {"type": "text", "text": text}]
+    return chat_body(messages=[{"role": "user", "content": parts}], **patch)
 
 
 def by_prompt(scripts: dict[str, Script]) -> Callable[[Any], Script]:

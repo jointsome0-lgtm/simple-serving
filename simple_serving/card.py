@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Self
 
 from . import log, vast
-from .config import DRAFTED_TOKENS, IDLE_TIMEOUT_S, PROVISIONAL, THINKING_BUDGET
+from .config import DRAFTED_TOKENS, IDLE_TIMEOUT_S, PROVISIONAL, THINKING_BUDGET, VISION
 
 CODE = Path(__file__).resolve().parent.parent  # the checkout
 STATE = Path(os.environ.get("SIMPLE_SERVING_CARD_DIR", "/workspace/simple-serving-card"))
@@ -161,7 +161,7 @@ class Card:
             # is refused. Whitespace between its tokens is allowed, as the bot's llama.cpp allows it: forbidden, it left
             # 5 of the action measurement's 18 sheets with nobody on them (contract, "Decided").
             "--structured-outputs-config", '{"backend": "xgrammar"}',
-            "--language-model-only",  # text only: the vision tower stays off the GPU
+            *self.vision(),
             # Sampling defaults from vLLM: the model's generation_config.json is pinned for its stop ids alone.
             "--generation-config", "vllm",
             "--disable-uvicorn-access-log", "--uvicorn-log-level", "warning",
@@ -191,6 +191,15 @@ class Card:
         switch is 0. It is not among the factors of vLLM's compile cache (VllmConfig.compute_hash)."""
         return ["--reasoning-config", json.dumps(THOUGHT_MARKERS)] if int(self.manifest["THINKING_BUDGET"]) else []
 
+    def vision(self) -> list[str]:
+        """vLLM's arguments for pictures. While VISION is 0, text only: the vision tower stays off the GPU. With 1 it
+        loads, a prompt holds one image at most and no video or audio, and the processor cache is disabled. The
+        separate encoder cache still reuses embeddings across scopes (contract section 10)."""
+        if not int(self.manifest["VISION"]):
+            return ["--language-model-only"]
+        return ["--limit-mm-per-prompt", json.dumps({"image": 1, "video": 0, "audio": 0}),
+                "--mm-processor-cache-gb", "0"]
+
     def gateway(self) -> Command:
         return Command([str(self.state / "gateway/bin/python"), "-m", "simple_serving"],
                        {**os.environ, **self.credential, "SIMPLE_SERVING_CONFIG": str(self.state / "gateway.json")},
@@ -198,14 +207,16 @@ class Card:
 
     def config(self) -> dict[str, Any]:
         """The gateway's configuration: the provisional limits, the manifest's model and ports, and the hashes of the
-        keys."""
-        m = self.manifest
+        keys. The text client key may send pictures while vLLM takes them."""
+        m, keys = self.manifest, self.keys()
+        if int(m["VISION"]):
+            keys[0]["vision"] = True
         return PROVISIONAL | {
             "alias": m["MODEL_ALIAS"],
             "context_tokens": int(m["CONTEXT_TOKENS"]),
             "engine_url": f"http://127.0.0.1:{m['ENGINE_PORT']}",
             "listen": self.listen(),
-            "keys": self.keys(),
+            "keys": keys,
             "versions": pinned_versions(m),
         }
 
@@ -242,9 +253,9 @@ class Card:
 def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
     """The engine's pins that the gateway shows the control key in /v1/state, beside its own (contract section 12).
     With multi-token prediction on they name the drafter and its tokens too, and with the KV cache's copy in RAM its
-    size, so that a record says which it measured. The count of drafted tokens also tells the gateway which min_p
-    vLLM refuses (config.DRAFTED_TOKENS). The thinking budget's entry allows the gateway to pass a request's budget
-    to vLLM (config.THINKING_BUDGET)."""
+    size, so that a record says which it measured. Drafted tokens tell the gateway which min_p vLLM refuses
+    (config.DRAFTED_TOKENS). The thinking budget and vision entries allow a request's budget and pictures to reach
+    vLLM (config.THINKING_BUDGET and config.VISION)."""
     pins = {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
             "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
     if int(manifest["MTP_SPECULATIVE_TOKENS"]):
@@ -254,6 +265,8 @@ def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
         pins |= {"kv_offloading_gib": manifest["KV_OFFLOADING_GIB"]}
     if int(manifest["THINKING_BUDGET"]):
         pins |= {THINKING_BUDGET: "on"}
+    if int(manifest["VISION"]):
+        pins |= {VISION: manifest["VISION"]}
     return pins
 
 

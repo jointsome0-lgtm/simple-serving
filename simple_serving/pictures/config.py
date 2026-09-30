@@ -141,6 +141,8 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> PictureConfig:
         raise ConfigError("keys must hold at least one key")
     if len({key.digest for key in keys}) != len(keys) or len({key.label for key in keys}) != len(keys):
         raise ConfigError("keys must differ from each other, and so must their labels")
+    if any(key.vision for key in keys):
+        raise ConfigError("the picture lane has no text vision permission")
     if any(key.outside for key in keys):
         raise ConfigError("the picture lane has no outside keys")
     limits = _fields(data.get("limits"), "limits", set(CLASSES))

@@ -36,6 +36,8 @@ Every request carries `Authorization: Bearer <key>`, on loopback too. The gatewa
 - the classes it may use and its default class;
 - whether it may name cache scopes;
 - whether it may call the control routes, or read the metrics routes alone (section 3).
+- whether it may send an image to the text engine, via `vision: true`, while the engine enables vision.
+  The default is false. Outside keys cannot receive this right while encoder cache isolation remains unresolved.
 
 Outside keys are issued by hand in version 2. There is no sign-up.
 
@@ -137,7 +139,7 @@ reads, chunked bodies included, and stops reading past the limit with 413 `body_
 | Field                  | Type and range                                   | Rule                               |
 |------------------------|--------------------------------------------------|------------------------------------|
 | `model`                | string                                           | the exact alias from `/v1/models`  |
-| `messages`             | array of `{role, content}`                       | role `system`, `user` or `assistant`; content a string; no other keys |
+| `messages`             | array of `{role, content}`                       | role `system`, `user` or `assistant`; content a string, or a user message's parts while the engine takes pictures (below); no other keys |
 | `max_tokens`           | integer, at least 1                              | required, at most the class limit  |
 | `stream`               | `true`                                           | required                           |
 | `stream_options`       | `{"include_usage": true}`                        | required                           |
@@ -178,6 +180,22 @@ The committed switch is 0. The [validation procedure](thinking-budget.md) must s
 transition to an answer and structured output on Gemma 4 with MTP. Upstream documentation gives examples for other
 models, which do not establish this path's correctness.
 
+While the engine takes pictures (Gemma 4's vision tower, loaded while `VISION` in `card/manifest.env` is 1), a user
+message's content may instead be an array of parts, at least one, each exactly `{"type": "text", "text": string}` or
+`{"type": "image_url", "image_url": {"url": string}}`, with one `image_url` part at most in the whole request. Its
+`url` is a data URL: `data:image/png;base64,`, `data:image/jpeg;base64,` or `data:image/webp;base64,`, then strict
+base64 of at most 1 048 576 bytes that begin with the signature of that type. vLLM 0.30.0 would fetch an `http` or
+`https` URL itself and read a `file` URL under a setting, so the gateway passes on neither. It refuses with 400
+`invalid_request` another URL, another type, bytes whose signature differs from the URL type, malformed base64, a
+larger picture, a second picture, and parts in a system or assistant message; `detail` or any other field of a part is
+400 `unsupported_field`. A request that holds a picture from a key without the picture right (section 2) is refused
+with 403 `vision_not_allowed` after body validation and before generation limits, counting or admission; parts of
+text alone need no right. The engine gets the parts as they came, and the answer is text. The gateway knows that the engine takes pictures from the entry `vision` among its pinned versions
+(section 12), which the card's launcher writes only then. While the engine takes no pictures, a content that is not a
+string is 400 `invalid_request`, as it always was, and no key may hold the right.
+The 1 MiB bound is on compressed image bytes after base64 decoding. It does not bound raster memory or prove that
+the full image is decodable. vLLM applies its own pixel limit and image decoder; gateway errors remain fixed codes.
+
 ### Before the stream starts
 
 The gateway checks, in this order: the route, the key, the service status, the class, the scope, the body (its size,
@@ -207,8 +225,8 @@ answers 401, 403 or 404 is misconfigured, and that is not the client's error.
 
 An engine event is valid when it is a chunk of the served model: `object` is `chat.completion.chunk`, `model` is the
 alias, and `choices` holds at most one choice, with `index` 0 and a delta that holds nothing but the role
-`assistant`, text and reasoning. Version 2 is text only, so a tool call or a function call is invalid. Where a field
-may be absent, such as `usage`, `finish_reason` or a field of the delta, null counts as absent.
+`assistant`, text and reasoning. Version 2 answers in text only, so a tool call or a function call is invalid. Where a
+field may be absent, such as `usage`, `finish_reason` or a field of the delta, null counts as absent.
 
 ### Stream
 
@@ -249,6 +267,10 @@ event. The gateway then ends its stream with the error event `engine_unavailable
   past that waits for a count place, in the class order of section 2 and within its wall time. An outside key has at
   most 2 counts at once, waiting ones included; a third is refused with 429 `queue_full`. The count stage of a
   generation shares these limits.
+- A picture is counted as the engine renders it. vLLM 0.30.0 scales one of Gemma 4's pictures to at most 280 tokens
+  and puts one token before and one after. The pinned processor is expected to add 282 at most, 258 when square.
+  The GPU smoke must verify this expectation against both count and generation usage. The picture right of
+  section 4 applies to a count as it does to a generation.
 - The gateway sends the engine only what renders the prompt: the model alias, the messages and the template arguments,
   never the rest of the body. Counting keeps the ordinary body validation but does not apply the MTP `min_p`
   restriction, since no sampling parameters reach the engine.
@@ -518,8 +540,14 @@ Cancellation:
 - A log row may hold the time, route, key label, class, scope kind (`reader`, `agent`, `internal` or `external`, never
   the opaque part), status, error code, token counts, a generation's `thinking_token_budget` as a number, the
   measurements of section 11, whether the request was cancelled, and the finish reason.
-- Cache scopes and salts are described in section 2. They close the timing channel between scopes. They do not limit
-  memory.
+- Cache scopes and salts are described in section 2. They isolate prefix KV reuse between scopes. They do not limit
+  memory, and do not isolate the image encoder cache described below.
+- A picture is part of the body: no log row, error or answer holds its bytes, its URL or a digest of either. vLLM's
+  errors may quote the head of a data URL, and the gateway reads only their status. `--mm-processor-cache-gb 0`
+  disables vLLM processor cache. Its encoder cache keeps a picture's embeddings while there is room,
+  keyed by a hash of the picture and not by the cache scope, so a request could time whether another scope sent the
+  same picture a moment before. The client key alone has the picture right, so that channel stays among our own
+  requests. The configuration rejects this permission on outside keys until the channel is closed.
 - Tests and load use synthetic stories only, never a real reader's story.
 - Before any outside key is issued, check Vast's terms and the license of the weights.
 
