@@ -1,10 +1,14 @@
-# Pictures (design)
+# Pictures: contract and migration
 
-How simple-story-chat's picture card moves here. Status: design, 2026-09-28, reviewed the same day by a GPT-6 Astra
-session ("sound with changes", section 16); phase 1 (section 15) is written against a fake ComfyUI and has not run on
-a card.
+This document defines the picture lane and its migration from simple-story-chat. The design was reviewed on
+2026-09-28 by a GPT-6 Astra session ("sound with changes", section 16). Phase 1 code is present in
+[`simple_serving/pictures/`](../simple_serving/pictures/) and [`card/pictures/`](../card/pictures/), with tests against
+a fake ComfyUI. Its real card test remains pending, and the bot's provider switch remains off by default.
+The [2026-09-30 integration note](decisions.md#local-integration-2026-09-30) records the local work and verification
+status. Use the [runbook](runbook.md#picture-dev-launcher) for installation, local development and CLI entry points.
 
-The owner decided on 2026-09-26 that pictures move here with ComfyUI inside and the engine unchanged (README), and
+The owner decided on 2026-09-26 that pictures move here with ComfyUI inside and the engine unchanged
+([decision record](decisions.md#picture-serving)), and
 asked on 2026-09-28 to begin: «можем начать переход comfyui на simple-serving? Что бы мы все запускали через
 simple-serving, а тут только доменная часть бы была и тгшная, ну и эксперименты наверное». When the move is over:
 
@@ -401,7 +405,7 @@ launcher's rows add the sweeper's counts and codes and the engine's categories. 
 ComfyUI rejects with its inputs quoted, a job whose engine raises, a malformed upload and a forged sweeper line, each
 carrying a marker, and find the marker in no log row and no answer. On the card, a picture whose prompt holds a fresh
 random marker is drawn, and the lane's `logs/` are searched for it, counts only, as the text lane's `privacy` probe
-does (README, 'The smoke').
+does ([runbook, "The smoke"](runbook.md#the-smoke)).
 
 ## 12. The new dependency
 
@@ -462,7 +466,9 @@ log row; ids, times and the nonce are normalized before the comparison:
 1. This change: the picture lane here (config, engine client, routes, checks, uploads, launcher, preparation,
    command) against a fake ComfyUI; the switch and the client in simple-story-chat, off by default; the dry run.
    Written on 2026-09-28 on the branches `pictures` here and `pictures-via-serving` there, with the copies of
-   simple-story-chat's commit ddd2850 (`card/pictures/SOURCE`).
+   simple-story-chat's commit ddd2850 ([`card/pictures/SOURCE`](../card/pictures/SOURCE)). Those branch names record
+   the original implementation. The server code now lives in this checkout; the
+   [integration note](decisions.md#local-integration-2026-09-30) records its local verification status.
 2. On a card: the card test (below); then, with the owner's word, the switch on for the owner's chat, then for the
    tester.
 3. When the switch has been on for a while without a fallback: simple-story-chat's `gpu/image-*` scripts leave, and
@@ -471,7 +477,8 @@ log row; ids, times and the nonce are normalized before the comparison:
 
 ### The card test
 
-One 5090 rented for it, with a CUDA 13 driver, about 75 minutes (about $0.6–0.9 at today's offers), inside the
+The 2026-09-28 plan below remains pending. Its time and price estimates are historical, not current rental quotes.
+One 5090 rented for it, with a CUDA 13 driver, about 75 minutes (about $0.6–0.9 at that day's offers), inside the
 owner's $3 a day and the rules of simple-story-chat's `docs/gpu.md#while-the-cards-are-paid-for`, backed first by a
 fresh GPT-6 Astra at `xhigh` as rule 4 asks. The rental has its external deadline set before anything else runs (the
 trial guard), and ends with the instance destroyed and the destroy confirmed by Vast, after a failed step too.

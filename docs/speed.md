@@ -1,9 +1,11 @@
-# Speed levers for the card
+# Speed levers for the text card
 
 The owner asked on 2026-09-26 to carry over to this card what simple-story-chat's picture card had just found: its
 int8 layers ran on a slow path of their kernel library until a switch put them on Triton's kernels, 2.3 times faster
-once warm (simple-story-chat's `docs/knowledge/gpu-measurements.md`, the pilot of 2026-09-26). Nothing below is
-measured on this card yet. Each item is a question for a rental, with the evidence that would answer it.
+once warm (simple-story-chat's `docs/knowledge/gpu-measurements.md`, the pilot of 2026-09-26). The proposed experiments
+below have not been measured on the text card. "Already in place" lists its configuration and dated results.
+Each proposed experiment is a question for a rental, with the evidence that would answer it. The
+[picture card](pictures.md#9-the-card) keeps its existing ComfyUI engine and pins during phase 1.
 
 ## Already in place
 
@@ -12,7 +14,7 @@ measured on this card yet. Each item is a question for a rental, with the eviden
   start (the contract, section 15). There is no switch here like the picture card's.
 - The KV cache is fp8 (`KV_CACHE_DTYPE`); a bfloat16 cache does not fit at 65536 tokens.
 - Gemma 4's multi-token prediction drafts 3 tokens a step, which took each of two requests at once from 57 to 67
-  tokens a second to 123 to 171 (the README, "The card").
+  tokens a second to 123 to 171 ([runbook, "The card"](runbook.md#the-card)).
 
 ## To look at, cheapest first
 

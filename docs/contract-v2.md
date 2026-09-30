@@ -1,9 +1,11 @@
 # Contract v2 (draft)
 
-The HTTP API of simple-serving, version 2. Status: draft. The gateway in this repository implements it and passes
-the shared cases in front of a fake engine; nothing has run in front of vLLM yet (section 15). The bot's side is
-`local/serving.ts` in simple-story-chat; section 13 is written from its `local/llama.ts` and `local/scheduler.ts` at
-commit 80fd241.
+The HTTP API of simple-serving, version 2. Status: draft. The gateway implements it, with shared cases against a
+fake engine and dated rental measurements against vLLM. The [decision record](decisions.md) records the September
+2026 results and the choices they led to. They do not verify a current live deployment or every mode of this contract.
+The bot's side is `local/serving.ts` in simple-story-chat; section 13 is written from its `local/llama.ts` and
+`local/scheduler.ts` at commit 80fd241. This is the text contract; the separate
+[picture contract and migration](pictures.md) reuse its lifecycle and key rules without changing the text API.
 
 Version 2 changes who stops the card (section 8). In version 1 the bot stopped it, and a reader's or an agent's turn
 held it between calls. In version 2 the service stops its own card after 13 minutes without work of ours, only
@@ -502,8 +504,9 @@ the control key. A change to any of them makes a new configuration, which is mea
 Configuration and keys live in simple-serving. The owner's machine keeps one private configuration of the command,
 with the owner's restricted Vast key, allowed GET and PUT on the chosen instance only, and two gateway keys: a
 client key and a control key. The card's own container key cannot stand in for the restricted key: Vast refuses it
-from outside the card (Decided, 2026-09-25, as measured). The card gets only the SHA-256 of each gateway key, once,
-through the stdin of SSH during the preparation. The owner copies the client key and the address into the bot's
+from outside the card ([decision record](decisions.md#text-serving), 2026-09-25, as measured). The card gets only the
+SHA-256 of each gateway key, once, through the stdin of SSH during the preparation. The owner copies the client key
+and the address into the bot's
 model profile, so simple-story-chat holds neither a Vast key nor the control key. The bot, its agent interface, eval
 and the probes share the client key for now; their classes still differ (section 2).
 
@@ -566,8 +569,9 @@ Also in simple-story-chat:
 
 ## 15. The first rental
 
-Everything below is written and dry-run before the card is rented. The rental rules of simple-story-chat apply
-(`docs/gpu.md`, "While the cards are paid for").
+This section preserves the historical first-rental validation plan, written and dry-run before the September
+2026 trials. Dated results and later decisions are in the [decision record](decisions.md); this plan alone does not
+say which steps have passed. The rental rules of simple-story-chat apply (`docs/gpu.md`, "While the cards are paid for").
 
 The first rental is a disposable trial. Its own onstart, simple-story-chat's `gpu/trial-onstart.sh`, arms a guard
 that deletes the instance three hours after the first start (the first rental uses rent.mjs's default, `--hours 3`),
@@ -576,8 +580,9 @@ and writes the instance's id and key, which the first preparation needs; its las
 the key of the card's stop, so a key that Vast refuses or has revoked defeats both: nothing on the card then bounds
 the costs, and before the launcher runs the card has no stop of its own. The operator is that bound, the Claude
 session that runs the rental, from the moment the instance is created. It reads the instance with the owner's
-account key through simple-story-chat's `npm run gpu:rent -- --show ID`, and in each case the README's "The first
-rental" lists, approved in advance, it deletes the instance with `npm run gpu:rent -- --destroy ID`, which uses the
+account key through simple-story-chat's `npm run gpu:rent -- --show ID`, and in each case the
+[runbook's first-rental procedure](runbook.md#the-first-rental) lists, approved in advance, it deletes the instance
+with `npm run gpu:rent -- --destroy ID`, which uses the
 same key and reads the instance back until it is gone. When that read-back does not confirm the deletion, it tells the
 owner at once. Every stop is confirmed from outside with the owner's own key: the account key in simple-story-chat's
 `.env.gpu`, which rent.mjs uses and which is never copied into simple-serving's configuration. The service never
@@ -612,8 +617,9 @@ Before the rental, without a card:
 - Write the load scenarios and what counts as a pass. Only their numbers are measured on the card.
 
 Written: the pins, in `card/manifest.env` and the two locks; the launch script, the card's launcher in
-`simple_serving/card.py`; and the smoke probes with the count matrix, `python -m simple_serving.smoke` (the README's
-"The smoke"), dry-run against the fake engine by `tests/test_smoke.py`. Its `privacy` probe stands on the card for
+`simple_serving/card.py`; and the smoke probes with the count matrix, `python -m simple_serving.smoke` (the
+[runbook's smoke instructions](runbook.md#the-smoke)), dry-run against the fake engine by `tests/test_smoke.py`.
+Its `privacy` probe stands on the card for
 the check that request and output logging is off: nothing of a request may reach a log, whatever vLLM prints. The
 engine error it brings about is a refusal before the stream: an error in the middle of a stream is not verified on
 the card, and the gateway's side of one is the case `engine-breaks-mid-stream`, against the fake engine. The TLS proxy
@@ -634,7 +640,8 @@ On the card:
    after all this: on the trial, the texts of simple-story-chat's action measurement alone, and no eval.
 
    The attempt, the preparation included, is over by the time the owner chose before creating the instance (the
-   README's "The first rental"). If by then the stack or the weights do not work, or are too slow, the attempt stops
+   [runbook's first-rental procedure](runbook.md#the-first-rental)). If by then the stack or the weights do not work,
+   or are too slow, the attempt stops
    there: nobody fixes that on the paid card, and another configuration is measured later. Installing wheels only
    keeps pip from building anything, but FlashInfer and Triton still compile kernels at run time, and vLLM's lock
    brings CUDA 13.4's compiler pieces (nvcc, nvJitLink, NVVM). On a 580 driver, as the last rental had, CUDA 13.x
@@ -666,41 +673,5 @@ GPTQ or NVFP4, a separate configuration, measured again.
 
 ## Decided
 
-- 2026-09-24, the owner: our `internal` work keeps the card awake until the rental's deadline, and outside keys
-  are issued by hand only.
-- 2026-09-24, the owner: the service stops its own card after 13 minutes without work of ours, and stops rather
-  than deletes it. The bot keeps the story flow only; everything about the card and the model service lives in
-  simple-serving.
-- 2026-09-25, the owner: the trial serves route A, a ready 4-bit NVFP4 conversion of the heretic that vLLM loads in
-  tree. Route B, our own conversion, follows only if eval finds A's quality short.
-- 2026-09-25, the owner: route A's weights get no mirror or copy, so if llmfan46's NVFP4 repository disappears,
-  route B, our own conversion of the heretic's bfloat16 weights, follows as well.
-- 2026-09-25, the owner: the first rental's bound is the operator, the Claude session that runs it, not the owner at
-  Vast's console. It reads and deletes the instance with the owner's account key through simple-story-chat's
-  `npm run gpu:rent`, and tells the owner at once when a deletion is not confirmed.
-- 2026-09-25, the owner: on the first rental `vast_api_key` is the card's own container key, which `cli trial` reads
-  over SSH and writes into the configuration without printing it. The rental finds out whether that key shows and
-  resumes the instance from outside the card; if Vast refuses it, the operator deletes the trial as the README's "The
-  first rental" says, since `up` reads the instance with that same key. A permanent rental keeps the owner's
-  restricted key.
-- 2026-09-25, measured on the first rentals: Vast answers the card's own key with 200 on the card and with 401 from
-  the owner's machine, so the entry above cannot hold. The owner made a restricted key, which read, confirmed the
-  stop of and resumed the next trial from outside. `vast_api_key` is that key on every rental, and `cli trial` writes
-  only the instance's id and the SSH host.
-- 2026-09-25, the owner, after the rehearsal's `frame` answer ran out its 900 tokens with 1668 characters: vLLM
-  builds a schema's JSON with xgrammar alone and no whitespace between its tokens. Whitespace as the cause is not
-  measured yet; on an answer cut short the smoke now counts its whitespace and its characters outside ASCII.
-- 2026-09-25, the owner, after the action measurement's texts on a 5090: whitespace between a schema's tokens is
-  allowed again, and xgrammar stays the one backend. With the ban, 5 of the 18 stories got a sheet with nobody on it,
-  in 7 tokens that ended on `stop`, and so did the marker story on one card of two. The four of those five that are
-  not sealed, asked again from the same excerpts with whitespace allowed, gave 4, 6, 4 and 4 people, twice each, and
-  no answer ran to its limit. The runaway the ban was for, E2B's `frame`, is met as the bot meets it, by the 900-token
-  limit and one retry; the smoke still fails an answer cut short.
-- 2026-09-26, the owner, after route A's second eval against the llama.cpp Q6_K, with the texts kept and three
-  judges: route A stays, with multi-token prediction on, 3 drafted tokens. Both held the same facts in their memory.
-  Route A's scenes lost count of a stock more often and refuted a false premise less firmly, and its memory writes
-  hyphens for dashes and fewer «ё». The owner takes that small loss for the throughput: on one 5090, two requests at
-  once decoded at 123 to 171 tokens a second each, against the Q6_K's 136 on its one slot. Route B does not follow
-  on quality; the entry on llmfan46's repository still holds.
-- 2026-09-26, the owner: the bot sends the gateway two calls at once by default, so that two readers are served
-  together, the reason route A was taken. Section 13's lanes without placement, left for later, are in.
+The dated decisions and measurements are now in [decisions.md](decisions.md). The record preserves superseded
+choices as history; the contract and [runbook](runbook.md) describe the API and operating procedure.

@@ -1,7 +1,7 @@
 [project]
 name = "simple-serving"
 version = "0.1.0"
-description = "A gateway in front of vLLM that serves one text model under contract v2."
+description = "A gateway for text through vLLM and pictures through ComfyUI."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
