@@ -131,7 +131,8 @@ the rehearsal's JSON whitespace ban was subsequently removed. Its E2B model pin 
 ## Suggested order
 
 1. The `8672e62` fix is integrated and passes the shared checks for both lanes.
-2. Prepare the existing ComfyUI single-card test. Its real result gates picture-provider activation.
+2. The [picture smoke](picture-smoke.md) prepares one generation and record-cleanup check. Complete the remaining
+   ComfyUI single-card test before picture-provider activation.
 3. Monitoring is integrated. Install the optional metrics key and enable the picture scrape target when setting
    up monitoring for the cards.
 4. Engine-choice diagnostics from `held-criterion` are integrated. Before carrying over its remaining A/B tooling,

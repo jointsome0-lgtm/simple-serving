@@ -137,6 +137,9 @@ To use a caller's loopback ComfyUI or simple-story-chat's fake instead, replace 
 The package's fake answers with synthetic pictures. This launcher does not establish that a real card passes the
 [card test](pictures.md#the-card-test).
 
+The [picture smoke](picture-smoke.md) runs against this dev stack or an already prepared picture card. It checks
+one synthetic Qwen graph, its event course and PNG, then observes removal of its own ComfyUI record.
+
 ## Running the gateway
 
 ```

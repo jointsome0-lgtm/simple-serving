@@ -477,6 +477,10 @@ log row; ids, times and the nonce are normalized before the comparison:
 
 ### The card test
 
+The [picture smoke](picture-smoke.md) automates one synthetic Qwen generation through an already running gateway,
+its event course, PNG receipt and removal of its own ComfyUI record. Local fake checks do not complete the card test.
+Reader isolation, cancellation, reference erasure, idle/resume, rollback and bot activation remain separate steps.
+
 The 2026-09-28 plan below remains pending. Its time and price estimates are historical, not current rental quotes.
 One 5090 rented for it, with a CUDA 13 driver, about 75 minutes (about $0.6–0.9 at that day's offers), inside the
 owner's $3 a day and the rules of simple-story-chat's `docs/gpu.md#while-the-cards-are-paid-for`, backed first by a

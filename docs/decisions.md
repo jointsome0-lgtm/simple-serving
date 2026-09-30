@@ -263,3 +263,30 @@ The shared check passes on Python 3.12.3 and 3.14.7: Ruff, mypy on 66 source fil
 source-catalog skip. One cohesive diagnostic test is added, with malformed-number coverage in the existing filter
 test. It checks fixed vocabulary, privacy markers, wrong field ancestry and Unicode aliases. No GPU, rental,
 real data or owner configuration is used; matching actual card output remains pending.
+
+## Picture-smoke preparation, 2026-10-01
+
+The owner accepted a standalone smoke client for an already running picture gateway. It checks ready state and
+reported pins, binds public and control listeners to the same boot ID, submits one complete synthetic Qwen graph,
+validates the event course and PNG receipt, and observes
+cleanup of its own ComfyUI job. The graph derives from the copied card workflow, with a small canvas, four steps,
+preview output and the kitchen-attention node. It uploads no reader reference and does not retry generation.
+
+A separate loopback ComfyUI observer must first see the accepted job ID in queue or history before later absence
+from both can establish cleanup. An empty unrelated engine cannot pass that check. On failure after acceptance,
+the client stops only its own job within an additional cleanup reserve. Work and cleanup time bounds are separate
+from provider-side deadlines and billing.
+
+The [procedure](picture-smoke.md) supplies local fake and prepared-card commands. Output contains fixed codes,
+booleans and numbers; image bytes remain in memory. The client manages no server, card, rental, provider switch or
+gateway drain. One-generation success does not complete the manual card test or establish visual quality,
+GPU performance, reader isolation, idle/resume or rollback.
+
+Three CLI regression tests cover complete graph submission, internal-only keys with scopes disabled, preflight
+and miswired-control rejection, malformed streams and PNGs, deadline cleanup and an unrelated observer. The
+documented config preparation and dev-launcher command also pass with local synthetic keys and the default fake.
+PNG checks cover container structure and chunk checksums, without decoding the image pixels.
+
+The shared check passes on Python 3.12.3 and 3.14.7: Ruff, mypy on 68 source files and 357 tests, with the existing
+optional vLLM source-catalog skip. No GPU, rental, real data or owner configuration is used; the full real-card
+test and picture-provider activation remain pending.
