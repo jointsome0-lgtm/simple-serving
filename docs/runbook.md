@@ -219,6 +219,12 @@ The locks, `card/gateway-requirements.txt` and `card/vllm-requirements.txt`, eac
 that made them: the gateway's is exported from `uv.lock`, and vLLM's is resolved for the pinned version. A change of
 `uv.lock` or of the pin needs a new lock.
 
+The text launcher uses `--prefix-cache-retention-interval None` for dense checkpoints in the sliding-window
+prefix cache. These checkpoints let a later story turn reuse a prefix even when its prompt changes near the end.
+The fixed GPU block pool still evicts cached blocks, and request scopes still isolate their cache hashes.
+The [dated 5090 comparison](speed.md#dense-prefix-retention) explains the original choice and its limits.
+The argument takes effect on the next start of the text engine from this checkout.
+
 vLLM runs Gemma 4's multi-token prediction while `MTP_SPECULATIVE_TOKENS` in `card/manifest.env` is above 0, and it
 is 3 since the owner's choice of 2026-09-26: `--speculative-config` with method `mtp`, where Google's assistant for
 the 31B, pinned in the manifest as the weights are, drafts that many tokens a step, and the heretic verifies every

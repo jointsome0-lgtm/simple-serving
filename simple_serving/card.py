@@ -150,6 +150,8 @@ class Card:
             "--max-num-seqs", m["MAX_NUM_SEQS"], "--max-num-batched-tokens", m["MAX_NUM_BATCHED_TOKENS"],
             "--gpu-memory-utilization", m["GPU_MEMORY_UTILIZATION"], "--kv-cache-dtype", m["KV_CACHE_DTYPE"],
             "--scheduling-policy", "priority", "--enable-prefix-caching", "--enable-prompt-tokens-details",
+            # Dense sliding-window checkpoints for reuse between story turns; dated measurements are in docs/speed.md.
+            "--prefix-cache-retention-interval", "None",
             "--reasoning-parser", "gemma4",  # the model's thinking in the reasoning field, apart from the answer
             # A schema's JSON from xgrammar alone, which has no fallback: a schema compiles with the pinned version or
             # is refused. Whitespace between its tokens is allowed, as the bot's llama.cpp allows it: forbidden, it left

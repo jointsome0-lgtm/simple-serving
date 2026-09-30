@@ -24,12 +24,14 @@ interfaces and checked. A branch's tests passing before the picture lane existed
 The `min_p` fix from `8672e62` is now integrated in the working code, adapted to the shared lifecycle.
 The monitoring from `9413d16` is also integrated for both lanes. These are code-integration statuses, not fresh
 GPU results.
+The dense prefix retention change from `940471a` is now integrated in the text launcher, with its historical
+comparison recorded in [speed](speed.md#dense-prefix-retention).
 
 ## Branch work and integration status
 
 | Branch | Tip | Contribution and verdict |
 |--------|-----|--------------------------|
-| `live-2026-09-28` | `940471a` | Includes `8672e62`, then adds dense prefix retention to the text launcher. Review the default change separately. |
+| `live-2026-09-28` | `940471a` | Dense prefix retention is integrated in the text launcher. The branch is retained as the source of that change; its history adds no remaining feature. A new GPU comparison is pending. |
 | `thinking-budget` | `466a82d` | Includes `8672e62`. Implements an optional thinking-token budget. Needs integration checks, then a GPU smoke before activation. |
 | `vision-captions` | `47d71ae` | Includes `8672e62`. Implements image input for Gemma, key permissions, launcher/bootstrap and a vision smoke. Needs shared configuration and launcher adaptation, then GPU validation. |
 | `held-criterion` | `a898060` | Includes throughput and fixes its cache-capacity stopping criterion. Workload and metric-selection ideas are reused in the new interference client; its A/B launcher remains separate. The revised criterion needs a GPU measurement. |
@@ -93,8 +95,9 @@ finishes. Decide how serving is restored before using it alongside readers. `swe
 engine and does not restart it. Its assumed cache capacity and deadline are part of that experiment.
 
 The 2026-09-27 5060 Ti and 5090 results live in `held-criterion:docs/speed.md`. Further concurrency measurements,
-RAM offloading with dense retention, and eval remain unfinished. `live-2026-09-28` cites a speed-document item
-missing from its own tree; use the fuller measurement branch to assess that setting. The split-KV plugin needs
+RAM offloading with dense retention, and eval remain unfinished. The retained `live-2026-09-28` tree cites a
+speed-document item missing from its own tree; the current [summary](speed.md#dense-prefix-retention) extracts its
+comparison from the fuller measurement branch. The split-KV plugin needs
 launcher wiring, log evidence, review and GPU correctness, identity and performance checks.
 
 ### Two picture cards
@@ -117,8 +120,8 @@ the rehearsal's JSON whitespace ban was subsequently removed. Its E2B model pin 
 2. Prepare the existing ComfyUI single-card test. Its real result gates picture-provider activation.
 3. Monitoring is integrated. Install the optional metrics key and enable the picture scrape target when setting
    up monitoring for the cards.
-4. Carry over `held-criterion` with its dry run and an explicit serving-restoration procedure. Assess the retention
-   setting separately from carrying over the tooling.
+4. Carry over `held-criterion` with its dry run and an explicit serving-restoration procedure. The retention
+   setting is integrated; measure its current benefit separately from carrying over the tooling.
 5. Integrate budget and vision as separate optional changes, with real GPU checks before enabling them.
 6. Keep the two-card design and split-KV work separate until their first implemented checks exist.
 

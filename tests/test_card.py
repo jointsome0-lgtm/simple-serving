@@ -129,6 +129,7 @@ async def test_a_signal_ends_the_pair_and_leaves_the_instance_running(state: Pat
     assert argv[:2] == ["serve", str(state / "models" / card_at(state).manifest["MODEL_REVISION"])]
     assert (argv[argv.index("--host") + 1], argv[argv.index("--port") + 1]) == ("127.0.0.1", "8092")
     assert argv[argv.index("--scheduling-policy") + 1] == "priority"
+    assert "--enable-prefix-caching" in argv and argv[argv.index("--prefix-cache-retention-interval") + 1] == "None"
     assert argv[argv.index("--reasoning-parser") + 1] == "gemma4" and "--language-model-only" in argv
     assert "CONTAINER_API_KEY" not in engine["env"] and "VLLM_NO_USAGE_STATS" in engine["env"]
     assert gateway["argv"] == ["-m", "simple_serving"]

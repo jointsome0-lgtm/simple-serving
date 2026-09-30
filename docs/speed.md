@@ -15,6 +15,28 @@ Each proposed experiment is a question for a rental, with the evidence that woul
 - The KV cache is fp8 (`KV_CACHE_DTYPE`); a bfloat16 cache does not fit at 65536 tokens.
 - Gemma 4's multi-token prediction drafts 3 tokens a step, which took each of two requests at once from 57 to 67
   tokens a second to 123 to 171 ([runbook, "The card"](runbook.md#the-card)).
+- The text launcher uses dense prefix-cache checkpoints. The dated comparison below motivated this setting.
+
+## Dense prefix retention
+
+The `live-2026-09-28` change from `940471a` is integrated locally on 2026-09-30. The text launcher now passes
+`--prefix-cache-retention-interval None` to the pinned vLLM 0.30.0. It keeps sliding-window checkpoints densely
+instead of retaining only selected checkpoints. Full-attention groups ignore this setting. Cached blocks still
+compete within the fixed GPU pool and remain evictable; this does not allocate unlimited cache or enable RAM
+offloading. Scope salts remain part of the prefix hashes.
+
+The original RTX 5090 comparison on 2026-09-27, recorded in `held-criterion` at `a898060`, found that a story's
+second turn read 830 of its 16382 prompt tokens and reached its first token in 372 ms, against 6406 ms in the
+reference. The identity check kept the same tokens in 16 of 16 requests. Four interleaved stories got no cache
+hits and no first-token improvement. Those results do not guarantee the same benefit with today's combined
+gateway or a different workload.
+
+Implementation references in the pinned source are the [CLI parser](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/engine/arg_utils.py),
+[cache configuration](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/config/cache.py),
+[block pool](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/core/block_pool.py)
+and [prefix hashing](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/core/kv_cache_utils.py).
+The local launcher checks confirm the command argument, without a new GPU measurement. A controlled repeat
+should compare cached prompt tokens, reader TTFT and interference pauses against the previous setting on one card.
 
 ## To look at, cheapest first
 

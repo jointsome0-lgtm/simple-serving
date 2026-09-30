@@ -137,3 +137,17 @@ The standalone default command also saved a successful owner-only synthetic repo
 No GPU result or latency SLO decision exists for this scenario. KV transport and separate prefill/decode workers
 are not implemented. Their value still depends on a controlled reader-pause measurement and a one-card batching
 and cache comparison, followed by compatible-engine and cost checks if the pause warrants disaggregation.
+
+## Dense prefix retention integration, 2026-09-30
+
+The owner accepted `live-2026-09-28` as the next integration. Its change from `940471a` now reaches the current
+text launcher as `--prefix-cache-retention-interval None`. The pinned vLLM 0.30.0 supports this value. It retains
+sliding-window prefix checkpoints densely within the existing GPU block pool, preserving eviction and scope salts.
+The [speed record](speed.md#dense-prefix-retention) summarizes the original 2026-09-27 RTX 5090 comparison from
+`held-criterion` at `a898060`, separately from the current local verification.
+
+The shared check command passed on Python 3.12 and 3.14: ruff, mypy and all 334 tests, with the same optional source
+catalog check skipped. The existing launcher test now checks the argument received by its engine stand-in.
+Independent review found no remaining blocker. No card was started or restarted and no new GPU measurement was
+made. The setting takes effect when the text engine next starts from this checkout; its current performance gain
+still needs a controlled comparison. The source branch remains retained, with no remaining unintegrated feature.
