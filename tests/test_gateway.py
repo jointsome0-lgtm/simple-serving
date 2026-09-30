@@ -36,6 +36,7 @@ from .support import (
     count,
     eventually,
     generate,
+    prompt_of,
     reached,
     reader,
     record_abort_order,
@@ -233,6 +234,42 @@ async def test_without_optional_fields_thinking_is_off_and_sampling_is_left_to_t
     assert set(generation.body) == {"model", "messages", "max_tokens", "stream", "stream_options", "priority",
                                     "cache_salt", "add_generation_prompt", "add_special_tokens", "chat_template_kwargs"}
     assert generation.body["priority"] == SERVICE["engine_priority"]["internal"]
+
+
+@pytest.mark.parametrize("drafting", [True, False], ids=["drafting", "not drafting"])
+async def test_a_min_p_that_vllm_refuses_while_it_drafts_is_refused_before_the_engine_sees_anything(
+        drafting: bool) -> None:
+    """vLLM 0.30.0 refuses a min_p above 1e-5 with speculative decoding, except at temperature 0 (service.py). The
+    gateway knows that vLLM drafts from the count that the card's launcher names among the versions."""
+    bodies: dict[str, tuple[dict[str, float], bool]] = {  # each request's fields, and whether vLLM refuses them
+        "temperature left out": ({"min_p": 0.05}, True),  # 1 for vLLM
+        "temperature 0.2": ({"min_p": 1, "temperature": 0.2}, True),
+        "small positive temperature": ({"min_p": 0.05, "temperature": 0.000001}, True),
+        "greedy": ({"min_p": 0.05, "temperature": 0}, False),
+        "vLLM's epsilon": ({"min_p": 0.00001}, False),
+        "above vLLM's epsilon": ({"min_p": 0.000010001}, True),
+        "zero": ({"min_p": 0}, False),
+        "min_p left out": ({}, False),
+    }
+    versions = {"mtp_speculative_tokens": "3"} if drafting else {}
+    async with running(versions=versions) as stack, httpx.AsyncClient(timeout=10) as client:
+        over_limit = await generate(client, stack, user_body(
+            "max_tokens checked first", min_p=0.05, max_tokens=SERVICE["limits"]["internal"]["max_tokens"] + 1))
+        assert_refused(over_limit, 400, "limit_exceeded")
+        answers = {name: await generate(client, stack, user_body(name, **fields))
+                   for name, (fields, _) in bodies.items()}
+        counted = await count(client, stack, user_body("counted", min_p=0.05))  # a count sends the engine no sampling
+        public = (await call(client, "GET", stack.public + "/v1/state")).json()
+        view = (await control(client, stack, "/v1/state", method="GET")).json()
+    refused = {name for name, (_, refuses) in bodies.items() if drafting and refuses}
+    for name in refused:
+        assert_refused(answers[name], 400, "min_p_unavailable")
+    sent = {prompt_of(made.body): made.body for made in stack.fake.calls_of("generate")}
+    assert sent.keys() == bodies.keys() - refused  # nothing of a refused request reached the engine, not even a count
+    assert {prompt_of(made.body) for made in stack.fake.calls_of("tokenize")} == {*sent, "counted"}
+    assert all(answers[name].done and bodies[name][0].items() <= sent[name].items() for name in sent)
+    assert counted.status == 200 and "unavailable_fields" not in public
+    assert view.get("unavailable_fields") == (["min_p"] if drafting else None)
 
 
 async def test_a_body_nested_past_the_limit_is_invalid_even_inside_the_schema() -> None:

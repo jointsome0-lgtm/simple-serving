@@ -1,9 +1,11 @@
 # Existing branches, 2026-09-30
 
 The inventory began with 19 local branches, compared with `codex/comfyui-integration` at `c23c282`.
-After removing seven redundant branch names, 12 remain. This document records the remaining work, integration
+After removing seven redundant names and the integrated `next-card` branch, 11 remain. This document records the remaining work, integration
 constraints and the retired names. The review inspected Git ancestry, patch identity, source, tests and documents.
-It ran no tests, engines or rentals. Historical checks below are evidence from the branches, not a fresh
+The initial inventory ran no tests, engines or rentals. The later MTP integration passed the shared checks on
+Python 3.12 and 3.14, recorded in [decisions](decisions.md#mtp-refusal-integration-2026-09-30).
+Historical checks below are evidence from the branches, not a fresh
 verification of their combined behavior.
 
 ## The current code
@@ -18,11 +20,13 @@ MTP, phase 2 and picture implementations are already in the current history; the
 The remaining branches are below. A candidate for integration still needs its changes applied to the current
 interfaces and checked. A branch's tests passing before the picture lane existed would not establish that.
 
-## Work outside the current branch
+The `min_p` fix from `8672e62` is now integrated in the working code, adapted to the shared lifecycle.
+This is a code-integration status, not a fresh GPU result. Monitoring remains an adaptation candidate.
+
+## Branch work and integration status
 
 | Branch | Tip | Contribution and verdict |
 |--------|-----|--------------------------|
-| `next-card` | `8672e62` | Early `min_p_unavailable` refusal under MTP. First candidate for local integration. The duplicate name `mtp-min-p` was removed. |
 | `live-2026-09-28` | `940471a` | Includes `8672e62`, then adds dense prefix retention to the text launcher. Review the default change separately. |
 | `next-card-metrics` | `9413d16` | Combines monitoring with `8672e62`, pins monitoring images and supports history outside the checkout via `MONITORING_DATA`. Needs adaptation to the picture lane. |
 | `thinking-budget` | `466a82d` | Includes `8672e62`. Implements an optional thinking-token budget. Needs integration checks, then a GPU smoke before activation. |
@@ -37,11 +41,12 @@ interfaces and checked. A branch's tests passing before the picture lane existed
 
 ### The shared text fix
 
-`8672e62` is shared by the live, metrics, thinking-budget and vision work. Apply it once. After checking the
+`8672e62` is shared by the live, metrics, thinking-budget and vision work. Its fix is now integrated; preserve it
+when adapting those branches rather than replaying it. After checking the
 `max_tokens` limit, it refuses generation before count or admission when MTP is enabled, `min_p > 1e-5` and
 temperature is not zero. Counting is unaffected.
 Its source is `simple_serving/service.py` and `routes.py`, with the input matrix in `tests/test_gateway.py`.
-Keep that check and `unavailable_fields` in the current text `Service`, which now inherits the shared `Lifecycle`.
+The check and control-only `unavailable_fields` stay in the text `Service`, which inherits the shared `Lifecycle`.
 
 ### Monitoring
 
@@ -102,7 +107,7 @@ the rehearsal's JSON whitespace ban was subsequently removed. Its E2B model pin 
 
 ## Suggested order
 
-1. Integrate `8672e62` into the current text service and run the shared checks for both lanes.
+1. The `8672e62` fix is integrated and passes the shared checks for both lanes.
 2. Prepare the existing ComfyUI single-card test. Its real result gates picture-provider activation.
 3. Adapt `9413d16` for the current interfaces, then check metrics permissions, privacy, cancellation and idle sleep.
 4. Carry over `held-criterion` with its dry run and an explicit serving-restoration procedure. Assess the retention
@@ -118,7 +123,6 @@ The main checkout is `~/work/simple-serving`. The remaining clean worktrees are:
 |----------|--------|
 | `~/work/simple-serving-two-cards` | `pictures-two-cards` |
 | `~/work/simple-serving-vision` | `vision-captions` |
-| `/var/tmp/simple-serving-next` | `next-card` |
 | `/var/tmp/simple-serving-live` | `live-2026-09-28` |
 | `/var/tmp/simple-serving-metrics` | `next-card-metrics` |
 | `/var/tmp/simple-serving-budget` | `thinking-budget` |
@@ -127,7 +131,8 @@ The main checkout is `~/work/simple-serving`. The remaining clean worktrees are:
 ## Removed duplicates
 
 The following local names were removed on 2026-09-30. Each tip is still reachable through the branch listed here;
-their history was also saved in a verified Git bundle before cleanup. Remote refs were retained.
+their history was also saved in a verified Git bundle before cleanup. `next-card` was retired after its integration.
+Remote refs were retained.
 
 | Removed name | Tip | History retained in |
 |--------------|-----|---------------------|
@@ -135,12 +140,14 @@ their history was also saved in a verified Git bundle before cleanup. Remote ref
 | `mtp` | `5c9cd5e` | `codex/comfyui-integration` |
 | `phase2` | `f3031ea` | `codex/comfyui-integration` |
 | `pictures` | `7fdd58f` | `codex/comfyui-integration` |
-| `mtp-min-p` | `8672e62` | `next-card`, the exact same commit |
+| `mtp-min-p` | `8672e62` | `codex/comfyui-integration`, after the `next-card` integration |
+| `next-card` | `8672e62` | `codex/comfyui-integration` |
 | `monitoring` | `b0b0703` | `next-card-metrics` |
 | `throughput` | `a03a62b` | `held-criterion` |
 
 The clean `~/work/simple-serving-pictures` checkout was removed with its reproducible Python environment and
-caches. Its code is in the current branch. One stale registration for a missing scratch checkout was pruned.
+caches. The clean `/var/tmp/simple-serving-next` checkout was retired after the MTP integration.
+Their code is in the current branch. One stale registration for a missing scratch checkout was pruned.
 The saved cleanup stash was preserved.
 
 ## Reading a remaining branch
@@ -153,7 +160,7 @@ git show thinking-budget:docs/thinking-budget.md
 git show vision-captions:docs/vision-smoke.md
 git show held-criterion:docs/speed.md
 git show pictures-two-cards:docs/pictures-two-cards.md
-git diff codex/comfyui-integration...next-card -- simple_serving
+git diff codex/comfyui-integration...next-card-metrics -- simple_serving
 ```
 
 This is a dated inventory. Recheck the branch tips and worktree state before integrating or retiring anything.

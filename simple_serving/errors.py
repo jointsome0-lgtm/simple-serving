@@ -8,6 +8,7 @@ STATUS = {
     "unsupported_field": 400,
     "limit_exceeded": 400,
     "context_limit": 400,
+    "min_p_unavailable": 400,
     "graph_refused": 400,  # the picture lane: a graph the gateway's checks refuse
     "graph_rejected": 400,  # and one that ComfyUI refuses
     "unauthorized": 401,

@@ -174,7 +174,9 @@ never the key:
 
 `context_tokens` is the gateway's own limit, or `null` for the engine's. Optional fields: `body_limit_bytes`
 (2 000 000), `max_connections` (64), `idle_timeout_s` (780), `health_interval_s` (5) and `versions`, which the control
-key sees in `/v1/state` next to the gateway's own. An outside key has the classes `["external"]` and no scopes. To
+key sees in `/v1/state` next to the gateway's own. For text, `versions.mtp_speculative_tokens` must be a positive
+decimal count string matching `[1-9][0-9]*`, or absent when drafting is off. The launcher writes it while MTP is on;
+it enables the early `min_p` refusal described below. An outside key has the classes `["external"]` and no scopes. To
 hash a key without printing it:
 
 ```
@@ -224,6 +226,12 @@ drafted token in one pass and keeps each only as its own sampling would, so the 
 change, only their speed. The drafter reads the heretic's KV cache and keeps none of its own; its 0.9 GB of weights
 come out of the cache's share of the memory. `/v1/state` names the drafter's revision and the count among the
 versions, and so does the smoke's record.
+
+With MTP, the gateway returns 400 `min_p_unavailable` for `min_p > 1e-5` unless `temperature` is 0.
+An omitted temperature means 1. The refusal follows the class's `max_tokens` check and precedes counting and
+admission, so no part of the refused generation reaches vLLM. Counting requests are unaffected.
+Only the control key sees `"unavailable_fields": ["min_p"]` in `/v1/state` while MTP is on. With
+`MTP_SPECULATIVE_TOKENS=0`, valid `min_p` values pass through unchanged and that state field is absent.
 
 A card prepared with another count is not prepared for this manifest, and the launcher starts nothing there until the
 preparation runs again. Copy the checkout to the card again, and run the preparation with nothing on stdin, since the
@@ -355,8 +363,9 @@ The probes run in this order, each within a time bound of its own, and the first
 - `completion`: one short completion, and its stream as section 4 has it: the alias in every chunk, one finish, one
   usage chunk, then `[DONE]`.
 - `fields`: each optional field of section 4 alone, at a legal value, and the answer with `response_format` follows
-  its schema. Beside them, two answers with one seed at temperature 0.8, compared by hash: an observation, which
-  passes nothing.
+  its schema. With MTP enabled in the manifest, the `min_p` value of 0.05 must instead return 400
+  `min_p_unavailable`. Beside them, two answers with one seed at temperature 0.8 are compared by hash,
+  an observation that passes nothing.
 - `reasoning`: thinking on gives reasoning and an answer, thinking off an answer alone.
 - `finish`: `length` after exactly 8 tokens, and `stop`.
 - `refusal`: a schema whose `pattern` does not compile is 400 `invalid_request`, before any stream. The comment at
@@ -405,7 +414,8 @@ uv run python -m simple_serving.dev --config dev.json --engine-port 8200 --publi
 uv run python -m simple_serving.smoke --config keys.json --public-port 8201 --control-port 8202 --fake --card-dir logs/dry-run
 ```
 
-The pause after each event holds a stream open while the abort probe looks for it.
+The pause after each event holds a stream open while the abort probe looks for it. With MTP enabled in the
+manifest, the dry-run pins enable the same `min_p` refusal as on the card.
 
 ## The first rental
 

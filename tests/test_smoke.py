@@ -92,6 +92,9 @@ async def test_the_dry_run_passes_every_probe_and_prints_no_key_no_prompt_and_no
             launch.control.rsplit(":", 1)[1], cwd=ROOT, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, err = await asyncio.wait_for(process.communicate(), 120)
     assert (process.returncode, err) == (0, b"simple-serving smoke: 10 of 10 probes passed\n")  # each one printed
+    min_p = next(line for line in map(json.loads, out.splitlines()) if line["probe"] == "fields")["min_p"]
+    drafting = int(manifest["MTP_SPECULATIVE_TOKENS"]) > 0  # the gateway refuses the min_p that vLLM would
+    assert (min_p["status"], min_p.get("code")) == ((400, "min_p_unavailable") if drafting else (200, None))
     for secret in (BOT, CONTROL, smoke.SHORT, smoke.FILLER.strip(), smoke.COUNTING, smoke.ECHO, "keeper", *SENTENCE,
                    *THOUGHT):
         assert secret.encode() not in out

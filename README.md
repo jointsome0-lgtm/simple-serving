@@ -8,6 +8,9 @@ The gateway implements contract v2 and has tests against a fake engine. The Sept
 contains real vLLM rentals and RTX 5090 measurements, including the choice to keep route A with multi-token
 prediction. Those dated results do not verify a current live deployment or every mode of the contract.
 
+Under MTP, the text gateway rejects `min_p > 1e-5` with 400 `min_p_unavailable` unless `temperature` is 0,
+before sending anything to vLLM. Counting is unaffected. See the [generation contract](docs/contract-v2.md#4-generation-post-v1chatcompletions).
+
 The text API remains contract v2. The picture lane's phase 1 code is integrated locally, with a fake ComfyUI,
 picture card files and `--lane pictures` in the CLI. Its real card test remains pending. The bot's provider switch
 stays off by default, so it still draws through its existing ComfyUI path until the card test and activation.

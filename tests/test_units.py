@@ -284,6 +284,7 @@ def test_the_configuration_file_holds_hashes_and_refuses_what_it_does_not_know(t
     assert "default" in refused(lambda d: d["keys"][0].update(default="external"))
     assert "wall_s" in refused(lambda d: d["limits"]["agent"].update(wall_s=0))
     assert "active" in refused(lambda d: d["limits"]["agent"].update(active=True))
+    assert "mtp_speculative_tokens" in refused(lambda d: d.update(versions={"mtp_speculative_tokens": "0"}))
     message = refused(lambda d: d.update(secret=MARKER))
     assert "secret" in message and MARKER not in message  # a message names a field, never its value
     path.write_text("{" + MARKER)

@@ -50,6 +50,12 @@ or establish that outside-client or permanent use has been validated.
 - 2026-09-26, the owner: the bot sends the gateway two calls at once by default, so that two readers are served
   together, the reason route A was taken. Section 13's lanes without placement, left for later, are in.
 
+- 2026-09-27, the owner: reject a generation's unsupported `min_p` at the gateway while MTP is on, with 400
+  `min_p_unavailable` before any engine call, and check this refusal in the smoke's `fields` probe. On that day's
+  5090 with 3 drafted tokens, the smoke stopped at `fields` after 2 of 10 probes. vLLM refused `min_p=0.05`, which
+  the gateway then reported as `invalid_request`. With MTP disabled, the smoke passed 10 of 10. MTP remains on
+  by default. This records the original run, not validation of the later gateway fix.
+
 ## Picture serving
 
 Version 2 serves one text model. Pictures stay in simple-story-chat for now: the owner decided on 2026-09-26 that
@@ -81,3 +87,12 @@ cancellation confirmed.
 
 Real ComfyUI card validation remains pending. The bot's provider switch stays off by default; these checks use
 local fake services and synthetic data. The next step is the [card test in section 15](pictures.md#the-card-test).
+
+## MTP refusal integration, 2026-09-30
+
+The `min_p` fix from `8672e62` is adapted to the current text `Service` and shared lifecycle in this working code.
+It preserves contract v2 and the picture lane. The shared check command passes on Python 3.12 and 3.14, including
+ruff, mypy and all 285 tests. The added matrix checks MTP on and off, greedy sampling, both sides of the threshold,
+the class-limit order, count behavior and no engine calls for refused requests. The privacy test covers the new
+error code, and the synthetic smoke expects it under MTP. Independent review found no blocking issue.
+These are local checks against fake engines. The real card checks remain pending.

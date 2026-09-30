@@ -28,6 +28,10 @@ FIELDS = {"alias", "engine_url", "listen", "context_tokens", "body_limit_bytes",
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 LOOPBACK_V4, LOOPBACK_V6 = ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_address("::1")
 IDLE_TIMEOUT_S = 780  # without work of ours, before the service falls asleep (contract section 8)
+# The entry of `versions` that the card's launcher writes while vLLM drafts tokens with Gemma 4's multi-token
+# prediction, their count (card.pinned_versions). The gateway takes it as the sign that vLLM runs speculative decoding,
+# and then refuses a min_p that vLLM would refuse (service.py).
+DRAFTED_TOKENS = "mtp_speculative_tokens"
 # The provisional values of contract section 7, which the dev launcher and the card use until the card has measured
 # its own (section 15, step 4).
 PROVISIONAL: dict[str, Any] = {
@@ -100,6 +104,7 @@ class Config:
     max_connections: int
     health_interval_s: float
     versions: Mapping[str, str]
+    speculative: bool  # vLLM drafts tokens: `versions` names their count
 
 
 def load(path: str) -> Config:
@@ -154,6 +159,9 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
     versions = _object(data.get("versions", {}), "versions")
     if not all(isinstance(value, str) for value in versions.values()):
         raise ConfigError("versions must map names to strings")
+    drafted = versions.get(DRAFTED_TOKENS)
+    if drafted is not None and not re.fullmatch(r"[1-9][0-9]*", drafted):
+        raise ConfigError(f"versions.{DRAFTED_TOKENS} must be a count above 0, or left out while nothing drafts")
     return Config(
         alias=_string(data.get("alias"), "alias"),
         engine_url=engine_url.rstrip("/"),
@@ -175,6 +183,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
         max_connections=_integer(data.get("max_connections", 64), "max_connections", 1),
         health_interval_s=_seconds(data.get("health_interval_s", 5), "health_interval_s"),
         versions=MappingProxyType(dict(versions)),
+        speculative=drafted is not None,
     )
 
 
