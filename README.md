@@ -31,6 +31,7 @@ image token counts, MTP throughput and GPU memory use still need the [vision che
 - [Decisions and measurements](docs/decisions.md): dated choices, results and superseded plans.
 - [Existing branches](docs/branches.md): where the current groundwork lives, its dependencies and integration limits.
 - [Speed experiments](docs/speed.md): questions for later measurements.
+- [Concurrency sweep](docs/sweep.md): planning and numeric engine benchmarks with explicit current KV capacity.
 - [Thinking budget](docs/thinking-budget.md): optional per-request reasoning limits, disabled until GPU validation.
 - [Vision smoke](docs/vision-smoke.md): optional Gemma image input, key permission and synthetic validation.
 - [Prefill interference](docs/prefill-interference.md): a synthetic demonstration and client measurements through

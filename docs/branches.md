@@ -38,7 +38,7 @@ Vision from `47d71ae` is now integrated too, with `VISION=0` and an explicit [sy
 | `thinking-budget` | `466a82d` | Optional thinking-token budgets are integrated and disabled by default. The source branch remains retained, with no unintegrated feature. GPU enforcement and quality evaluation are pending. |
 | `vision-captions` | `47d71ae` | Includes `8672e62`. Implements image input for Gemma, key permissions, launcher/bootstrap and a vision smoke. Integrated into the current shared configuration, launcher and smoke, with `VISION=0`. Source retained; GPU validation is pending. |
 | `held-criterion` | `a898060` | Includes throughput and fixes its cache-capacity stopping criterion. Workload and metric-selection ideas are reused in the new interference client; its A/B launcher remains separate. The revised criterion needs a GPU measurement. |
-| `sweep` | `b6d4919` | Separate sweep against an already running engine, with a deadline and overlap checks. Independent of the A/B harness; keep it identifiable as an experiment. |
+| `sweep` | `b6d4919` | Standalone sweep is ported into the current checkout, with explicit current cache capacity and local fake checks. It measures an already running engine; GPU results remain pending. The source branch retains its historical experiment queue. |
 | `split-kv-wip` | `bd0503e` | Split-KV plugin files on an older throughput base. The launcher does not register the change. Unfinished. |
 | `pictures-two-cards` | `5aa9302` | Design and recorded owner answers only. No distributor or two-card test is implemented. |
 | `rehearsal-e2b` | `754a852` | Historical rehearsal. Only the E2B model pin is patch-unique; the other fixes have equivalent patches in the current code. Do not replay the branch wholesale. |
@@ -87,6 +87,9 @@ real captions, token counts or MTP throughput.
 
 ### Measurement tools
 
+The [standalone sweep](sweep.md) from `b6d4919` is now ported into the current checkout. Its capacity is an explicit
+input rather than a historical default; the source branch and historical experiment queue remain retained.
+
 The [interference client](prefill-interference.md) now measures a long prompt arriving during another request's
 generation through the existing gateway. It reuses selected workload and metric-selection ideas from
 `held-criterion`, without integrating its launcher. Its default command uses a local fake; GPU interference and
@@ -98,7 +101,7 @@ allowlist when carrying over the launcher, metrics and fake-engine changes.
 
 The A/B launcher stops the serving pair, starts its measurement pair and leaves the card without serving when it
 finishes. Decide how serving is restored before using it alongside readers. `sweep` instead measures a running
-engine and does not restart it. Its assumed cache capacity and deadline are part of that experiment.
+engine and does not restart it. The integrated tool requires current cache capacity and an explicit deadline.
 
 The 2026-09-27 5060 Ti and 5090 results live in `held-criterion:docs/speed.md`. Further concurrency measurements,
 RAM offloading with dense retention, and eval remain unfinished. The retained `live-2026-09-28` tree cites a

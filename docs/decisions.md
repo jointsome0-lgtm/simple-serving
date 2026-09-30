@@ -216,3 +216,22 @@ This cap bounds input bytes; it does not establish a raster-memory or GPU-memory
 Boundary checks accept exactly 2 MiB for both count and generation and reject one byte more before any engine call.
 The shared check passes on Python 3.12 and 3.14 with 350 tests and one optional source-catalog skip; no test cases were
 added to the collected total. Validation uses synthetic images and fake services.
+
+## Standalone sweep integration, 2026-09-30
+
+The owner accepted the concurrency sweep from `sweep`, source `b6d4919`. Only the standalone script and its local
+regression tests are ported; the branch's historical experiment queue remains retained. No A/B launcher is added.
+The tool uses synthetic random prompts against an already running engine, and requires a positive current KV
+capacity rather than defaulting to the old 104492-token observation. Planning needs no card or engine.
+
+The port checks missing/busy engine gauges, malformed or failed benchmark results, deadline handling and cleanup.
+Its numeric summary excludes request content and raw metric labels; upstream artifacts remain private. Direct
+engine traffic bypasses gateway admission and its idle timer. Overlap detection from sampled in-flight counts is a
+partial check, not an exclusivity guarantee. A deadline cuts off the benchmark and permits bounded cleanup; it is
+not a provider billing bound. The [procedure](sweep.md) records these limits and the pinned vLLM source interfaces.
+
+No GPU, rental, real story or owner configuration is used for the integration. Real measurements remain pending.
+
+The shared check passes on Python 3.12.3 and 3.14.7: Ruff, mypy on 66 source files, and 353 tests with one optional
+source-catalog skip. The port adds three cohesive sweep tests. A standalone `--plan --cache-tokens 100000` invocation
+also emits 24 level rows and a final capacity summary without card files or vLLM.

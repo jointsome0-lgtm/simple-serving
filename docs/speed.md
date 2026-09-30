@@ -40,10 +40,11 @@ should compare cached prompt tokens, reader TTFT and interference pauses against
 
 ## To look at, cheapest first
 
-1. **The FP4 kernels.** Which kernel runs the NVFP4 weights on an RTX 5090 (sm_120). A warning at the engine's start
-   that FP4 runs weight-only through the Marlin kernel would mean vLLM's fallback for GPUs without native FP4: this
-   card's counterpart of the picture card's slow path, and the one item here that might be as large. It costs
-   nothing, since the engine's log says it at the next start.
+1. **The FP4 kernels.** Identify which kernel runs the NVFP4 weights on an RTX 5090 (sm_120), then measure any
+   supported alternative. Seeing Marlin or its warning alone does not establish a slow fallback. In pinned vLLM
+   0.30.0, Marlin is a normal W4A16 selection; the [kernel selector](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/model_executor/kernels/linear/__init__.py)
+   and [Marlin implementation](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/model_executor/kernels/linear/nvfp4/marlin.py)
+   explain that path. The original fallback hypothesis was revised by the source review in `9b73efb`.
 2. **The attention backend** vLLM picks for Gemma 4's sliding-window and global layers, from its log, against the
    others it offers on this GPU (FlashInfer, FlashAttention, its own Triton backend), each tried once.
 3. **The CUDA graphs** of a decode step with the drafter: the mode and the capture sizes vLLM 0.30.0 uses by default,
@@ -63,6 +64,17 @@ should compare cached prompt tokens, reader TTFT and interference pauses against
    does not fit fails the engine at its start, and the launcher then stops the instance. It is measured on four long
    stories interleaved, with and without it: the prompt tokens read again (`input_tokens` against `cached_tokens` in
    the gateway's log) and each turn's first token.
+
+## Concurrency measurement tool
+
+The [standalone sweep](sweep.md) from `b6d4919` is now ported into the current checkout. It plans 24 levels and can
+benchmark an already running engine with synthetic random inputs. The operator supplies the current KV capacity;
+there is no default from the older 104492-token measurement. Local fake checks establish tool behavior, while GPU
+throughput and the time estimates remain unverified. It does not hold the gateway awake or restart serving.
+
+The earlier KV/offload estimates above depend on the cache retention and startup configuration used then. They do
+not establish today's capacity with dense retention, vision or different MTP settings. Use the current launcher's
+recorded capacity and measure each configuration separately.
 
 ## How to measure
 
