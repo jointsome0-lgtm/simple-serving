@@ -272,6 +272,54 @@ async def test_a_min_p_that_vllm_refuses_while_it_drafts_is_refused_before_the_e
     assert view.get("unavailable_fields") == (["min_p"] if drafting else None)
 
 
+@pytest.mark.parametrize("enabled", [True, False], ids=["budget on", "budget off"])
+async def test_a_thinking_budget_reaches_the_engine_as_sent_and_only_while_the_card_enables_it(enabled: bool) -> None:
+    """A disabled budget fails before any engine call; enabled budgets reach generation unchanged."""
+    most = SERVICE["limits"]["internal"]["max_tokens"]
+    budgets = {"zero": 0, "the class's most": most, "none": None}
+    invalid = {"over the class's": most + 1, "negative": -1, "boolean": True, "float": 128.0,
+               "text": "128", "null": None}
+    versions = {"mtp_speculative_tokens": "3", **({"thinking_budget": "on"} if enabled else {})}
+    async with running(versions=versions) as stack, httpx.AsyncClient(timeout=10) as client:
+        answers = {name: await generate(client, stack, user_body(name, **(
+            {} if budget is None else {"thinking_token_budget": budget}))) for name, budget in budgets.items()}
+        refusals = {name: await generate(client, stack, user_body(name, thinking_token_budget=budget))
+                    for name, budget in invalid.items()}
+        assert_refused(await generate(client, stack, user_body("max first", max_tokens=most + 1,
+                                                              thinking_token_budget=0)), 400, "limit_exceeded")
+        assert_refused(await generate(client, stack, user_body("min_p first", min_p=0.05, thinking_token_budget=0)),
+                       400, "min_p_unavailable")
+        counted = {name: await count(client, stack, user_body("count_" + name, thinking_token_budget=budget))
+                   for name, budget in {"zero": 0, "most": most, "over": most + 1, **invalid}.items()}
+        view = (await control(client, stack, "/v1/state", method="GET")).json()
+        exposition = (await control(client, stack, "/metrics", method="GET")).body.decode()
+        unavailable = sum(float(line.rsplit(" ", 1)[1]) for line in exposition.splitlines()
+                          if line.startswith("simple_serving_requests_total{")
+                          and 'code="thinking_budget_unavailable"' in line and 'outcome="rejected"' in line)
+        assert unavailable == (0 if enabled else 3)
+    sent = {prompt_of(made.body): made.body for made in stack.fake.calls_of("generate")}
+    assert sent.keys() == ({*budgets} if enabled else {"none"})  # nothing else reached the engine, not even a count
+    count_names = {"zero", "most", "over", "over the class's"}
+    assert {prompt_of(made.body) for made in stack.fake.calls_of("tokenize")} == sent.keys() | {
+        "count_" + name for name in count_names}
+    assert all("thinking_token_budget" not in made.body for made in stack.fake.calls_of("tokenize"))
+    for name, answer in counted.items():
+        if name in count_names:
+            assert answer.status == 200
+        else:
+            assert_refused(answer, 400, "invalid_request")
+    for name, budget in budgets.items():
+        if name in sent:
+            assert answers[name].done and sent[name].get("thinking_token_budget") == budget
+        else:
+            assert_refused(answers[name], 400, "thinking_budget_unavailable")
+    for name, answer in refusals.items():
+        over = name == "over the class's" and not enabled  # the switch is checked before the class's limit
+        assert_refused(answer, 400, "thinking_budget_unavailable" if over else "invalid_request")
+    assert view["versions"].get("thinking_budget") == ("on" if enabled else None)  # how the control key tells
+    assert view["unavailable_fields"] == ["min_p"]
+
+
 async def test_a_body_nested_past_the_limit_is_invalid_even_inside_the_schema() -> None:
     def with_schema(schema: Any) -> dict[str, Any]:
         return chat_body(response_format={"type": "json_schema",

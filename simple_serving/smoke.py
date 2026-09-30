@@ -19,7 +19,8 @@ The probes run in this order, each within a time bound of its own, and the first
 - fields: each optional field of section 4 alone, at a legal value. The answer with `response_format` ends in `stop`
   and follows its schema, and the one with thinking off has no reasoning. While the manifest turns multi-token
   prediction on, the gateway refuses the min_p of 0.05 with 400 min_p_unavailable, and that refusal is what its part
-  checks. Beside them an observation that passes nothing: two answers at temperature 0.8 with one seed, compared by
+  checks; so it is for the thinking_token_budget, 400 thinking_budget_unavailable while the manifest leaves the budget
+  off. Beside them an observation that passes nothing: two answers at temperature 0.8 with one seed, compared by
   hash.
 - reasoning: thinking on gives reasoning and an answer, thinking off an answer alone.
 - finish: `length` at a small max_tokens, after exactly that many tokens, and `stop`.
@@ -30,6 +31,15 @@ The probes run in this order, each within a time bound of its own, and the first
 - schemas: the bot's own JSON schemas in strict mode (bot_schemas.json), each answer checked against its schema.
 - counts: the count matrix. For each cell the count, then a generation with a small max_tokens, and the count must
   equal usage.prompt_tokens: plain, system and user, turns, a schema, thinking on and off, and near the context.
+- budget: while the manifest turns the thinking budget on, each budget of BUDGETS with thinking on, beside thinking
+  off and thinking to its own end, on three synthetic prompts with a schema: a puzzle and two of the bot's schemas. A
+  budget's answer ends in `stop` and follows its schema, and its thought takes at most the budget and BUDGET_MARGIN
+  estimated tokens, the completion's tokens less the answer's counted apart. On a real engine, 128 and 300 must each
+  be exceeded by the unbudgeted baseline on at least two prompts; otherwise the probe is inconclusive and fails.
+  The fake checks the route and stream only. It cannot establish enforcement. Call times and puzzle correctness
+  remain observations.
+  It runs every call even after one failed, since each is a measurement. While the budget is off, the gateway
+  refuses it with 400 thinking_budget_unavailable, and that refusal is the probe.
 - privacy: one completion whose prompt holds a fresh random marker, which no log that the gateway or the engine's
   filter writes on the card may hold (section 15, step 2).
 
@@ -77,11 +87,12 @@ HEADERS = {"X-Simple-Serving-Class": "internal"}  # without a scope header, the 
 KEYS = ("client_key", "control_key")  # of the command's configuration; the metrics key is Prometheus's alone
 # Each probe's time bound on the card, generous: the first requests after a start may wait for kernels to compile.
 BOUND_S = {"lifecycle": 60, "state": 30, "completion": 300, "fields": 600, "reasoning": 300, "finish": 180,
-           "refusal": 120, "abort": 120, "schemas": 900, "counts": 900, "privacy": 120}
+           "refusal": 120, "abort": 120, "schemas": 900, "counts": 900, "budget": 900, "privacy": 120}
 UNDO_S = {"abort": 30}  # of a probe's bound, what it keeps for undoing its change: three control calls
 CARD_PROBES = ("lifecycle", "abort", "privacy")  # the probes that read the card's report
 # What the fake engine cannot answer truthfully, and --fake leaves unchecked. The seed's repeat is no check anyway.
-NOT_VERIFIABLE = {"fields": ["answer", "seed_repeats"], "schemas": ["answer"], "counts": ["equal"]}
+NOT_VERIFIABLE = {"fields": ["answer", "seed_repeats"], "schemas": ["answer"], "counts": ["equal"],
+                  "budget": ["answer", "right", "within", "bound", "enforcement"]}
 CALL_S = 10  # a call to the control listener, from connecting to the end of its answer
 ANSWER_BYTES = 16384  # the most of an answer that is not a stream
 STREAM_BYTES = 2_000_000  # the most of a stream, as the bot reads one
@@ -118,11 +129,26 @@ FIELDS: dict[str, Any] = {
     "temperature": 0.2, "top_p": 0.95, "top_k": 64, "min_p": 0.05, "repetition_penalty": 1.05, "seed": 1234,
     "response_format": {"type": "json_schema", "json_schema": {"name": "word", "strict": True, "schema": WORD_SCHEMA}},
     "chat_template_kwargs": {"enable_thinking": False},
+    "thinking_token_budget": 64,
 }
 SEED = 20260925
 CELL_TOKENS = 8  # a count cell's generation
 NEAR = 16  # the near-context cell aims this many tokens below the context...
 NEAR_BAND = 64  # ...and takes a count up to this far below it
+BUDGETS = (128, 300, 1024)  # the thinking budgets of the probe budget
+# Estimated allowance for markers and separately tokenizing the answer. This is not an exact reasoning token count.
+BUDGET_MARGIN = 8
+BUDGET_TOKENS = 8192  # each call's max_tokens, the internal class's most, so that a thought without a budget may end
+BUDGET_SCHEMAS = ("frame", "scene_judge")  # of bot_schemas.json, beside the puzzle
+BUDGET_SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 64, "seed": SEED}  # Gemma 4's own, and no min_p
+COUNTED = "Text:\n"  # before a text that the probe budget counts, so that no count is of an empty message
+KEEPERS = ("Ada", "Bram", "Cato", "Dara", "Eli")
+PUZZLE = ("Five keepers, Ada, Bram, Cato, Dara and Eli, keep the five lighthouses numbered 1 to 5, one each. Ada's "
+          "number is higher than Bram's. Cato's number is even. Dara's number is one more than Eli's. Bram does not "
+          "keep lighthouse 1. Eli's number is odd. Which lighthouse does each keeper keep?")
+PUZZLE_SCHEMA = {"type": "object", "required": list(KEEPERS), "additionalProperties": False,
+                 "properties": {name: {"type": "integer", "minimum": 1, "maximum": 5} for name in KEEPERS}}
+SOLVED = {"Ada": 5, "Bram": 3, "Cato": 4, "Dara": 2, "Eli": 1}  # the puzzle's one answer
 SCHEMA_TOKENS = 2048  # the most any bot schema's answer may take here; the bot's own caps go up to 16384
 
 
@@ -426,6 +452,7 @@ class Smoke:
     card: CardFiles = field(default_factory=CardFiles)
     record: Record | None = None
     mtp: bool = False  # the manifest turns multi-token prediction on: vLLM drafts tokens
+    budget: bool = False  # the manifest turns the thinking budget on: the gateway passes it to vLLM
     undo: Callable[[], Awaitable[bool]] | None = None  # what the running probe changed and run() undoes
 
     def headers(self, listener: str) -> dict[str, str]:
@@ -613,6 +640,8 @@ async def probe_fields(smoke: Smoke) -> dict[str, Any]:
             failed.append("reasoning")
         if name == "min_p" and smoke.mtp:  # vLLM drafts tokens, and the gateway refuses it first (contract section 4)
             parts[name] = refused(stream, "min_p_unavailable")
+        elif name == "thinking_token_budget" and not smoke.budget:  # the budget is off (section 4)
+            parts[name] = refused(stream, "thinking_budget_unavailable")
         else:
             parts[name] = answered(stream, failed, answer)
         if not parts[name]["ok"]:
@@ -781,6 +810,80 @@ async def probe_schemas(smoke: Smoke) -> dict[str, Any]:
     return combined(parts, passed=sum(part["ok"] for part in parts.values()), of=len(entries))
 
 
+async def probe_budget(smoke: Smoke) -> dict[str, Any]:
+    if not smoke.budget:
+        return refused(await smoke.generate(smoke.body([user(PUZZLE)], 256, thinking_token_budget=BUDGETS[0],
+                                                        chat_template_kwargs={"enable_thinking": True})),
+                       "thinking_budget_unavailable") | {"enforcement": "disabled"}
+    entries = {entry.name: entry for entry in bot_schemas.load()}
+    prompts = {"puzzle": ([user(PUZZLE)], PUZZLE_SCHEMA),
+               **{name: ([system(entries[name].system), user(entries[name].user)], entries[name].schema)
+                  for name in BUDGET_SCHEMAS}}
+    parts = {}
+    for prompt, (messages, schema) in prompts.items():
+        unbounded = None  # the thought's tokens without a budget
+        for arm, budget in (("off", None), ("full", None), *((str(budget), budget) for budget in BUDGETS)):
+            fields: dict[str, Any] = {
+                "chat_template_kwargs": {"enable_thinking": arm != "off"}, **BUDGET_SAMPLING,
+                "response_format": {"type": "json_schema", "json_schema": {"name": "reply", "strict": True,
+                                                                           "schema": schema}}}
+            if budget is not None:
+                fields["thinking_token_budget"] = budget
+            started = time.monotonic()
+            stream = await smoke.generate(smoke.body(messages, BUDGET_TOKENS, **fields))
+            numbers: dict[str, Any] = {"seconds": round(time.monotonic() - started, 1), "finish": stream.finish}
+            failed: list[str] = []
+            answer: list[str] = []
+            if stream.ok and stream.usage is not None:
+                content_tokens = await text_tokens(smoke, stream.content)
+                thought = stream.usage["completion_tokens"] - content_tokens
+                if content_tokens < 0 or thought < 0:
+                    failed.append("token_count")
+                else:
+                    numbers["thinking_tokens"] = thought
+                    unbounded = thought if arm == "full" else unbounded
+                if prompt == "puzzle" and not smoke.fake:
+                    numbers["right"] = solved(stream.content)
+            if budget is not None and "thinking_tokens" in numbers:
+                # The baseline must exceed the cap beyond the estimate's allowance to exercise enforcement.
+                numbers["bound"] = unbounded is not None and unbounded > budget + BUDGET_MARGIN
+                if numbers["thinking_tokens"] > budget + BUDGET_MARGIN:
+                    failed.append("within")
+                if stream.finish != "stop":
+                    failed.append("finish")  # an answer cut short cannot follow its schema
+                elif not smoke.fake:
+                    answer = answer_problems(stream.content, schema)
+            parts[f"{prompt}_{arm}"] = answered(stream, failed, answer) | numbers
+    bound_counts = {str(budget): sum(parts[f"{prompt}_{budget}"].get("bound", False) for prompt in prompts)
+                    for budget in BUDGETS}
+    result = combined(parts, bound_counts=bound_counts, enforcement="not_verifiable" if smoke.fake else "failed")
+    if not smoke.fake and result["ok"]:
+        if all(bound_counts[str(budget)] >= 2 for budget in (128, 300)):
+            result["enforcement"] = "observed"
+        else:
+            result.update(ok=False, enforcement="inconclusive", failed=["budget_not_bound"])
+    return result
+
+
+async def text_tokens(smoke: Smoke, text: str) -> int:
+    """A text's tokens: the count of a user message that holds it after COUNTED, less that of one with COUNTED alone."""
+    counts: list[int] = []
+    for content in (text, ""):
+        answer = await smoke.count(smoke.body([user(COUNTED + content)], 1))
+        data = answer.data if isinstance(answer.data, dict) else {}
+        if answer.status != 200 or not is_count(data.get("input_tokens")):
+            raise NoAnswer
+        counts.append(data["input_tokens"])
+    return counts[0] - counts[1]
+
+
+def solved(content: str) -> bool:
+    try:
+        return bool(json.loads(content) == SOLVED)
+    except (ValueError, RecursionError):
+        return False
+
+
 async def probe_counts(smoke: Smoke) -> dict[str, Any]:
     word = {"type": "json_schema", "json_schema": {"name": "word", "strict": True, "schema": WORD_SCHEMA}}
     pair = [system(SYSTEM), user(SHORT)]
@@ -869,7 +972,7 @@ async def probe_privacy(smoke: Smoke) -> dict[str, Any]:
 PROBES: dict[str, Callable[[Smoke], Awaitable[dict[str, Any]]]] = {
     "lifecycle": probe_lifecycle, "state": probe_state, "completion": probe_completion, "fields": probe_fields,
     "reasoning": probe_reasoning, "finish": probe_finish, "refusal": probe_refusal, "abort": probe_abort,
-    "schemas": probe_schemas, "counts": probe_counts, "privacy": probe_privacy,
+    "schemas": probe_schemas, "counts": probe_counts, "budget": probe_budget, "privacy": probe_privacy,
 }
 CHOSEN = tuple(name for name in PROBES if name != "lifecycle")  # what --only may name; --before and --after add it
 
@@ -1008,7 +1111,7 @@ async def smoke_run(args: argparse.Namespace, config: dict[str, Any], manifest: 
         smoke = Smoke(client, f"http://127.0.0.1:{args.public_port}", f"http://127.0.0.1:{args.control_port}",
                       config["client_key"], config["control_key"], manifest["MODEL_ALIAS"],
                       int(manifest["CONTEXT_TOKENS"]), args.fake, files, record,
-                      mtp=int(manifest["MTP_SPECULATIVE_TOKENS"]) > 0)
+                      mtp=int(manifest["MTP_SPECULATIVE_TOKENS"]) > 0, budget=int(manifest["THINKING_BUDGET"]) > 0)
         return await run(smoke, names)
 
 

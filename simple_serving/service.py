@@ -328,6 +328,16 @@ class Service(Lifecycle):
         if self.config.speculative and sampling.get("min_p", 0) > MIN_P_EPS and sampling.get("temperature", 1) != 0:
             raise ServiceError("min_p_unavailable")
 
+    def check_thinking_budget(self, caller: Caller, request: ChatRequest) -> None:
+        """Refuse unavailable or excessive budgets before counting or generation admission."""
+        budget = request.thinking_token_budget
+        if budget is None:
+            return
+        if not self.config.thinking_budget:
+            raise ServiceError("thinking_budget_unavailable")
+        if budget > self.config.limits[caller.cls].max_tokens:
+            raise ServiceError("invalid_request")
+
     def check_input(self, caller: Caller, input_tokens: int, max_tokens: int) -> None:
         limit = self.config.limits[caller.cls].input_tokens
         if limit is not None and input_tokens > limit:

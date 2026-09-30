@@ -208,6 +208,7 @@ class Generation(TextWork):
 
     async def run(self) -> None:
         record = self.exchange.record
+        record.thinking_budget = self.request.thinking_token_budget
         record.input_tokens = await self.count()
         self.service.check_input(self.caller, record.input_tokens, self.request.max_tokens)
         entered = time.monotonic()

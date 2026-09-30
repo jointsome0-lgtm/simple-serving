@@ -149,6 +149,7 @@ reads, chunked bodies included, and stops reading past the limit with 413 `body_
 | `seed`                 | integer                                          | optional                           |
 | `response_format`      | `{"type": "json_schema", "json_schema": {"name": string, "strict": boolean, "schema": object}}` | optional |
 | `chat_template_kwargs` | `{"enable_thinking": boolean}`                   | optional, default `false`          |
+| `thinking_token_budget` | integer from 0 to the class's `max_tokens`      | optional; only while the card turns the budget on, see below |
 
 Any other field, at any depth, is refused with 400 `unsupported_field`. The rule does not look inside `schema`, which
 the gateway passes on as it is. A value of the wrong type or out of range is refused with 400 `invalid_request`. So is
@@ -162,10 +163,26 @@ This follows the [pinned engine's sampling validation](https://github.com/vllm-p
 The launcher signals drafting through `versions.mtp_speculative_tokens` in the gateway configuration, as specified
 in section 12. Without that entry, the gateway passes valid `min_p` values through unchanged.
 
+`thinking_token_budget` requests a cap on reasoning tokens, counted from the opening marker `<|channel>`.
+The pinned engine's budget path forces the closing marker `<channel|>` when the budget is spent.
+`max_tokens` still limits reasoning and the answer together. With thinking off there is no reasoning to cap.
+
+The text launcher enables the gateway's field only with `THINKING_BUDGET=1`. It then supplies explicit Gemma 4
+markers through `--reasoning-config` and writes `"thinking_budget": "on"` among the versions in section 12.
+Without that entry, a generation with any valid budget receives 400 `thinking_budget_unavailable` before counting
+or admission. Noninteger and negative values, including booleans and null, receive `invalid_request` whether the
+feature is enabled or disabled. When enabled, the upper bound is the class's `max_tokens`, even when the request's
+output limit is smaller. Availability follows the `max_tokens` and MTP `min_p` checks.
+
+The committed switch is 0. The [validation procedure](thinking-budget.md) must still confirm actual enforcement,
+transition to an answer and structured output on Gemma 4 with MTP. Upstream documentation gives examples for other
+models, which do not establish this path's correctness.
+
 ### Before the stream starts
 
 The gateway checks, in this order: the route, the key, the service status, the class, the scope, the body (its size,
-then JSON, then the fields), `max_tokens` against the class limit, then the MTP `min_p` restriction.
+then JSON, then the fields), `max_tokens` against the class limit, the MTP `min_p` restriction, then
+`thinking_token_budget` availability and its class limit.
 Then it accepts the request, checking the service
 status once more, since a drain may have begun while the body was read. From acceptance on, the wall time and the
 measurements of section 11 run, and a drain sees the request as work (section 8). Before acceptance a fixed bound
@@ -454,6 +471,7 @@ body. FastAPI's default validation answer echoes the input, so it is replaced.
 | 400    | `limit_exceeded`                                  | input or `max_tokens` over the class limit   |
 | 400    | `context_limit`                                   | input plus `max_tokens` over the context     |
 | 400    | `min_p_unavailable`                               | MTP rejects this generation's `min_p`, section 4 |
+| 400    | `thinking_budget_unavailable`                     | a thinking budget while the feature is off, section 4 |
 | 401    | `unauthorized`                                    | no key or an unknown key                     |
 | 403    | `class_not_allowed`, `scope_not_allowed`          | the key may not use the class or the scope   |
 | 403    | `forbidden`                                       | a key without the control right on a control route, or without the metrics or the control right on a metrics route |
@@ -498,8 +516,8 @@ Cancellation:
   fixed category of failure or warning and a few numbers: load time, memory and KV cache capacity. The gateway's rows
   are checked again on the way to their file. Request and access logging, core dumps and usage statistics are off.
 - A log row may hold the time, route, key label, class, scope kind (`reader`, `agent`, `internal` or `external`, never
-  the opaque part), status, error code, token counts, the measurements of section 11, whether the request was
-  cancelled, and the finish reason.
+  the opaque part), status, error code, token counts, a generation's `thinking_token_budget` as a number, the
+  measurements of section 11, whether the request was cancelled, and the finish reason.
 - Cache scopes and salts are described in section 2. They close the timing channel between scopes. They do not limit
   memory.
 - Tests and load use synthetic stories only, never a real reader's story.
@@ -530,7 +548,8 @@ Before any contract run on the card, this repository pins:
 - FastAPI, Starlette, the ASGI server and the rest of the gateway, in `uv.lock`;
 - the model's files at one revision, each with its hash;
 - the revision of the tokenizer and the chat template;
-- the files of the drafter for speculative decoding at one revision, each with its hash, fetched only when it is on.
+- the files of the drafter for speculative decoding at one revision, each with its hash, fetched only when it is on;
+- whether vLLM holds a thought to a request's budget, `THINKING_BUDGET`, and the markers it then gets.
 
 `card/manifest.env` holds the card's pins and parameters. The card's preparation installs each lock into a venv of its
 own, checks every hash and runs `pip check`, once per rental and never at a resume. `/v1/state` shows the versions to
@@ -540,6 +559,10 @@ The text launcher's `versions.mtp_speculative_tokens` entry is a string matching
 decimal count of drafted tokens. The launcher includes it only when `MTP_SPECULATIVE_TOKENS > 0`.
 When drafting is off, omit the entry. Invalid values, including `"0"`, are configuration errors.
 This entry enables the gateway's MTP `min_p` check and its control-only `unavailable_fields` state.
+
+The text launcher's `versions.thinking_budget` entry is exactly `"on"` while request budgets are enabled.
+Omit it when disabled. Other values are configuration errors. The control key sees this entry; it does not add
+anything to `unavailable_fields`, which remains specific to the MTP `min_p` restriction.
 
 Configuration and keys live in simple-serving. The owner's machine keeps one private configuration of the command,
 with the owner's restricted Vast key, allowed GET and PUT on the chosen instance only, and gateway keys: a client

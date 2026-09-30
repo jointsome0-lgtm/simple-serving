@@ -54,6 +54,8 @@ def generation_payload(alias: str, request: ChatRequest, *, priority: int, cache
     }
     if request.response_format is not None:
         payload["response_format"] = request.response_format
+    if request.thinking_token_budget is not None:
+        payload["thinking_token_budget"] = request.thinking_token_budget
     return payload
 
 

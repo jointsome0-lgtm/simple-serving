@@ -33,6 +33,7 @@ CHAT_SHAPE: dict[str, Any] = {
     "seed": LEAF,
     "response_format": {"type": LEAF, "json_schema": {"name": LEAF, "strict": LEAF, "schema": SCHEMA}},
     "chat_template_kwargs": {"enable_thinking": LEAF},
+    "thinking_token_budget": LEAF,
 }
 
 
@@ -43,6 +44,7 @@ class ChatRequest:
     sampling: dict[str, int | float]  # the optional sampling fields the client sent
     response_format: dict[str, Any] | None
     enable_thinking: bool
+    thinking_token_budget: int | None  # the most tokens of the thought; the class limit is the service's to check
 
 
 def parse_json(raw: bytes) -> Any:
@@ -77,6 +79,7 @@ def check_chat(body: Any, alias: str) -> ChatRequest:
         sampling=_sampling(body),
         response_format=_response_format(body),
         enable_thinking=_enable_thinking(body),
+        thinking_token_budget=_thinking_token_budget(body),
     )
 
 
@@ -127,6 +130,14 @@ def _enable_thinking(body: dict[str, Any]) -> bool:
     thinking = value.get("enable_thinking", False)
     _require(isinstance(thinking, bool))
     return thinking
+
+
+def _thinking_token_budget(body: dict[str, Any]) -> int | None:
+    if "thinking_token_budget" not in body:
+        return None
+    budget = body["thinking_token_budget"]
+    _require(_is_integer(budget) and budget >= 0)
+    return budget
 
 
 def _control(body: Any, fields: tuple[str, ...]) -> list[Any]:

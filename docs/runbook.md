@@ -176,7 +176,9 @@ never the key:
 (2 000 000), `max_connections` (64), `idle_timeout_s` (780), `health_interval_s` (5) and `versions`, which the control
 key sees in `/v1/state` next to the gateway's own. For text, `versions.mtp_speculative_tokens` must be a positive
 decimal count string matching `[1-9][0-9]*`, or absent when drafting is off. The launcher writes it while MTP is on;
-it enables the early `min_p` refusal described below. An outside key has the classes `["external"]` and no scopes. To
+it enables the early `min_p` refusal described below. The text entry `versions.thinking_budget` is exactly `"on"`
+when request budgets are enabled, and absent when disabled. Other values are invalid. An outside key has the
+classes `["external"]` and no scopes. To
 hash a key without printing it:
 
 ```
@@ -267,6 +269,13 @@ rental measures it ([speed.md](speed.md), item 5). It is switched as the drafter
 again and a new start, and `/v1/state` then names its size among the versions.
 
 What else might make the card faster, not measured yet, is in [speed.md](speed.md).
+
+`THINKING_BUDGET=0` in the text manifest keeps per-request reasoning budgets disabled. A valid
+`thinking_token_budget` then receives 400 `thinking_budget_unavailable` before counting or admission. At 1, the
+launcher supplies explicit Gemma 4 markers through `--reasoning-config`, and the gateway passes a nonnegative
+integer budget up to the class's output limit. This flag does not apply to the picture lane.
+The [budget procedure](thinking-budget.md) describes the pending Gemma 4 and MTP GPU check and the later activation
+decision. Local fake checks establish routing and validation, without demonstrating engine enforcement.
 
 At every later start of the container the rental's own onstart starts the service. Its last line runs the service's
 `onstart.sh` from the persistent disk, once the preparation has put it there:
@@ -372,6 +381,7 @@ The probes run in this order, each within a time bound of its own, and the first
   its schema. With MTP enabled in the manifest, the `min_p` value of 0.05 must instead return 400
   `min_p_unavailable`. Beside them, two answers with one seed at temperature 0.8 are compared by hash,
   an observation that passes nothing.
+  A budget of 64 must return `thinking_budget_unavailable` while the manifest leaves budgets disabled.
 - `reasoning`: thinking on gives reasoning and an answer, thinking off an answer alone.
 - `finish`: `length` after exactly 8 tokens, and `stop`.
 - `refusal`: a schema whose `pattern` does not compile is 400 `invalid_request`, before any stream. The comment at
@@ -387,6 +397,10 @@ The probes run in this order, each within a time bound of its own, and the first
 - `counts`: the count matrix. For plain text, a system and a user turn, system, user, assistant and user turns, a
   schema, thinking on, thinking off, and a prompt just below the context, found by counting: the count, then a
   generation of a few tokens, whose `usage.prompt_tokens` must equal the count.
+- `budget`: when disabled, checks the early refusal. When enabled, compares thinking off, an unbudgeted baseline
+  and budgets of 128, 300 and 1024 across three synthetic prompts. A real pass requires valid capped answers and
+  baselines that exercise 128 and 300 on at least two prompts each. It has a 900-second deadline; an unexercised cap
+  makes enforcement inconclusive and fails the smoke. With `--fake`, enforcement remains `not_verifiable`.
 - `privacy`: one completion whose prompt holds a fresh random marker, which no file in the card's `logs/` may hold:
   the gateway's rows, the launcher's rows with what it keeps of vLLM's output, the older file beside each, and
   anything else there. The probe counts the marker in each and prints only the counts. One occurrence fails it, and
@@ -395,7 +409,8 @@ The probes run in this order, each within a time bound of its own, and the first
   whatever vLLM prints, nothing of a request may reach a log. The cache-scope half is not needed for this trial, which
   has one internal client.
 
-A probe of parts stops at its first part that fails. On a card that works the whole smoke should take minutes; its
+A probe of parts stops at its first part that fails, except `budget`, which collects each arm within its deadline.
+On a card that works the whole smoke should take minutes; its
 bounds add up to just over an hour. It prints one JSON object per probe, read as "The first rental" below says, and
 ends with 0 when every probe passed, 1 at the first that failed, and 2 when it could not run, before it sent anything.
 Not verified on the card: an engine error in the middle of a stream, which the smoke cannot bring about. The gateway's

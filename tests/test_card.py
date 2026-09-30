@@ -30,6 +30,7 @@ import pytest
 from simple_serving import card
 from simple_serving.card import Card
 from simple_serving.config import load as load_config
+from simple_serving.pictures.card import PictureCard
 from simple_serving.vast import RETRY_S, VastError
 
 from .support import FakeClock, FakeVast, until
@@ -136,7 +137,7 @@ async def test_a_signal_ends_the_pair_and_leaves_the_instance_running(state: Pat
     assert {"CONTAINER_ID", "CONTAINER_API_KEY", "SIMPLE_SERVING_CONFIG"} <= set(gateway["env"])
 
 
-def test_multi_token_prediction_adds_the_drafter_to_vllm_and_the_pins_only_when_on(state: Path) -> None:
+def test_mtp_and_thinking_budget_reach_vllm_and_the_pins_only_when_on(state: Path) -> None:
     off, on = card_at(state, MTP_SPECULATIVE_TOKENS="0"), card_at(state)
     assert on.manifest["MTP_SPECULATIVE_TOKENS"] == "3"  # on by default since the owner's choice of 2026-09-26
     assert "--speculative-config" not in off.engine().argv
@@ -145,6 +146,14 @@ def test_multi_token_prediction_adds_the_drafter_to_vllm_and_the_pins_only_when_
                                 f'{{"method": "mtp", "model": "{drafter}", "num_speculative_tokens": 3}}']
     assert card.pinned_versions(on.manifest) == card.pinned_versions(off.manifest) | {
         "drafter_revision": on.manifest["DRAFTER_REVISION"], "mtp_speculative_tokens": "3"}
+    assert on.manifest["THINKING_BUDGET"] == "0"
+    assert "--reasoning-config" not in on.engine().argv and "thinking_budget" not in card.pinned_versions(on.manifest)
+    budget = card_at(state, THINKING_BUDGET="1")
+    assert budget.engine().argv == [*on.engine().argv, "--reasoning-config",
+                                   '{"reasoning_start_str": "<|channel>", "reasoning_end_str": "<channel|>"}']
+    assert card.pinned_versions(budget.manifest) == card.pinned_versions(on.manifest) | {"thinking_budget": "on"}
+    argv = budget.engine().argv
+    assert argv[argv.index("--prefix-cache-retention-interval") + 1] == "None"
 
 
 def test_the_kv_cache_copy_in_ram_is_off_by_default_and_reaches_vllm_and_the_pins_only_when_on(state: Path) -> None:
@@ -559,6 +568,36 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     (state / "keys.json").unlink()  # a card prepared anew takes the three at once
     assert bootstrap(f"{keys}{METRICS}\n") == 0
     assert json.loads((state / "keys.json").read_text()) == three
+
+    # The text switch changes only the text preparation stamp. Pictures need no thinking-budget manifest field.
+    picture_folder, picture_state = code / PictureCard.folder, tmp_path / "picture-state"
+    picture_folder.mkdir(parents=True)
+    picture_state.mkdir()
+    for name in PictureCard.stamped:
+        shutil.copy(card.CODE / PictureCard.folder / name, picture_folder / name)
+    (picture_state / "keys.json").write_text(json.dumps(three))
+    picture_stamp = hashlib.sha256(b"".join((picture_folder / name).read_bytes() for name in PictureCard.stamped))
+    (picture_state / "prepared").write_text(picture_stamp.hexdigest() + "\n")
+    pictures = PictureCard.load(code=code, state=picture_state, environ=environ, root=root)
+    assert "THINKING_BUDGET" not in pictures.manifest
+    assert "--reasoning-config" not in pictures.engine().argv and "thinking_budget" not in pictures.config()["versions"]
+    assert pictures.prepared()
+    manifest_path = code / "card/manifest.env"
+    base = manifest_path.read_text()
+    before_calls, before_prepared = calls.read_bytes(), (state / "prepared").read_bytes()
+    for value in (None, "", "2", "01", "-1", "on"):
+        changed = base.replace("THINKING_BUDGET=0\n", "") if value is None else base + f"THINKING_BUDGET={value}\n"
+        manifest_path.write_text(changed)
+        assert bootstrap("") == 3
+        assert calls.read_bytes() == before_calls and (state / "prepared").read_bytes() == before_prepared
+        assert json.loads((state / "keys.json").read_text()) == three and pictures.prepared()
+    for value in ("1", "0"):
+        manifest_path.write_text(base + f"THINKING_BUDGET={value}\n")
+        loaded = Card.load(code=code, state=state, environ=environ, root=root)
+        assert not loaded.prepared() and pictures.prepared()
+        assert bootstrap("") == 0 and loaded.prepared() and pictures.prepared()
+        assert loaded.config()["versions"].get("thinking_budget") == ("on" if value == "1" else None)
+        assert json.loads((state / "keys.json").read_text()) == three
 
 
 def test_the_metrics_key_reads_the_metrics_and_has_no_other_right(state: Path) -> None:

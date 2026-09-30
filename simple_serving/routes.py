@@ -49,6 +49,7 @@ async def _inference(service: Service, exchange: Exchange, kind: type[Generation
             if kind is Generation:
                 service.check_max_tokens(caller, request)
                 service.check_min_p(request)
+                service.check_thinking_budget(caller, request)
             work = kind(service, exchange, caller, request)
             service.accept(work)  # a drain that began while the body was read refuses it here
         except ServiceError as error:

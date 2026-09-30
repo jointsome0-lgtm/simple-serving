@@ -26,13 +26,15 @@ The monitoring from `9413d16` is also integrated for both lanes. These are code-
 GPU results.
 The dense prefix retention change from `940471a` is now integrated in the text launcher, with its historical
 comparison recorded in [speed](speed.md#dense-prefix-retention).
+The thinking budget from `466a82d` is also integrated, with the text manifest switch still 0. Its
+[validation procedure](thinking-budget.md) separates local checks from pending GPU enforcement and quality work.
 
 ## Branch work and integration status
 
 | Branch | Tip | Contribution and verdict |
 |--------|-----|--------------------------|
 | `live-2026-09-28` | `940471a` | Dense prefix retention is integrated in the text launcher. The branch is retained as the source of that change; its history adds no remaining feature. A new GPU comparison is pending. |
-| `thinking-budget` | `466a82d` | Includes `8672e62`. Implements an optional thinking-token budget. Needs integration checks, then a GPU smoke before activation. |
+| `thinking-budget` | `466a82d` | Optional thinking-token budgets are integrated and disabled by default. The source branch remains retained, with no unintegrated feature. GPU enforcement and quality evaluation are pending. |
 | `vision-captions` | `47d71ae` | Includes `8672e62`. Implements image input for Gemma, key permissions, launcher/bootstrap and a vision smoke. Needs shared configuration and launcher adaptation, then GPU validation. |
 | `held-criterion` | `a898060` | Includes throughput and fixes its cache-capacity stopping criterion. Workload and metric-selection ideas are reused in the new interference client; its A/B launcher remains separate. The revised criterion needs a GPU measurement. |
 | `sweep` | `b6d4919` | Separate sweep against an already running engine, with a deadline and overlap checks. Independent of the A/B harness; keep it identifiable as an experiment. |
@@ -65,18 +67,20 @@ and text rows remain text-only. The [catalog and setup](metrics.md) describe the
 
 ### Thinking budget and vision
 
-Thinking budget uses `thinking_token_budget` and `--reasoning-config`; the branch contains no vLLM patch.
+The integrated thinking budget uses `thinking_token_budget` and `--reasoning-config`, without a vLLM patch.
 It is off by default. Noninteger or negative values give `invalid_request`; a valid number while disabled gives
 `thinking_budget_unavailable`. When enabled, the upper bound is the class's `max_tokens`, not the request's.
 Counting checks type and sign, but not feature availability or the class bound. The historical fake reply used
-only 11 thinking tokens, so it did not demonstrate enforcement of the proposed 128/300 budgets.
+only 11 thinking tokens, so it did not demonstrate enforcement of the proposed 128/300 budgets. The current smoke
+labels fake enforcement `not_verifiable` and rejects a real check whose baselines do not exercise both caps.
 
 Vision adds a manifest flag, `VISION=0` by default, and a per-key permission. It accepts one PNG/JPEG/WebP data URL
 up to 1 MiB.
 `PictureCard.config()` calls the common `Card.keys()`. Do not make a text-only `VISION` flag mandatory for picture
 manifests. The common key parser also needs a deliberate picture-lane policy for the new permission.
-Budget and vision are functionally independent after the shared text fix. Both need regressions of the text and
-picture configuration/lifecycle. Vision's synthetic color/count/privacy smoke does not prove GPU tower capacity,
+Budget and vision are functionally independent after the shared text fix. Budget's local checks cover the current
+text and picture configuration/lifecycle. Vision still needs that adaptation. Its synthetic color/count/privacy
+smoke does not prove GPU tower capacity,
 real captions, token counts or MTP throughput.
 
 ### Measurement tools
@@ -122,7 +126,8 @@ the rehearsal's JSON whitespace ban was subsequently removed. Its E2B model pin 
    up monitoring for the cards.
 4. Carry over `held-criterion` with its dry run and an explicit serving-restoration procedure. The retention
    setting is integrated; measure its current benefit separately from carrying over the tooling.
-5. Integrate budget and vision as separate optional changes, with real GPU checks before enabling them.
+5. Budget is integrated but disabled. Check it on a GPU before activation; integrate vision as a separate optional
+   change with its own GPU checks.
 6. Keep the two-card design and split-KV work separate until their first implemented checks exist.
 
 ## Finding the work

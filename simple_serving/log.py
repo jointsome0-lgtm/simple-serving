@@ -28,7 +28,7 @@ FIELDS = frozenset({
     "input_tokens", "output_tokens", "cached_tokens", "count_matches", "wait_ms", "first_token_ms", "total_ms",
     "exception", "boot_id", "service_status", "drain_generation", "context_tokens", "port", "reason",
     "process", "exit_code", "load_ms", "weights_mib", "weights_load_ms", "kv_cache_mib", "kv_cache_tokens",
-    "concurrency_x100",
+    "concurrency_x100", "thinking_budget",
     # The picture lane's.
     "lane", "nodes", "images", "image_bytes", "upload_bytes", "references", "queue_ms", "draw_ms", "partial_loads",
     "oom", "stop_confirmed", "socket", "jobs", "grace_s", "file_cap_s", "history_cap_s", "files", "failed_files",
@@ -53,6 +53,7 @@ class RequestRecord:
     finish: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    thinking_budget: int | None = None  # the accepted request's budget, never a label
     cached_tokens: int | None = None
     count_matches: bool | None = None  # the engine's prompt_tokens equals the gateway's count
     wait_ms: int | None = None

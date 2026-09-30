@@ -151,3 +151,27 @@ catalog check skipped. The existing launcher test now checks the argument receiv
 Independent review found no remaining blocker. No card was started or restarted and no new GPU measurement was
 made. The setting takes effect when the text engine next starts from this checkout; its current performance gain
 still needs a controlled comparison. The source branch remains retained, with no remaining unintegrated feature.
+
+## Thinking budget integration, 2026-09-30
+
+The owner accepted the optional thinking budget from `466a82d`. It is adapted to the current text `Service`,
+shared card helpers and monitoring. `THINKING_BUDGET=0` remains committed. A valid budget while disabled receives
+400 `thinking_budget_unavailable` before counting or admission. When enabled, a nonnegative integer up to the
+class's output limit reaches vLLM unchanged. Counting validates type and sign without requiring the feature or
+enforcing the generation's budget bound. The error catalog and rejected metrics include the new refusal code;
+logs retain the accepted budget as a number.
+
+The shared check command passed on Python 3.12 and 3.14: ruff, mypy and all 337 tests, with the same optional source
+catalog check skipped. Existing launcher tests cover off/on arguments and pins, dense retention, bootstrap
+validation, preserved metrics keys and picture preparation independence. The gateway matrix covers boundary
+values, invalid types, counting, refusal order and actual rejection metrics. The smoke tests cover enabled and
+disabled fake routes plus bounded scripted enforcement decisions, stream failures and privacy.
+
+The new `budget` smoke checks a real engine only when unbudgeted baselines exercise the 128 and 300 caps on at
+least two prompts each. Otherwise it fails inconclusively. Fake routing checks explicitly leave enforcement
+`not_verifiable`. Its reasoning-token estimate uses separately counted answer tokens and an allowance of 8;
+it is not an exact reasoning-token counter. Independent review found no remaining blocker.
+
+No GPU run or activation occurred. Gemma 4 with MTP still needs a real enforcement and structured-output check;
+quality needs a separate evaluation. The [procedure](thinking-budget.md) retains the dated source plan and updates
+its commands for the integrated checkout. The source branch remains retained, with no unintegrated feature.
