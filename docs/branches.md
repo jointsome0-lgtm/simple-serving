@@ -1,9 +1,10 @@
 # Existing branches, 2026-09-30
 
-This inventory compares the 19 local branches with `codex/comfyui-integration` at `c23c282`.
-It records where the existing work lives and what an integration would need. The review inspected Git ancestry,
-patch identity, source, tests and documents. It ran no tests, engines or rentals. Historical checks below are
-evidence from the branches, not a fresh verification of their combined behavior.
+The inventory began with 19 local branches, compared with `codex/comfyui-integration` at `c23c282`.
+After removing seven redundant branch names, 12 remain. This document records the remaining work, integration
+constraints and the retired names. The review inspected Git ancestry, patch identity, source, tests and documents.
+It ran no tests, engines or rentals. Historical checks below are evidence from the branches, not a fresh
+verification of their combined behavior.
 
 ## The current code
 
@@ -11,15 +12,8 @@ evidence from the branches, not a fresh verification of their combined behavior.
 cleanup fixes from `abcbabf`, and the shared check command. The bot's picture provider switch remains off by
 default. The [picture card test](pictures.md#the-card-test) is still pending.
 
-Five branch tips are already ancestors of this code. They need no separate integration:
-
-| Branch | Tip | Existing contribution |
-|--------|-----|-----------------------|
-| `main` | `7a60fc7` | Earlier text gateway baseline |
-| `first-rental-smoke` | `d2e8184` | First-rental smoke and trial procedure |
-| `mtp` | `5c9cd5e` | Multi-token prediction |
-| `phase2` | `f3031ea` | Text serving and optional RAM KV offloading |
-| `pictures` | `7fdd58f` | Picture lane, now followed by the cleanup fixes |
+`main` at `7a60fc7` remains as the earlier text baseline, with its `origin/main` upstream. The first-rental smoke,
+MTP, phase 2 and picture implementations are already in the current history; their old local names were removed.
 
 The remaining branches are below. A candidate for integration still needs its changes applied to the current
 interfaces and checked. A branch's tests passing before the picture lane existed would not establish that.
@@ -28,13 +22,11 @@ interfaces and checked. A branch's tests passing before the picture lane existed
 
 | Branch | Tip | Contribution and verdict |
 |--------|-----|--------------------------|
-| `next-card`, `mtp-min-p` | `8672e62` | Two names for the same commit. Early `min_p_unavailable` refusal under MTP. First candidate for local integration. |
+| `next-card` | `8672e62` | Early `min_p_unavailable` refusal under MTP. First candidate for local integration. The duplicate name `mtp-min-p` was removed. |
 | `live-2026-09-28` | `940471a` | Includes `8672e62`, then adds dense prefix retention to the text launcher. Review the default change separately. |
-| `monitoring` | `b0b0703` | Gateway and engine metrics, Prometheus and Grafana. Already contained in `next-card-metrics`. |
 | `next-card-metrics` | `9413d16` | Combines monitoring with `8672e62`, pins monitoring images and supports history outside the checkout via `MONITORING_DATA`. Needs adaptation to the picture lane. |
 | `thinking-budget` | `466a82d` | Includes `8672e62`. Implements an optional thinking-token budget. Needs integration checks, then a GPU smoke before activation. |
 | `vision-captions` | `47d71ae` | Includes `8672e62`. Implements image input for Gemma, key permissions, launcher/bootstrap and a vision smoke. Needs shared configuration and launcher adaptation, then GPU validation. |
-| `throughput` | `a03a62b` | A/B launcher, workloads, identity checks, microbenchmarks, timing sweep, reports and historical measurements. Contained in `held-criterion`. |
 | `held-criterion` | `a898060` | Includes throughput and fixes its cache-capacity stopping criterion. Best candidate for integrating that tooling. The revised criterion needs a GPU measurement. |
 | `sweep` | `b6d4919` | Separate sweep against an already running engine, with a deadline and overlap checks. Independent of the A/B harness; keep it identifiable as an experiment. |
 | `split-kv-wip` | `bd0503e` | Split-KV plugin files on an older throughput base. The launcher does not register the change. Unfinished. |
@@ -120,11 +112,10 @@ the rehearsal's JSON whitespace ban was subsequently removed. Its E2B model pin 
 
 ## Finding the work
 
-The main checkout is `~/work/simple-serving`. Other clean worktrees observed during this inventory are:
+The main checkout is `~/work/simple-serving`. The remaining clean worktrees are:
 
 | Location | Branch |
 |----------|--------|
-| `~/work/simple-serving-pictures` | `pictures` |
 | `~/work/simple-serving-two-cards` | `pictures-two-cards` |
 | `~/work/simple-serving-vision` | `vision-captions` |
 | `/var/tmp/simple-serving-next` | `next-card` |
@@ -132,6 +123,27 @@ The main checkout is `~/work/simple-serving`. Other clean worktrees observed dur
 | `/var/tmp/simple-serving-metrics` | `next-card-metrics` |
 | `/var/tmp/simple-serving-budget` | `thinking-budget` |
 | `/var/tmp/simple-serving-held` | `held-criterion` |
+
+## Removed duplicates
+
+The following local names were removed on 2026-09-30. Each tip is still reachable through the branch listed here;
+their history was also saved in a verified Git bundle before cleanup. Remote refs were retained.
+
+| Removed name | Tip | History retained in |
+|--------------|-----|---------------------|
+| `first-rental-smoke` | `d2e8184` | `codex/comfyui-integration` |
+| `mtp` | `5c9cd5e` | `codex/comfyui-integration` |
+| `phase2` | `f3031ea` | `codex/comfyui-integration` |
+| `pictures` | `7fdd58f` | `codex/comfyui-integration` |
+| `mtp-min-p` | `8672e62` | `next-card`, the exact same commit |
+| `monitoring` | `b0b0703` | `next-card-metrics` |
+| `throughput` | `a03a62b` | `held-criterion` |
+
+The clean `~/work/simple-serving-pictures` checkout was removed with its reproducible Python environment and
+caches. Its code is in the current branch. One stale registration for a missing scratch checkout was pruned.
+The saved cleanup stash was preserved.
+
+## Reading a remaining branch
 
 The refs also work from the main checkout without switching it:
 
