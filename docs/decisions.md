@@ -96,3 +96,22 @@ ruff, mypy and all 285 tests. The added matrix checks MTP on and off, greedy sam
 the class-limit order, count behavior and no engine calls for refused requests. The privacy test covers the new
 error code, and the synthetic smoke expects it under MTP. Independent review found no blocking issue.
 These are local checks against fake engines. The real card checks remain pending.
+
+## Monitoring integration, 2026-09-30
+
+The monitoring from `9413d16` is adapted to the current text and picture gateways. Both control listeners serve
+shared request and lifecycle metrics. Text retains its token, timing and admission metrics and the vLLM relay;
+pictures report aggregate jobs, class limits and unresolved stops. Request labels use fixed route templates.
+The metrics key reads metrics without control or inference rights, and older two-key installations still work.
+The CLI export refuses paths that would overwrite the configuration or either writer's temporary file.
+
+Prometheus separates the two gateway jobs and the text engine. Picture scraping is opt-in. Shared Grafana panels
+select a lane; text queue and engine panels remain scoped to text. History may stay outside the checkout.
+The setup and metric catalog are in [metrics](metrics.md).
+
+The shared check command passed on Python 3.12 and 3.14: ruff, mypy and 328 tests, with one optional vLLM source
+catalog check skipped because no source checkout was supplied. Picture scenarios cover permissions, private route
+parts, cancellation, unresolved stops, class capacity, drain and idle expiry despite scrapes. The pinned Prometheus
+image's `promtool check config` validated the configuration and all 11 rules without networking, using synthetic
+secret files. A final dashboard correction passed the catalog and selector checks again. Independent review found
+no remaining blocker. Grafana rendering, live scrapes and real GPU behavior were not checked in this integration.

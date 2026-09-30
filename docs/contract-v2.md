@@ -17,7 +17,8 @@ so the number changes.
 - One text model behind a gateway on one rented card. The gateway is FastAPI, run as one worker process in version 2,
   because the drain state, the idle interval, the quotas and the boot identity live in its memory. The engine is
   vLLM.
-- Clients reach only the gateway. The engine, its metrics and its own API listen on loopback.
+- Clients reach only the gateway. The engine, its metrics and its own API listen on loopback; the gateway relays the
+  engine's metrics on its control listener (section 3).
 - Version 2 is streamed text chat. There are no tools, images, audio, logprobs, LoRA adapters, `n > 1` or answers
   without streaming.
 - The clients call the API with a key: simple-story-chat for readers' turns, its agent interface, our eval and probes,
@@ -33,7 +34,8 @@ so the number changes.
 Every request carries `Authorization: Bearer <key>`, on loopback too. The gateway's configuration maps each key to:
 - a label, which logs show instead of the key;
 - the classes it may use and its default class;
-- whether it may name cache scopes.
+- whether it may name cache scopes;
+- whether it may call the control routes, or read the metrics routes alone (section 3).
 
 Outside keys are issued by hand in version 2. There is no sign-up.
 
@@ -99,16 +101,26 @@ requests runs (section 8).
 | `/v1/control/drain`                     | POST   | the control key  | control          |
 | `/v1/control/sleep`                     | POST   | the control key  | control          |
 | `/v1/control/open`                      | POST   | the control key  | control          |
+| `/metrics`                              | GET    | the metrics key, the control key | control |
+| `/metrics/engine`                       | GET    | the metrics key, the control key | control |
 
 The gateway has two listeners, both on loopback on the card: public on 8090, control on 8091. Our clients reach them
 through one SSH tunnel that simple-serving's command holds (section 8), local port 8080 to the public listener and 8081
-to the control one. The control listener is for that command; the bot holds no control key. Outside keys will reach
-the public listener over HTTPS through a TLS proxy on the card, which also connects from loopback, so the gateway
-tells the listeners apart by the listener, never by the client's address. The gateway starts only when the control
-listener and the engine are on loopback IP addresses, 127.0.0.0/8 or ::1; a name, even `localhost`, is refused. On
-each listener any other path or method is 404 `not_found`, and so is a path with a trailing slash: the gateway does
-not redirect. A key without the control right gets 403 `forbidden` on a control route. A control body is at most 4096
-bytes; a longer one is refused with 413 `body_too_large`.
+to the control one. The control listener is for that command and for the monitoring on the owner's machine; the bot
+holds neither the control key nor the metrics key. Outside keys will reach the public listener over HTTPS through a TLS
+proxy on the card, which also connects from loopback, so the gateway tells the listeners apart by the listener, never by
+the client's address. The gateway starts only when the control listener and the engine are on loopback IP addresses,
+127.0.0.0/8 or ::1; a name, even `localhost`, is refused. On each listener any other path or method is 404 `not_found`,
+and so is a path with a trailing slash: the gateway does not redirect. A key without the control right gets 403
+`forbidden` on a control route, and so does a key with neither the metrics right nor the control right on a metrics
+route. A control body is at most 4096 bytes; a longer one is refused with 413 `body_too_large`.
+
+The metrics routes serve the gateway's own metrics and the engine's, in Prometheus's text format. The gateway reads the
+engine's from its `/metrics` on loopback and passes them on as they came; when the engine does not give them within
+5 seconds and 8 MB, the answer is 503 `engine_unavailable`. The names, labels, outcomes and meanings of the gateway's
+own are in [metrics.md](metrics.md), and any gateway of this contract serves them alike. The metrics key reads them
+and, like any known key, may read models and state. It uses no class, names no scope and calls no control route. Prometheus on the owner's
+machine holds it (section 12).
 
 When the public listener handles a request, the gateway counts the connections open on it. Past 64 (provisional, see
 section 7) it answers 429 `queue_full` and closes the connection. That is a check on each request, not a cap on TCP
@@ -314,9 +326,9 @@ itself; a client that finds it asleep gets connection errors, or 503 while it fa
 
 - A request of class `reader`, `agent` or `internal` holds the card from the moment its key, class and scope have
   passed their checks, before its body is read, until it has ended, whether it was accepted, refused or cancelled.
-- Nothing else holds it: not outside requests, `/v1/models`, `/v1/state`, the control routes, the engine's health
-  checks, a request refused before its class is known, or an open tunnel. Nor does a turn between its calls, or a job
-  that waits in a client and has not reached the service.
+- Nothing else holds it: not outside requests, `/v1/models`, `/v1/state`, the control routes, the metrics routes, the
+  engine's health checks, a request refused before its class is known, or an open tunnel. Nor does a turn between its
+  calls, or a job that waits in a client and has not reached the service.
 - `idle_timeout_s` is 780 seconds by default. The interval starts when the service is first `ready` in its boot, and
   runs again in full from the end of the last request of ours. While a request of ours runs, the service does not
   fall asleep.
@@ -384,8 +396,8 @@ owner's restricted Vast key (section 12) and never the card's, which Vast refuse
 - `status` tells the instance's state in Vast apart from what the gateway answers, through the same kind of forward.
   Of an answer it prints only the statuses and codes of this contract, counts, and whether the contract and the model
   are the expected ones.
-- `keys` makes the client key and the control key once, and prints only the SHA-256 of each, which the card's
-  preparation reads (section 12).
+- `keys` makes the client key, the control key and the metrics key once, and prints only the SHA-256 of each, which
+  the card's preparation reads (section 12). It may also write the metrics key alone into a file, for Prometheus.
 - `trial`, on a trial rental, reads the card's instance id over SSH from the file the card's `onstart.sh` keeps,
   checks its form, and writes it with the SSH host into the configuration, keeping the owner's key there. It prints
   neither.
@@ -444,7 +456,7 @@ body. FastAPI's default validation answer echoes the input, so it is replaced.
 | 400    | `min_p_unavailable`                               | MTP rejects this generation's `min_p`, section 4 |
 | 401    | `unauthorized`                                    | no key or an unknown key                     |
 | 403    | `class_not_allowed`, `scope_not_allowed`          | the key may not use the class or the scope   |
-| 403    | `forbidden`                                       | a key without the control right on a control route |
+| 403    | `forbidden`                                       | a key without the control right on a control route, or without the metrics or the control right on a metrics route |
 | 404    | `not_found`                                       | a path or method outside section 3           |
 | 409    | `stale_boot`, `stale_generation`, `sleep_pending` | control calls, section 8                     |
 | 413    | `body_too_large`                                  | a body over 2 000 000 bytes, a control body over 4096 bytes |
@@ -479,6 +491,9 @@ Cancellation:
 - No log, trace, error report or metric label holds a request or response body. That means no messages, no system
   prompt, no output and no schema. The rule covers the gateway, the web server and the engine, and the engine's
   request logging stays off.
+- A metric's labels come from fixed sets alone ([metrics.md](metrics.md)): the listener, a route of section 3, the
+  class, the outcome, a code of section 9 and a status. None holds a key, a key's label, a scope, a request's id or
+  anything of a body. The engine's metrics, relayed as they came, hold counts, times and the engine's configuration.
 - On the card nothing of vLLM's own output is kept. A bounded filter reads it to the end and keeps the exit code, a
   fixed category of failure or warning and a few numbers: load time, memory and KV cache capacity. The gateway's rows
   are checked again on the way to their file. Request and access logging, core dumps and usage statistics are off.
@@ -501,6 +516,13 @@ The gateway measures in whole milliseconds, counting from the moment it accepted
 These are the gateway's own numbers, not llama.cpp's timings. The engine's queue and preemption are inside
 `first_token_ms` and `total_ms`. The numbers arrive in `usage.simple_serving`.
 
+A log row holds each of them only for a step the request reached, and `total_ms` however it ended. The gateway's
+metrics observe the same moments as histograms, and split the wait in three: the wait for a count place, the count,
+and the wait for a generation place. A step is observed only when it is reached, so a request cancelled before its
+first token adds no first token, and a total is observed only for a stream that ended well ([metrics.md](metrics.md)).
+They are the gateway's times, not a reader's: a reader also waits for the client's own work, the tunnel and the
+upload of the body before acceptance, and for the way back after the gateway's event.
+
 ## 12. Pinned versions, configuration and keys
 
 Before any contract run on the card, this repository pins:
@@ -520,12 +542,13 @@ When drafting is off, omit the entry. Invalid values, including `"0"`, are confi
 This entry enables the gateway's MTP `min_p` check and its control-only `unavailable_fields` state.
 
 Configuration and keys live in simple-serving. The owner's machine keeps one private configuration of the command,
-with the owner's restricted Vast key, allowed GET and PUT on the chosen instance only, and two gateway keys: a
-client key and a control key. The card's own container key cannot stand in for the restricted key: Vast refuses it
+with the owner's restricted Vast key, allowed GET and PUT on the chosen instance only, and gateway keys: a client
+key, a control key and an optional metrics key. The card's own container key cannot stand in for the restricted
+key: Vast refuses it
 from outside the card ([decision record](decisions.md#text-serving), 2026-09-25, as measured). The card gets only the
-SHA-256 of each gateway key, once, through the stdin of SSH during the preparation. The owner copies the client key
-and the address into the bot's
-model profile, so simple-story-chat holds neither a Vast key nor the control key. The bot, its agent interface, eval
+SHA-256 of each gateway key through stdin during preparation. A later preparation can add the optional metrics
+key to an existing two-key installation. Until then, the control key can scrape metrics. The owner copies the
+client key and the address into the bot's model profile, so simple-story-chat holds no Vast key, control key or metrics key. The bot, its agent interface, eval
 and the probes share the client key for now; their classes still differ (section 2).
 
 ## 13. What changes in simple-story-chat

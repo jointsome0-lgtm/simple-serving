@@ -91,6 +91,13 @@ class Exchange:
         await self._send({"type": "http.response.start", "status": status, "headers": []})
         await self._send({"type": "http.response.body", "body": b"", "more_body": False})
 
+    async def send_text(self, status: int, body: bytes, content_type: str) -> None:
+        self.started = self.ending = True
+        await self._send({"type": "http.response.start", "status": status,
+                          "headers": [(b"content-type", content_type.encode("latin-1")),
+                                      (b"content-length", str(len(body)).encode())]})
+        await self._send({"type": "http.response.body", "body": body, "more_body": False})
+
     async def send_error(self, code: str) -> None:
         """An error of section 9: a plain HTTP error before the stream started, the error event after it. Nothing is
         sent once the terminal message has begun."""

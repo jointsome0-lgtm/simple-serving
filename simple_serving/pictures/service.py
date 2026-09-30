@@ -16,6 +16,7 @@ from .. import CONTRACT, log, vast
 from ..config import CLASSES
 from ..errors import ServiceError
 from ..inference import Work
+from ..metrics import PictureMetrics
 from ..policy import Caller
 from ..service import PINNED_PACKAGES, Lifecycle
 from . import LANE
@@ -53,6 +54,7 @@ class Unresolved:
 
 
 class PictureService(Lifecycle):
+    metrics_type = PictureMetrics
     config: PictureConfig
     pinned_packages = (*PINNED_PACKAGES, "websockets")
 

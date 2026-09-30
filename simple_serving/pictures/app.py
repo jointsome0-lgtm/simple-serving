@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from .. import routes as shared
-from ..app import CONTROL_ROUTES, Guard, _application
+from ..app import LIFECYCLE_ROUTES, Guard, _application
 from . import routes
 from .service import PictureService
 
@@ -23,9 +23,9 @@ PUBLIC_ROUTES: list[tuple[str, str, Any]] = [
 
 
 def public_app(service: PictureService) -> Guard:
-    return Guard(_application(service, PUBLIC_ROUTES), "public", PUBLIC_ROUTES,
+    return Guard(_application(service, PUBLIC_ROUTES), "public", PUBLIC_ROUTES, service.metrics,
                  max_connections=service.config.max_connections)
 
 
 def control_app(service: PictureService) -> Guard:
-    return Guard(_application(service, CONTROL_ROUTES), "control", CONTROL_ROUTES)
+    return Guard(_application(service, LIFECYCLE_ROUTES), "control", LIFECYCLE_ROUTES, service.metrics)

@@ -22,6 +22,7 @@ from .asgi import Exchange
 from .config import Config, Key
 from .engine import EngineClient, generation_payload
 from .errors import ServiceError
+from .metrics import Metrics, TextMetrics
 from .policy import CLASS_HEADER, SCOPE_HEADER, Caller, cache_salt, find_key, resolve
 from .validation import ChatRequest
 
@@ -62,6 +63,7 @@ class Lifecycle:
     """The boot, status, drain, sleep and work of a lane's service. A lane watches its engine in `_watch_engine`."""
 
     pinned_packages: tuple[str, ...] = PINNED_PACKAGES
+    metrics_type: type[Metrics] = Metrics
 
     def __init__(self, config: LaneConfig, stop: vast.Stop) -> None:
         self.config = config
@@ -72,6 +74,7 @@ class Lifecycle:
         self.sleep_requested = False  # once set it stays: the instance is being stopped
         self.engine_status = "starting"  # then "ready", and "failed" while checks fail or once the engine has changed
         self._engine_changed = False
+        self.metrics = self.metrics_type()
         self.work: set[Work] = set()  # accepted work that has not answered yet
         self.ours_inflight = 0  # requests of ours between their authorization and their end, accepted or not
         self.idle_since = 0.0  # the event loop's time when the last of them ended, or of the first ready
@@ -300,6 +303,7 @@ class Lifecycle:
 class Service(Lifecycle):
     """The text lane's service: vLLM behind contract v2."""
 
+    metrics_type = TextMetrics
     config: Config
 
     def __init__(self, config: Config, engine: EngineClient, stop: vast.Stop) -> None:

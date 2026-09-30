@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The picture card's preparation (docs/pictures.md, section 9), once per rental and never at a resume, as
-# card/bootstrap.sh is the text card's. Run it over SSH with the SHA-256 of the client key and of the control key on
-# stdin, one per line, or with nothing once the card holds them. The keys are the text lane's two:
+# card/bootstrap.sh is the text card's. Run it over SSH with the SHA-256 of the client, control and optional metrics keys on
+# stdin, one per line, or with nothing once the card holds them. The keys are shared with the text lane:
 #
 #   uv run python -m simple_serving.cli keys | ssh <card> bash /workspace/simple-serving/card/pictures/bootstrap.sh
 #
@@ -16,7 +16,7 @@
 # onstart.sh for the first start. At every later start simple-story-chat's gpu/trial-onstart.sh runs onstart.sh.
 # A second run changes nothing that is in place, and no run prints a hash. Exit codes: 0 prepared and started; 1
 # image-bootstrap.sh failed, or left no whole install; 3 a parameter, a lock or a copy is missing or not SOURCE's; 4 no
-# keys, or not two different SHA-256 digests; 5 the card holds other keys, which stay. The last step is the launcher's
+# keys, or not two or three different SHA-256 digests; 5 the card holds other keys, which stay. The last step is the launcher's
 # start, with its own codes (simple_serving/card.py). SIMPLE_SERVING_PICTURES_CARD_DIR and SIMPLE_SERVING_CARD_ROOT
 # move the state and /root, for tests.
 set -euo pipefail
@@ -43,10 +43,21 @@ mkdir -p "$state"
 
 read -r client || true
 read -r control || true
-if [[ -n $client$control ]]; then
+read -r metrics || true
+if [[ -n $client$control$metrics ]]; then
   [[ $client =~ ^[0-9a-f]{64}$ && $control =~ ^[0-9a-f]{64}$ && $client != "$control" ]] || exit 4
-  keys="{\"client\": \"$client\", \"control\": \"$control\"}"
-  [[ -e $state/keys.json ]] || printf '%s\n' "$keys" > "$state/keys.json"
+  pair="{\"client\": \"$client\", \"control\": \"$control\"}"
+  keys=$pair
+  if [[ -n $metrics ]]; then  # the metrics key reads the metrics alone (README, "Monitoring")
+    [[ $metrics =~ ^[0-9a-f]{64}$ && $metrics != "$client" && $metrics != "$control" ]] || exit 4
+    keys="{\"client\": \"$client\", \"control\": \"$control\", \"metrics\": \"$metrics\"}"
+  fi
+  # Written when the card holds no keys, or the same two keys without the metrics key; never over other keys. The
+  # new file takes the old one's place in one step.
+  if [[ ! -e $state/keys.json ]] || [[ $keys != "$pair" && $(< "$state/keys.json") == "$pair" ]]; then
+    printf '%s\n' "$keys" > "$state/keys.json.new"
+    mv -f "$state/keys.json.new" "$state/keys.json"
+  fi
   [[ $(< "$state/keys.json") == "$keys" ]] || exit 5
 fi
 [[ -s $state/keys.json ]] || exit 4

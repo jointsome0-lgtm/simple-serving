@@ -74,6 +74,7 @@ from .service import PINNED_PACKAGES
 
 CHAT, COUNT = "/v1/chat/completions", "/v1/chat/completions/input_tokens"
 HEADERS = {"X-Simple-Serving-Class": "internal"}  # without a scope header, the class's own cache scope
+KEYS = ("client_key", "control_key")  # of the command's configuration; the metrics key is Prometheus's alone
 # Each probe's time bound on the card, generous: the first requests after a start may wait for kernels to compile.
 BOUND_S = {"lifecycle": 60, "state": 30, "completion": 300, "fields": 600, "reasoning": 300, "finish": 180,
            "refusal": 120, "abort": 120, "schemas": 900, "counts": 900, "privacy": 120}
@@ -967,7 +968,7 @@ def main(argv: list[str] | None = None) -> int:
             raise cli.Refusal(f"--fake reads the card's files from --card-dir alone, and {', '.join(reading)} "
                               "read them")
         config = cli.read_config(args.config)
-        if missing := [name for name in cli.KEYS if not isinstance(config.get(name), str) or not config[name]]:
+        if missing := [name for name in KEYS if not isinstance(config.get(name), str) or not config[name]]:
             raise cli.Refusal(f"{args.config} has no {', '.join(missing)}")
         host = config.get("ssh_host")
         if reading and args.card_dir is None and not (isinstance(host, str) and cli.SSH_HOST.fullmatch(host)):

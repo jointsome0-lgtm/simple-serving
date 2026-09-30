@@ -1,0 +1,125 @@
+# Alert rules for the card's gateway and engine (README, "Monitoring"). Prometheus evaluates them and shows them at
+# http://127.0.0.1:9090/alerts and in the overview's first row; no notifier is set up. They read the names of
+# docs/metrics.md alone.
+#
+# Not alerts: a card that is not rented or not reached (no samples, `up` 0), a start (status starting, requests
+# refused with `starting`), a planned drain or sleep (status draining or drained, outcome draining, sleep_requested),
+# and requests that the gateway's own shutdown cut (outcome unavailable with code none). The thresholds are
+# provisional until the card has served readers.
+
+groups:
+  - name: unavailability
+    rules:
+      - alert: ServiceFailed
+        expr: max by (lane) (simple_serving_status{job=~"gateway_text|gateway_pictures",status="failed"}) == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: The gateway reports its service as failed.
+          description: >-
+            /v1/state says failed: the engine failed its start or its health checks, and new model work
+            is refused with engine_unavailable. The card stays paid for until it is stopped.
+      - alert: RefusedEngineUnavailable
+        expr: sum by (lane) (increase(simple_serving_requests_total{job=~"gateway_text|gateway_pictures",outcome="unavailable", code="engine_unavailable"}[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Requests were refused because the engine was unavailable.
+          description: >-
+            In the last 15 minutes the gateway refused model work before accepting it, with
+            engine_unavailable: the service had failed when they came, even if a scrape did not see it.
+      - alert: EngineMetricsMissing
+        expr: (max by (lane) (simple_serving_status{job="gateway_text",status="ready"}) == 1) and on(lane) (max by (lane) (up{job="engine_text"}) == 0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The gateway is ready, yet vLLM's metrics have not come for 5 minutes.
+          description: >-
+            /metrics/engine answers 503 or does not answer while the gateway serves: vLLM's /metrics failed, took
+            more than 5 s or was larger than 8 MB. The engine's panels are empty meanwhile.
+
+  - name: errors
+    rules:
+      - alert: EngineErrors
+        expr: sum by (lane) (increase(simple_serving_requests_total{job=~"gateway_text|gateway_pictures",outcome="engine_error"}[15m])) >= 2
+        labels:
+          severity: critical
+        annotations:
+          summary: The engine failed accepted requests more than once in 15 minutes.
+          description: >-
+            Accepted operations failed at the engine, including picture failures or unconfirmed stops.
+            A stream failure after HTTP 200 is still an engine error.
+      - alert: Timeouts
+        expr: sum by (lane) (increase(simple_serving_requests_total{job=~"gateway_text|gateway_pictures",outcome="timeout"}[30m])) >= 2
+        labels:
+          severity: warning
+        annotations:
+          summary: Accepted requests reached their wall time more than once in 30 minutes.
+          description: >-
+            Accepted operations reached their lane and class wall-time limit while waiting or answering.
+      - alert: InternalErrors
+        expr: sum by (lane) (increase(simple_serving_requests_total{job=~"gateway_text|gateway_pictures",outcome="internal_error"}[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: The gateway failed a request with internal_error.
+          description: The gateway's log names the exception's class in the request's row.
+
+  - name: reader-waits
+    rules:
+      - alert: ReadersQueued
+        expr: sum(simple_serving_generations_waiting{job="gateway_text",class="reader"}) > 0
+        for: 5m
+        labels:
+          lane: text
+          severity: warning
+        annotations:
+          summary: Text readers' generations have waited in the gateway for a place for 5 minutes on end.
+          description: >-
+            Every reader place is taken and readers queue in the gateway's own queue, not vLLM's. A drain empties
+            the queue, so this is not a planned stop.
+      - alert: ReadersRefusedQueueFull
+        expr: sum by (lane) (increase(simple_serving_requests_total{job=~"gateway_text|gateway_pictures",class="reader", code="queue_full"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Readers were refused with queue_full.
+          description: >-
+            The lane's reader admission or held-job cap was full, so the gateway answered 429.
+      - alert: ReaderWaitLong
+        expr: >-
+          (histogram_quantile(0.9, sum by (le) (rate(simple_serving_wait_seconds_bucket{job="gateway_text",class="reader"}[15m]))) > 10)
+          and on() (sum(increase(simple_serving_wait_seconds_count{job="gateway_text",class="reader"}[15m])) >= 5)
+        labels:
+          lane: text
+          severity: warning
+        annotations:
+          summary: Text readers' generations waited over 10 s in the gateway, at the 90th percentile of 15 minutes.
+          description: >-
+            The gateway's wait from acceptance to a generation place, the count included, over at least 5 readers'
+            generations. It is the gateway's time: the reader waits longer.
+      - alert: ReaderFirstTokenLong
+        expr: >-
+          (histogram_quantile(0.9, sum by (le)
+          (rate(simple_serving_time_to_first_token_seconds_bucket{job="gateway_text",class="reader"}[15m]))) > 30)
+          and on() (sum(increase(simple_serving_time_to_first_token_seconds_count{job="gateway_text",class="reader"}[15m])) >= 5)
+        labels:
+          lane: text
+          severity: warning
+        annotations:
+          summary: Readers' first tokens took over 30 s, at the 90th percentile of 15 minutes.
+          description: >-
+            The gateway's time from acceptance to the first token from vLLM, reasoning included, over at least 5
+            readers' first tokens. The reader sees the first words later.
+
+  - name: pictures
+    rules:
+      - alert: PictureStopUnconfirmed
+        expr: sum by (lane) (simple_serving_picture_stops_unresolved{job="gateway_pictures"}) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: A picture stop remains unconfirmed.
+          description: The gateway still holds a job whose engine stop has not been confirmed.

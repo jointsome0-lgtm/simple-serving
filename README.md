@@ -19,6 +19,7 @@ Outside-client and unattended operation still have open validation and budget wo
 ## Documentation
 
 - [Runbook](docs/runbook.md): development, gateway configuration, card preparation, CLI, smoke and trial procedure.
+- [Monitoring](docs/metrics.md): both gateways, the text engine, dashboards and local setup.
 - [Text contract v2](docs/contract-v2.md): text API, limits, lifecycle and privacy guarantees.
 - [Picture contract and migration](docs/pictures.md): picture API, card procedure, phases and rollback.
 - [Shared cases](contract/README.md): the case format used by the gateway and client adapters.
@@ -112,6 +113,15 @@ if [[ -f /workspace/simple-serving/card/onstart.sh ]]; then bash /workspace/simp
 For the picture card, use `uv run python -m simple_serving.cli --lane pictures up`, `sleep`, `status` or
 `trial --ssh-host HOST`. It has its own instance, tunnel ports and lock. See the
 [picture CLI instructions](docs/runbook.md#the-command) and [card test and rollback](docs/pictures.md#the-card-test).
+
+## Monitoring
+
+Both control listeners expose authenticated `/metrics`. The text listener also relays vLLM at `/metrics/engine`;
+the picture listener has no engine relay. Prometheus and Grafana run on the owner's machine with pinned images,
+through the existing tunnels. Scrapes neither generate work nor keep a card awake.
+
+The [setup and metric catalog](docs/metrics.md#local-setup) cover keys, the optional picture target and persistent
+history. Local tests use fake engines; dashboard deployment and real-card monitoring need their own verification.
 
 ## The first rental
 

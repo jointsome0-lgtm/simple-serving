@@ -1,0 +1,62 @@
+# Local control tunnels. Text uses 8081, pictures 8085. See docs/metrics.md#local-setup.
+# No tunnel means a down target, not an alert. Picture scraping is opt-in: populate its empty targets list.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+rule_files:
+  - rules.yml
+
+scrape_configs:
+  - job_name: gateway_text
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_key
+    scrape_protocols: [PrometheusText0.0.4]
+    fallback_scrape_protocol: PrometheusText0.0.4
+    static_configs:
+      - targets: ["127.0.0.1:8081"]
+        labels:
+          lane: text
+
+  - job_name: gateway_pictures
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/picture_metrics_key
+    scrape_protocols: [PrometheusText0.0.4]
+    fallback_scrape_protocol: PrometheusText0.0.4
+    static_configs:
+      - targets: []  # Set to ["127.0.0.1:8085"] after preparing the picture metrics key.
+        labels:
+          lane: pictures
+
+  - job_name: engine_text
+    metrics_path: /metrics/engine
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_key
+    scrape_protocols: [PrometheusText0.0.4]
+    fallback_scrape_protocol: PrometheusText0.0.4
+    static_configs:
+      - targets: ["127.0.0.1:8081"]
+        labels:
+          lane: text
+
+  # OPTIONAL, and off: node_exporter and nvidia_gpu_exporter on the card, for the overview's machine row. Nothing
+  # installs them yet, and `cli up` forwards neither port (docs/metrics.md, on the exporters). Once both run on
+  # the card's loopback and the tunnel forwards them to these ports, remove the leading "# ".
+  #
+  # - job_name: node
+  #   static_configs:
+  #     - targets: ["127.0.0.1:9100"]
+  #       labels:
+  #         optional: "true"
+  #
+  # - job_name: gpu
+  #   static_configs:
+  #     - targets: ["127.0.0.1:9835"]
+  #       labels:
+  #         optional: "true"

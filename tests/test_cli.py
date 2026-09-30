@@ -178,7 +178,7 @@ def test_keys_are_made_once_and_only_their_hashes_are_printed(tmp_path: Path,
     printed = capsys.readouterr()
     config = json.loads(path.read_text())
     hashes = [hashlib.sha256(config[name].encode()).hexdigest() for name in cli.KEYS]
-    assert printed.out.split() == hashes and hashes[0] != hashes[1]  # what bootstrap.sh reads on its stdin
+    assert printed.out.split() == hashes and len(set(hashes)) == 3  # what bootstrap.sh reads on its stdin
     assert not any(config[name] in printed.out + printed.err for name in cli.KEYS)
     assert (stat.S_IMODE(path.stat().st_mode), stat.S_IMODE(path.parent.stat().st_mode)) == (0o600, 0o700)
     before = path.read_bytes()
@@ -197,6 +197,32 @@ def test_keys_keep_what_the_file_holds_and_it_stays_the_owners(tmp_path: Path,
     path.chmod(0o640)
     assert cli.main(["--config", str(path), "keys"]) == 1
     assert "open to its owner only" in capsys.readouterr().err
+
+
+def test_keys_write_the_metrics_key_alone_for_prometheus_and_never_print_it(tmp_path: Path,
+                                                                            capsys: pytest.CaptureFixture[str]) -> None:
+    path, secret = tmp_path / "config.json", tmp_path / "monitoring/secrets/metrics-key"
+    assert cli.main(["--config", str(path), "keys", "--metrics-file", str(secret)]) == 0
+    config, printed = json.loads(path.read_text()), capsys.readouterr()
+    assert secret.read_text() == config["metrics_key"] and config["metrics_key"] not in printed.out + printed.err
+    assert (stat.S_IMODE(secret.stat().st_mode), stat.S_IMODE(secret.parent.stat().st_mode)) == (0o600, 0o700)
+    assert cli.main(["--config", str(path), "keys", "--metrics-file", str(secret)]) == 0  # again: the same key
+    assert secret.read_text() == config["metrics_key"] and json.loads(path.read_text()) == config
+    with pytest.raises(SystemExit):
+        cli.main(["--config", str(path), "status", "--metrics-file", str(secret)])
+    # Export may not replace the config or collide with either writer's temporary file.
+    before = path.read_bytes()
+    for output in (path, path.with_name(path.name + ".new")):
+        assert cli.main(["--config", str(path), "keys", "--metrics-file", str(output)]) == 1
+        assert path.read_bytes() == before
+    nested = path.with_name(path.name + ".new")
+    nested.write_bytes(before)
+    assert cli.main(["--config", str(nested), "keys", "--metrics-file", str(path)]) == 1
+    assert nested.read_bytes() == path.read_bytes() == before
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    assert cli.main(["--config", str(path), "keys", "--metrics-file", str(alias / path.name)]) == 1
+    assert path.read_bytes() == before
 
 
 def test_the_configuration_names_the_instance_its_key_and_the_host(tmp_path: Path) -> None:

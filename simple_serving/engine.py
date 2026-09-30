@@ -1,13 +1,14 @@
 """A thin client of vLLM's OpenAI-compatible server, which listens on loopback.
 
-It uses GET /health, GET /v1/models, POST /tokenize and POST /v1/chat/completions with streaming. Answers are read
-tolerantly, because field names move between vLLM versions; the exact version is pinned on the card. An engine
-failure becomes an `EngineError` with a code of section 9 and nothing else: the engine's own error text may quote
-the prompt, so it is never read.
+It uses GET /health, GET /v1/models, POST /tokenize and POST /v1/chat/completions with streaming, and GET /metrics for
+the control listener's relay. Answers are read tolerantly, because field names move between vLLM versions; the exact
+version is pinned on the card. An engine failure becomes an `EngineError` with a code of section 9 and nothing else:
+the engine's own error text may quote the prompt, so it is never read.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -20,6 +21,8 @@ from .validation import ChatRequest
 CONNECT_TIMEOUT_S = 5.0
 HEALTH_TIMEOUT_S = 10.0
 MAX_LINE_BYTES = 1_000_000  # far above any event of a text chunk
+METRICS_TIMEOUT_S = 5.0  # below Prometheus's scrape timeout of 10 s
+METRICS_LIMIT_BYTES = 8_000_000  # vLLM's exposition is some hundreds of kilobytes
 # No read timeout for counts and generations: a long prompt takes long to read, and the class's wall time bounds both.
 UNBOUNDED = httpx.Timeout(None, connect=CONNECT_TIMEOUT_S)
 
@@ -116,6 +119,26 @@ class EngineClient:
                     raise EngineError("engine_unavailable")
                 return length
         return None
+
+    async def metrics(self) -> tuple[bytes, str]:
+        """The engine's own /metrics in the text format 0.0.4, with its content type, read within METRICS_TIMEOUT_S
+        and up to METRICS_LIMIT_BYTES. It is passed on as it came: vLLM's metrics hold counts, times and its
+        configuration, never a request."""
+        headers = {"accept": "text/plain; version=0.0.4", "accept-encoding": "identity"}
+        try:
+            async with asyncio.timeout(METRICS_TIMEOUT_S), self._client.stream("GET", "/metrics",
+                                                                               headers=headers) as response:
+                content_type = response.headers.get("content-type", "")
+                if response.status_code != 200 or not content_type.startswith("text/plain"):
+                    raise EngineError("engine_unavailable")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body += chunk
+                    if len(body) > METRICS_LIMIT_BYTES:
+                        raise EngineError("engine_unavailable")
+        except (httpx.HTTPError, TimeoutError):
+            raise EngineError("engine_unavailable") from None
+        return bytes(body), content_type
 
     async def count(self, alias: str, request: ChatRequest) -> int:
         answer = _object(await self._json("POST", "/tokenize", tokenize_payload(alias, request), UNBOUNDED))

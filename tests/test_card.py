@@ -29,6 +29,7 @@ import pytest
 
 from simple_serving import card
 from simple_serving.card import Card
+from simple_serving.config import load as load_config
 from simple_serving.vast import RETRY_S, VastError
 
 from .support import FakeClock, FakeVast, until
@@ -36,7 +37,9 @@ from .support import FakeClock, FakeVast, until
 ENGINE, GATEWAY = "vllm/bin/vllm", "gateway/bin/python"
 SECRET = "synthetic-secret-7f3a9c"  # stands in for a prompt, which no log may hold
 CREDENTIAL = {"CONTAINER_ID": "1234", "CONTAINER_API_KEY": "synthetic-container-key"}
-CLIENT, CONTROL = (hashlib.sha256(key).hexdigest() for key in (b"synthetic-client-key", b"synthetic-control-key"))
+CLIENT, CONTROL, METRICS = (hashlib.sha256(key).hexdigest() for key in (b"synthetic-client-key",
+                                                                          b"synthetic-control-key",
+                                                                          b"synthetic-metrics-key"))
 READY = json.dumps({"time": "2026-09-24T12:00:00.000Z", "event": "engine", "service_status": "ready",
                     "context_tokens": 65536})
 SLEEP = json.dumps({"time": "2026-09-24T12:13:00.000Z", "event": "sleep", "reason": "idle"})
@@ -490,7 +493,7 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     def bootstrap(stdin: str) -> int:
         done = subprocess.run(["bash", str(code / "card/bootstrap.sh")], input=stdin, env=environ, capture_output=True,
                               text=True, timeout=60, check=False)
-        assert CLIENT not in done.stdout + done.stderr and CONTROL not in done.stdout + done.stderr
+        assert not any(digest in done.stdout + done.stderr for digest in (CLIENT, CONTROL, METRICS))
         return done.returncode
 
     keys = f"{CLIENT}\n{CONTROL}\n"
@@ -540,6 +543,32 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     assert all("--require-hashes --only-binary :all:" in line for line in noted if line.startswith("pip install"))
     assert noted.count("pip check") == 6  # both venvs at each preparation
     assert Card.load(code=code, state=state, environ=environ, root=root).prepared()
+    # The metrics key: a card that holds the first two keys alone takes it beside them, and then keeps all three.
+    other = hashlib.sha256(b"other").hexdigest()
+    for wrong in (CONTROL, CLIENT, "not-a-digest"):
+        assert bootstrap(f"{keys}{wrong}\n") == 4
+    assert bootstrap(f"{keys}{METRICS}\n") == 0
+    three = {"client": CLIENT, "control": CONTROL, "metrics": METRICS}
+    assert json.loads((state / "keys.json").read_text()) == three
+    assert (state / "keys.json").stat().st_mode & 0o777 == 0o600
+    assert bootstrap(keys) == 5  # the card holds other keys now, which stay
+    assert bootstrap(f"{keys}{other}\n") == 5
+    assert bootstrap(f"{keys}{METRICS}\n") == 0 and bootstrap("") == 0
+    assert json.loads((state / "keys.json").read_text()) == three and not (state / "keys.json.new").exists()
+    (state / "keys.json").unlink()  # a card prepared anew takes the three at once
+    assert bootstrap(f"{keys}{METRICS}\n") == 0
+    assert json.loads((state / "keys.json").read_text()) == three
+
+
+def test_the_metrics_key_reads_the_metrics_and_has_no_other_right(state: Path) -> None:
+    (state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL, "metrics": METRICS}))
+    (state / "gateway.json").write_text(json.dumps(card_at(state).config()))
+    keys = {key.label: key for key in load_config(str(state / "gateway.json")).keys}
+    assert (keys["metrics"].metrics, keys["metrics"].control, keys["metrics"].classes, keys["metrics"].scopes) == (
+        True, False, frozenset(), False)
+    assert not keys["client"].metrics and keys["control"].control
+    (state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL}))  # prepared before it
+    assert [key["label"] for key in card_at(state).config()["keys"]] == ["client", "control"]
 
 
 def test_bootstrap_fetches_the_pinned_drafter_with_mtp_on_and_keeps_a_file_only_with_its_hash(tmp_path: Path) -> None:

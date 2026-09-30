@@ -1,0 +1,85 @@
+# Prometheus and Grafana on the owner's machine, for the card's gateway and engine (README, "Monitoring").
+#
+# Both listen on 127.0.0.1 alone and use the host's network, since the tunnel of `cli up` listens on 127.0.0.1:8081
+# and nowhere else. History stays in ./data, which the owner creates and git ignores, or in the directory that
+# MONITORING_DATA names, which outlives the checkout. Rootless podman, whose root in the container is the owner:
+#
+#   METRICS_KEY_FILE=$HOME/.config/simple-serving/metrics.key MONITORING_USER=0:0 podman compose up -d
+#
+# Docker, as the owner's own user:
+#
+#   METRICS_KEY_FILE=$HOME/.config/simple-serving/metrics.key MONITORING_USER="$(id -u):$(id -g)" docker compose up -d
+#
+# Each image is pinned by the digest of its tag's index as the registry gave it on 2026-09-29: Prometheus 3.13.3,
+# the latest patch of 3.13, Prometheus's long-term release of 2026, and Grafana 12.4.11, the latest patch of 12.4,
+# the last minor of the major the dashboards were written for, which Grafana still patched that month. A new version
+# is a new tag with the digest the registry gives for it (README, "Monitoring").
+
+name: simple-serving-monitoring
+
+services:
+  prometheus:
+    image: docker.io/prom/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7
+    user: "${MONITORING_USER:?set MONITORING_USER, 0:0 under rootless podman or your uid:gid under docker}"
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=10y
+      - --storage.tsdb.retention.size=20GB
+      - --web.listen-address=127.0.0.1:9090
+    volumes:
+      - type: bind
+        source: ./prometheus
+        target: /etc/prometheus
+        read_only: true
+      - type: bind
+        source: ${MONITORING_DATA:-./data}/prometheus
+        target: /prometheus
+        bind:
+          create_host_path: false
+    secrets:
+      - metrics_key
+      - picture_metrics_key
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  grafana:
+    image: docker.io/grafana/grafana:12.4.11@sha256:3ea272e5cab64a4a62240c682e2c62433b25614d956d44c299a10cb6994f6f2e
+    user: "${MONITORING_USER:?set MONITORING_USER, 0:0 under rootless podman or your uid:gid under docker}"
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: "127.0.0.1"
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"  # a viewer without a login, on loopback; editing needs the admin login
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"  # nothing is fetched from grafana.com at the start
+    volumes:
+      - type: bind
+        source: ./grafana/provisioning
+        target: /etc/grafana/provisioning
+        read_only: true
+      - type: bind
+        source: ./grafana/dashboards
+        target: /etc/grafana/dashboards
+        read_only: true
+      - type: bind
+        source: ${MONITORING_DATA:-./data}/grafana
+        target: /var/lib/grafana
+        bind:
+          create_host_path: false
+    depends_on: [prometheus]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+secrets:
+  metrics_key:
+    file: "${METRICS_KEY_FILE:?set METRICS_KEY_FILE to the file that cli keys --metrics-file wrote}"
+  picture_metrics_key:
+    file: "${PICTURE_METRICS_KEY_FILE:-${METRICS_KEY_FILE}}"

@@ -185,7 +185,7 @@ class Card:
 
     def config(self) -> dict[str, Any]:
         """The gateway's configuration: the provisional limits, the manifest's model and ports, and the hashes of the
-        two keys."""
+        keys."""
         m = self.manifest
         return PROVISIONAL | {
             "alias": m["MODEL_ALIAS"],
@@ -200,13 +200,15 @@ class Card:
         return {name: {"host": "127.0.0.1", "port": self.ports[name]} for name in ("public", "control")}
 
     def keys(self) -> list[dict[str, Any]]:
-        """The gateway's two keys, by the hashes that the preparation keeps."""
+        """The gateway's client, control and optional metrics keys, by the hashes that the preparation keeps."""
         keys = json.loads((self.state / "keys.json").read_text())
         return [
             {"sha256": keys["client"], "label": "client", "classes": ["reader", "agent", "internal"],
              "default": "internal", "scopes": True, "control": False},
             {"sha256": keys["control"], "label": "control", "classes": [], "default": None, "scopes": False,
              "control": True},
+            *([{"sha256": keys["metrics"], "label": "metrics", "classes": [], "default": None, "scopes": False,
+                "control": False, "metrics": True}] if "metrics" in keys else []),
         ]
 
     def pair(self) -> Pair:

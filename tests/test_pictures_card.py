@@ -30,7 +30,7 @@ from simple_serving.pictures import config as pictures_config
 from simple_serving.pictures.card import COPIES, LOCK, SETTINGS, PictureCard, PicturePair
 
 from .support import FakeVast, until
-from .test_card import CLIENT, CONTROL, CREDENTIAL, SECRET, exits, ran, recorder, rows, stand_in
+from .test_card import CLIENT, CONTROL, CREDENTIAL, METRICS, SECRET, exits, ran, recorder, rows, stand_in
 from .test_dev import free_ports
 
 HERE = card.CODE / "card/pictures"
@@ -251,6 +251,12 @@ def test_the_picture_gateways_configuration_is_the_manifests_and_the_pins_and_lo
                                      "qwen_revision": pins["IMAGE_QWEN_REVISION"], "scripts_commit": commit}
     assert [key.label for key in loaded.keys] == ["client", "control"]
     assert loaded.keys[0].digest == bytes.fromhex(CLIENT) and loaded.reader_nodes == set(pictures_config.READER_NODES)
+    (ready.state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL, "metrics": METRICS}))
+    path.write_text(json.dumps(ready.config()))
+    loaded = pictures_config.load(str(path))
+    metric_key = loaded.keys[-1]
+    assert (metric_key.label, metric_key.digest, metric_key.metrics, metric_key.control, metric_key.classes) == (
+        "metrics", bytes.fromhex(METRICS), True, False, frozenset())
 
 
 def test_bootstrap_checks_the_copies_adopts_a_whole_install_and_changes_nothing_when_it_runs_again(
@@ -278,7 +284,7 @@ def test_bootstrap_checks_the_copies_adopts_a_whole_install_and_changes_nothing_
     def run(script: str, stdin: str = "") -> int:
         done = subprocess.run(["bash", str(here / script)], input=stdin, env=environ, capture_output=True, text=True,
                               timeout=60, check=False)
-        assert CLIENT not in done.stdout + done.stderr and CONTROL not in done.stdout + done.stderr
+        assert not any(digest in done.stdout + done.stderr for digest in (CLIENT, CONTROL, METRICS))
         return done.returncode
 
     def installs() -> int:
@@ -319,3 +325,13 @@ def test_bootstrap_checks_the_copies_adopts_a_whole_install_and_changes_nothing_
     installed = [line for line in noted if line.startswith("pip install")]
     assert installed and all("--require-hashes --only-binary :all:" in line and line.endswith(
         "card/pictures/gateway-requirements.txt") for line in installed)
+    # Preparing a previously two-key card with the optional metrics key preserves its original rights.
+    for wrong in (CLIENT, CONTROL, "not-a-digest"):
+        assert run("bootstrap.sh", f"{keys}{wrong}\n") == 4
+    assert run("bootstrap.sh", f"{keys}{METRICS}\n") == 0 and installs() == 3
+    three = {"client": CLIENT, "control": CONTROL, "metrics": METRICS}
+    assert json.loads((state / "keys.json").read_text()) == three
+    assert run("bootstrap.sh", f"{keys}{METRICS}\n") == 0 and run("bootstrap.sh") == 0
+    assert run("bootstrap.sh", keys) == 5  # no downgrade or replacement of installed keys
+    assert (state / "keys.json").stat().st_mode & 0o777 == 0o600
+    assert json.loads((state / "keys.json").read_text()) == three
