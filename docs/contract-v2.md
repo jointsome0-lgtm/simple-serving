@@ -538,9 +538,10 @@ Cancellation:
 - A metric's labels come from fixed sets alone ([metrics.md](metrics.md)): the listener, a route of section 3, the
   class, the outcome, a code of section 9 and a status. None holds a key, a key's label, a scope, a request's id or
   anything of a body. The engine's metrics, relayed as they came, hold counts, times and the engine's configuration.
-- On the card nothing of vLLM's own output is kept. A bounded filter reads it to the end and keeps the exit code, a
-  fixed category of failure or warning and a few numbers: load time, memory and KV cache capacity. The gateway's rows
-  are checked again on the way to their file. Request and access logging, core dumps and usage statistics are off.
+- On the card no raw vLLM output is kept. A bounded filter reads it to the end and keeps the exit code, a
+  fixed category of failure or warning, fixed engine-choice codes and a few numbers: load time, memory, KV cache
+  capacity and recognised startup configuration. The gateway's rows are checked again on the way to their file.
+  Request and access logging, core dumps and usage statistics are off.
 - A log row may hold the time, route, key label, class, scope kind (`reader`, `agent`, `internal` or `external`, never
   the opaque part), status, error code, token counts, a generation's `thinking_token_budget` as a number, the
   measurements of section 11, whether the request was cancelled, and the finish reason.

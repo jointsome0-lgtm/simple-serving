@@ -235,3 +235,31 @@ No GPU, rental, real story or owner configuration is used for the integration. R
 The shared check passes on Python 3.12.3 and 3.14.7: Ruff, mypy on 66 source files, and 353 tests with one optional
 source-catalog skip. The port adds three cohesive sweep tests. A standalone `--plan --cache-tokens 100000` invocation
 also emits 24 level rows and a final capacity summary without card files or vLLM.
+
+## Engine-choice diagnostic integration, 2026-09-30
+
+The owner accepted the standalone diagnostic from `held-criterion`, source `63baef9`. The text launcher's filtered
+startup log gains `engine_choice` rows with fixed vocabulary and numeric fields. The port does not include the
+A/B launcher or its in-memory history and does not alter engine configuration or lifecycle. The picture launcher
+retains its ComfyUI filter.
+
+Non-default arguments describe requested configuration. Kernel and attention selection messages record the
+corresponding decisions; missing messages establish nothing. FlashInfer selections are per KV-cache group,
+offload-spec logging precedes construction, and CUDA graph completion is separate from serving readiness.
+The [runbook](runbook.md#engine-choices) records how to interpret these rows.
+
+The port uses bounded structural parsing for selected arguments, without evaluation or searches inside arbitrary
+quoted values. Unknown words become `other`; malformed or unsupported representations and extreme numeric values
+are ignored. Paths, credentials and request content are excluded from the diagnostic.
+
+The primary-source check uses vLLM 0.30.0's [linear-kernel selector](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/model_executor/kernels/linear/__init__.py),
+[CUDA attention selection](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/platforms/cuda.py),
+[runner selection](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/worker/gpu_worker.py),
+[graph capture](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/worker/gpu_model_runner.py),
+[offload-spec creation](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/kv_offload/factory.py) and
+[FlashInfer group selection](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/attention/backends/flashinfer.py).
+
+The shared check passes on Python 3.12.3 and 3.14.7: Ruff, mypy on 66 source files, and 354 tests with one optional
+source-catalog skip. One cohesive diagnostic test is added, with malformed-number coverage in the existing filter
+test. It checks fixed vocabulary, privacy markers, wrong field ancestry and Unicode aliases. No GPU, rental,
+real data or owner configuration is used; matching actual card output remains pending.

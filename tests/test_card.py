@@ -257,6 +257,10 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
                                                                                           logged: io.StringIO) -> None:
     pair = card.Pair(state)
     for text in (
+        f"Model loading took {'9' * 1000} GiB memory and {'9' * 1000} seconds",
+        f"GPU KV cache size: {'9' * 1000} tokens",
+        "GPU KV cache size: 1,,2 tokens",
+        "Available KV cache memory: NaN GiB",
         "INFO 09-24 12:00:00 [gpu_model_runner.py:2007] Model loading took 23.5000 GiB memory and 41.250000 seconds",
         "INFO 09-24 12:00:10 [gpu_worker.py:298] Available KV cache memory: 4.25 GiB",
         ("(EngineCore pid=7) INFO 09-24 12:00:10 [kv_cache_utils.py:2395] GPU KV cache size: 123,456 tokens, Maximum "
@@ -301,6 +305,102 @@ def test_the_output_leaves_a_few_numbers_and_categories_of_vllm_and_the_gateways
     assert len(rows(logged, "gateway_output")) == len(lines) - 2
     assert pair.ready.is_set() and not pair.asleep and card.marked(state) == card.STOP_UNCONFIRMED
     assert SECRET not in logged.getvalue()
+
+
+def test_engine_choices_emit_fixed_codes_and_bounded_numbers_without_quoted_config_values(
+        state: Path, logged: io.StringIO) -> None:
+    pair = card.Pair(state)
+    model = f"/workspace/{SECRET}/model"
+    arguments = {
+        "model": model, "tokenizer": model, "served_model_name": [SECRET], "max_model_len": 65536,
+        "max_num_seqs": 8, "max_num_batched_tokens": 512, "gpu_memory_utilization": 0.94,
+        "kv_cache_dtype": "int4_per_token_head", "prefix_cache_retention_interval": None, "watermark": 0.02,
+        "kv_offloading_size": 12.0, "attention_backend": "FLASHINFER",
+        # These settings belong only inside speculative_config; valid neighbors must still be reported.
+        "num_speculative_tokens": 777, "rejection_sample_method": "standard",
+        "num_speculative_tokens_per_batch_size": [(1, 8, 4)],
+        "speculative_config": {"model": model, "method": "mtp", "num_speculative_tokens": 4,
+                               "draft_sample_method": "probabilistic", "rejection_sample_method": "block",
+                               "num_speculative_tokens_per_batch_size": [(1, 4, 4), (5, 8, 2)],
+                               # These settings belong only at the top level.
+                               "max_model_len": 777, "kv_cache_dtype": "fp8", "attention_backend": "TRITON_ATTN"},
+        "kernel_config": {"linear_backend_per_quant": {"nvfp4_w4a16": "humming"}},
+        "attention_config": {"backend_per_kind": {"sliding_window": "FLASHINFER"}},
+    }
+    unknown = {
+        "kv_cache_dtype": SECRET + " / arbitrary 'quoted' value",
+        "attention_backend": SECRET,
+        "model": "'max_num_seqs': 777, 'synthetic_acceptance_rates': [1] " + SECRET,
+        "ignored": {"max_num_seqs": 777, "kv_cache_dtype": "fp8"},
+    }
+    calls = ("{'kernel_config': KernelConfig(linear_backend_per_quant={'nvfp4_w4a16': 'humming'}, "
+             f"note={SECRET!r}), 'attention_config': AttentionConfig(backend=None, "
+             "backend_per_kind={'sliding_window': 'FLASHINFER'})}")
+    # Pinned vLLM log formats; requested arguments and observed selections remain distinct codes.
+    for source, message in (
+        ("__init__.py:1180", "Using MarlinNvFp4LinearKernel for NVFP4 GEMM"),
+        ("__init__.py:1136", f"Using {SECRET.replace('-', '_')} for NVFP4 GEMM"),
+        ("__init__.py:245", "Applied linear backend override for 'nvfp4_w4a16': 'humming'"),
+        ("cuda.py:478", "Using AttentionBackendEnum.TRITON_ATTN backend."),
+        ("cuda.py:538", "Using FLASHINFER attention backend out of potential backends: ['TRITON_ATTN', 'FLASHINFER']."),
+        ("flashinfer.py:838", ("FlashInfer XQA decode does not support head_dim=512; reverting this KV-cache "
+                              "group to native FlashInfer decode.")),
+        ("flashinfer.py:909", ("FlashInfer resolved query dtypes: prefill=torch.bfloat16, decode=torch.bfloat16, "
+                              "decode_backend=xqa, kv_cache_dtype=fp8_e4m3, arch=sm120")),
+        ("gpu_worker.py:441", "Using V2 Model Runner"),
+        ("vllm.py:717", f"Model Runner V2 does not yet support {SECRET}; using the V1 model runner instead."),
+        ("model_runner.py:1067", "Graph capturing finished in 12 secs, took 0.45 GiB"),
+        ("factory.py:57", "Creating offloading spec with name: CPUOffloadingSpec"),
+        ("api_utils.py:286", f"non-default args: {arguments}"),
+        ("api_utils.py:286", f"non-default args: {unknown}"),
+        ("api_utils.py:286", f"non-default args: {calls}"),
+    ):
+        pair.engine_line(f"(EngineCore pid=7) INFO 09-27 12:00:00 [{source}] {message}\n".encode())
+    expected: list[dict[str, Any]] = [
+        {"code": "nvfp4_gemm_marlin"}, {"code": "nvfp4_gemm_other"}, {"code": "linear_override_nvfp4_w4a16_humming"},
+        {"code": "attention_selected_triton_attn"}, {"code": "attention_chosen_flashinfer"},
+        {"code": "flashinfer_xqa_reverted", "head_dim": 512}, {"code": "flashinfer_decode_xqa"},
+        {"code": "model_runner_v2"}, {"code": "model_runner_v1"},
+        {"code": "graphs_captured", "capture_ms": 12000, "graph_mib": 461}, {"code": "kv_offloading_cpu"},
+        {"code": "arg_max_model_len", "value": 65536}, {"code": "arg_max_num_seqs", "value": 8},
+        {"code": "arg_max_num_batched_tokens", "value": 512},
+        {"code": "arg_gpu_memory_utilization_x1000", "value": 940}, {"code": "arg_watermark_x1000", "value": 20},
+        {"code": "arg_kv_offloading_mib", "value": 12288}, {"code": "arg_prefix_cache_retention_interval_none"},
+        {"code": "arg_num_speculative_tokens", "value": 4}, {"code": "arg_kv_cache_dtype_int4_per_token_head"},
+        {"code": "arg_attention_backend_flashinfer"}, {"code": "arg_draft_sample_method_probabilistic"},
+        {"code": "arg_rejection_sample_method_block"}, {"code": "arg_num_speculative_tokens_per_batch_size"},
+        {"code": "arg_linear_nvfp4_w4a16_humming"}, {"code": "arg_attention_sliding_window_flashinfer"},
+        {"code": "arg_kv_cache_dtype_other"}, {"code": "arg_attention_backend_other"},
+        {"code": "arg_linear_nvfp4_w4a16_humming"}, {"code": "arg_attention_sliding_window_flashinfer"},
+    ]
+    assert sorted(rows(logged, "engine_choice"), key=repr) == sorted(
+        [{"event": "engine_choice", **row} for row in expected], key=repr)
+    pair.engine_line("non-default args: {'attention_backend': 'FLA\u017fHINFER'}\n".encode())
+    choices = rows(logged, "engine_choice")
+    assert len(choices) == len(expected) + 1
+    assert choices[-1]["code"] in {"arg_attention_backend_flashinfer", "arg_attention_backend_other"}
+
+    # Quoted key-looking text is not configuration. Unsupported reprs and extreme numbers leave no extra rows.
+    before = logged.getvalue()
+    for value in ("nan", "inf", "True", "'12'", "1.2.3", "9" * 5000, "1e308"):
+        pair.engine_line(f"non-default args: {{'max_num_seqs': {value}, 'kv_offloading_size': {value}}}\n".encode())
+    for message in (
+        f"FlashInfer XQA decode does not support head_dim={'9' * 5000}",
+        f"Graph capturing finished in {'9' * 5000} secs, took 1 GiB",
+        f"Graph capturing finished in 1 secs, took {'9' * 1000} GiB",
+        "Graph capturing finished in 1.2.3 secs, took NaN GiB",
+        "non-default args: " + repr({"note": "'max_num_seqs': 777"}),
+        ("non-default args: {'attention_config': AttentionConfig(backend=None, backend_per_kind="
+         "{'sliding_window': <AttentionBackendEnum.FLASHINFER: 'private-backend-path'>}), 'max_num_seqs': 777}"),
+    ):
+        pair.engine_line((message + "\n").encode())
+    assert logged.getvalue() == before
+    assert not rows(logged, "engine_measure") and not rows(logged, "engine_failure")
+    assert all(type(value) is int for row in rows(logged, "engine_choice")
+               for name, value in row.items() if name not in {"event", "code"})
+    assert all(re.fullmatch(r"[a-z0-9_]+", row["code"]) for row in rows(logged, "engine_choice"))
+    assert all(value not in logged.getvalue() for value in (SECRET, SECRET.replace("-", "_"), model,
+                                                           "private-backend-path", "arbitrary", "777"))
 
 
 @pytest.mark.anyio

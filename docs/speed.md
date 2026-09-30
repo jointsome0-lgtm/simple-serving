@@ -40,7 +40,8 @@ should compare cached prompt tokens, reader TTFT and interference pauses against
 
 ## To look at, cheapest first
 
-1. **The FP4 kernels.** Identify which kernel runs the NVFP4 weights on an RTX 5090 (sm_120), then measure any
+1. **The FP4 kernels.** The launcher's [engine-choice rows](runbook.md#engine-choices) now record recognised
+   selection messages. Identify which kernel runs the NVFP4 weights on an RTX 5090 (sm_120), then measure any
    supported alternative. Seeing Marlin or its warning alone does not establish a slow fallback. In pinned vLLM
    0.30.0, Marlin is a normal W4A16 selection; the [kernel selector](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/model_executor/kernels/linear/__init__.py)
    and [Marlin implementation](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/model_executor/kernels/linear/nvfp4/marlin.py)

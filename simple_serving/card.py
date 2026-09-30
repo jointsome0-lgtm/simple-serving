@@ -26,8 +26,8 @@ launcher's next start: costs may go on. The attempts go on too, but they bound n
 
 The logs are in `logs/` of the state directory, with one older file beside each. The launcher makes a log 0600 when it
 opens it; one that it moves aside keeps its mode. `card.jsonl` holds the launcher's rows and, of vLLM's output, only a
-few numbers and fixed categories of failure and warning. `gateway.jsonl` holds the gateway's rows that pass
-`gateway_row`.
+few numbers, fixed diagnostic codes of engine choices, and fixed categories of failure and warning. `gateway.jsonl`
+holds the gateway's rows that pass `gateway_row`.
 
 The picture lane's launcher is this one with ComfyUI for its engine, in a state of its own (`pictures/card.py`): a
 lane is a `Card` whose class names its module, its state and its files.
@@ -36,11 +36,13 @@ lane is a `Card` whose class names its module, its state and its files.
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import resource
@@ -85,10 +87,11 @@ THOUGHT_MARKERS = {"reasoning_start_str": "<|channel>", "reasoning_end_str": "<c
 # vLLM's wording of the numbers kept, as in the source of vLLM 0.30.0, and provisional until the first rental checks
 # each against its output. A field's last word names its unit, and SCALE turns vLLM's GiB, seconds and factors into it.
 MEASUREMENTS = tuple(re.compile(pattern) for pattern in (
-    r"Model loading took (?P<weights_mib>\d+(?:\.\d+)?) GiB(?: memory)? and (?P<weights_load_ms>\d+(?:\.\d+)?) s",
-    r"Available KV cache memory: (?P<kv_cache_mib>-?\d+(?:\.\d+)?) GiB",  # below 0 when the weights leave no room
-    r"GPU KV cache size: (?P<kv_cache_tokens>\d[\d,]*) tokens",
-    r"Maximum concurrency for [\d,]+ tokens per request: (?P<concurrency_x100>\d+(?:\.\d+)?)x",
+    r"^Model loading took (?P<weights_mib>\d+(?:\.\d+)?) GiB(?: memory)? and (?P<weights_load_ms>\d+(?:\.\d+)?) s",
+    r"^Available KV cache memory: (?P<kv_cache_mib>-?\d+(?:\.\d+)?) GiB",  # below 0 when the weights leave no room
+    r"^GPU KV cache size: (?P<kv_cache_tokens>(?:\d{1,3}(?:,\d{3})+|\d+)) tokens",
+    (r"(?:^|, )Maximum concurrency for (?:\d{1,3}(?:,\d{3})+|\d+) tokens per request: "
+     r"(?P<concurrency_x100>\d+(?:\.\d+)?)x"),
 ))
 SCALE = {"mib": 1024, "ms": 1000, "tokens": 1, "x100": 100}
 # The categories of failure, each with words of a lowercased line, provisional as well. A line gets the first that fits.
@@ -110,6 +113,71 @@ FAILURES = (
 # where they do not, it takes the largest, which "will likely reduce accuracy" (modelopt.py in vLLM 0.30.0).
 WARNINGS = (("fused_scales_differ", ("scale differs across parallel layers",)),)
 GATEWAY_KEYS = log.FIELDS | {"time", "logger", "level"}
+
+# Diagnostic messages from vLLM 0.30.0: fixed codes and bounded numbers, never its arbitrary strings. An arg_ code
+# records a requested argument, not an observed kernel choice. Other codes record the stage the message names,
+# not successful inference or a completed transfer. Unknown words become other; an absent row proves nothing.
+NVFP4_KERNELS = {  # vLLM's NVFP4 kernel classes, from .../kernels/linear/__init__.py
+    "MarlinNvFp4LinearKernel": "marlin", "HummingNvFp4LinearKernel": "humming",
+    "FlashInferCuteDslNvFp4W4A16LinearKernel": "flashinfer_cutedsl_w4a16",
+    "FlashInferCuteDslNvFp4LinearKernel": "flashinfer_cutedsl",
+    "FlashInferCutlassNvFp4LinearKernel": "flashinfer_cutlass",
+    "FlashInferTrtllmNvFp4LinearKernel": "flashinfer_trtllm", "FlashInferCudnnNvFp4LinearKernel": "flashinfer_cudnn",
+    "FlashInferB12xNvFp4LinearKernel": "flashinfer_b12x", "B12xNvFp4LinearKernel": "b12x",
+    "CutlassNvFp4LinearKernel": "cutlass", "FbgemmNvFp4LinearKernel": "fbgemm", "TorchNvFp4LinearKernel": "torch",
+    "EmulationNvFp4LinearKernel": "emulation",
+}
+LINEAR_QUANTS = frozenset({  # the keys of KernelConfig.linear_backend_per_quant
+    "nvfp4_w4a16", "nvfp4_w4a4", "fp8_block_w8a8", "fp8_w8a8", "int8_w8a8", "mixed_precision", "mxfp8", "mxfp4",
+    "mxfp6", "w8a16_fp8",
+})
+LINEAR_BACKENDS = frozenset({  # vllm/config/kernel.py's LinearBackend
+    "auto", "cutlass", "flashinfer_cutlass", "flashinfer_cutedsl", "flashinfer_trtllm", "flashinfer_cudnn",
+    "flashinfer_b12x", "b12x", "marlin", "humming", "triton", "deep_gemm", "torch", "aiter", "machete", "fbgemm",
+    "conch", "exllama", "emulation", "xpu", "xpu_woq",
+})
+ATTENTION_BACKENDS = frozenset({  # vllm/v1/attention/backends/registry.py's AttentionBackendEnum
+    "FLASH_ATTN", "FLASH_ATTN_DIFFKV", "TRITON_ATTN", "TRITON_ATTN_DIFFKV", "TRITON_FLASH_ATTN", "ROCM_ATTN",
+    "ROCM_AITER_MLA", "ROCM_AITER_TRITON_MLA", "ROCM_AITER_FA", "ROCM_AITER_MLA_SPARSE", "XPU_MLA_SPARSE", "TORCH_SDPA",
+    "FLASHINFER", "TRITON_FLASHINFER", "FLASHINFER_MLA", "TOKENSPEED_MLA", "FLASHINFER_MLA_SPARSE",
+    "FLASHINFER_MLA_SPARSE_SM120", "FLASHINFER_MLA_SPARSE_SM90", "TRITON_MLA", "CUTLASS_MLA", "FLASHMLA",
+    "FLASHMLA_SPARSE", "FLASHMLA_SPARSE_DSV4", "FLASHINFER_MLA_SPARSE_DSV4", "ROCM_FLASHMLA_SPARSE_DSV4",
+    "FLASHMLA_SPARSE_DSV41", "FLASHINFER_MLA_SPARSE_DSV41", "B12X", "FLASH_ATTN_MLA", "FLASH_ATTN_MLA_SPARSE",
+    "MINIMAX_M3_SPARSE", "CUTLASS_MSA", "TRITON_MSA", "NO_ATTENTION", "FLEX_ATTENTION", "HPC_ATTN",
+    "ROCM_AITER_UNIFIED_ATTN", "CPU_ATTN", "CPU_MLA", "AMX_MLA", "TURBOQUANT", "CUSTOM",
+})
+CACHE_KINDS = frozenset({  # vllm/v1/kv_cache_interface.py's KVCacheSpecKind, the keys of backend_per_kind
+    "full_attention", "mla_attention", "sliding_window", "sliding_window_mla", "mamba", "chunked_local_attention",
+    "sink_full_attention", "encoder_only_attention", "cross_attention", "unknown", "sparse",
+})
+CACHE_DTYPES = frozenset({  # vllm/config/cache.py's CacheDType
+    "auto", "float16", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc", "fp8_ds_mla", "nvfp4_ds_mla",
+    "turboquant_k8v4", "turboquant_4bit_nc", "turboquant_k3v4_nc", "turboquant_3bit_nc", "int4_per_token_head",
+    "int8_per_token_head", "fp8_per_token_head", "nvfp4", "nvfp4_4over6",
+})
+DECODE_PATHS = {"xqa": "xqa", "trtllm-gen": "trtllm_gen", "flashinfer-native": "native"}  # FlashInfer's decoding
+OFFLOADING_SPECS = {"CPUOffloadingSpec": "cpu", "TieringOffloadingSpec": "tiering"}  # vllm/v1/kv_offload/factory.py
+# The keys of non-default args retained as requested numbers or fixed words, after structural parsing.
+ARG_NUMBERS = {
+    "max_model_len": ("arg_max_model_len", 1), "max_num_seqs": ("arg_max_num_seqs", 1),
+    "max_num_batched_tokens": ("arg_max_num_batched_tokens", 1),
+    "gpu_memory_utilization": ("arg_gpu_memory_utilization_x1000", 1000), "watermark": ("arg_watermark_x1000", 1000),
+    "kv_offloading_size": ("arg_kv_offloading_mib", 1024),  # GiB in vLLM
+    "prefix_cache_retention_interval": ("arg_prefix_cache_retention_interval", 1),  # None is dense retention
+    "num_speculative_tokens": ("arg_num_speculative_tokens", 1),  # in --speculative-config's JSON
+}
+ARG_WORDS = {
+    "kv_cache_dtype": CACHE_DTYPES, "attention_backend": ATTENTION_BACKENDS,
+    "draft_sample_method": frozenset({"greedy", "probabilistic"}),
+    "rejection_sample_method": frozenset({"standard", "synthetic", "block"}),
+}
+ARG_FLAGS = ("num_speculative_tokens_per_batch_size", "synthetic_acceptance_rates")  # their presence only
+NUMBER = r"-?\d+(?:\.\d+)?"
+
+DIAGNOSTIC_MAX = (1 << 53) - 1  # a finite JSON-safe integer guard, not a limit imposed on vLLM
+ENGINE_PREFIX = re.compile(
+    r"^(?:\([^\r\n)]{1,80}\) )?(?:DEBUG|INFO|WARNING|ERROR) \d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+    r"\[[^\]\r\n]{1,160}\] ")
 
 
 @dataclass(frozen=True)
@@ -483,13 +551,24 @@ class Pair:
         await asyncio.Future()
 
     def engine_line(self, line: bytes) -> None:
-        """A line of vLLM's output gives a few numbers, a category of failure or of warning, or nothing."""
-        text = line.decode(errors="replace")
+        """Retain bounded measurements and diagnostic codes, failure/warning categories, or nothing."""
+        text = engine_message(line[:LINE_BYTES].decode(errors="replace"))
+        if text.startswith("non-default args: "):
+            for code, numbers in non_default_args(text):
+                log.row("engine_choice", code=code, **numbers)
+            return
         fields = {name: value for pattern in MEASUREMENTS if (found := pattern.search(text))
                   for name, value in found.groupdict().items()}  # vLLM prints some of them on one line
         if fields:
-            log.row("engine_measure", **{name: round(float(value.replace(",", "")) * SCALE[name.split("_")[-1]])
-                                         for name, value in fields.items()})
+            numbers = {name: number for name, value in fields.items()
+                       if (number := diagnostic_number(value.replace(",", ""), SCALE[name.split("_")[-1]],
+                                                       signed=name == "kv_cache_mib")) is not None}
+            if numbers:
+                log.row("engine_measure", **numbers)
+            return
+        if chosen := engine_choices(text):
+            for code, numbers in chosen:
+                log.row("engine_choice", code=code, **numbers)
             return
         lowered = text.lower()
         for event, categories in (("engine_failure", FAILURES), ("engine_warning", WARNINGS)):
@@ -510,6 +589,139 @@ class Pair:
         if row.get("event") == "stop_failed":  # the gateway's own stop, once it has fallen asleep
             unconfirmed(self.state, row)
         self.asleep = self.asleep or row.get("event") == "sleep"
+
+
+def engine_message(text: str) -> str:
+    """Remove only the usual vLLM log prefix, keeping message matching anchored outside arbitrary quoted values."""
+    return ENGINE_PREFIX.sub("", text.strip(), count=1)
+
+
+def diagnostic_number(value: str | float, factor: int = 1, *, signed: bool = False) -> int | None:
+    """Convert a small finite measurement to a bounded integer; malformed or extreme engine output is ignored."""
+    if isinstance(value, bool) or (isinstance(value, str) and len(value) > 128):
+        return None
+    try:
+        number = float(value) * factor
+        if math.isfinite(number) and abs(number) <= DIAGNOSTIC_MAX and (signed or number >= 0):
+            return round(number)
+    except (ValueError, OverflowError):
+        return None
+    return None
+
+
+def engine_choices(text: str) -> list[tuple[str, dict[str, int]]]:
+    """Recognized diagnostic messages, with arbitrary words replaced by other and no raw log content retained."""
+    if len(text) > LINE_BYTES:
+        return []
+    text = engine_message(text)
+    if text.startswith("non-default args: "):
+        return non_default_args(text)
+    if found := re.fullmatch(r"Using (\S+) for NVFP4 GEMM\.?", text):
+        return [(f"nvfp4_gemm_{NVFP4_KERNELS.get(found[1], 'other')}", {})]
+    if found := re.fullmatch(r"Applied linear backend override for '([^']+)': '([^']+)'\.?", text):
+        return [(f"linear_override_{known(found[1], LINEAR_QUANTS)}_{known(found[2], LINEAR_BACKENDS)}", {})]
+    if found := re.fullmatch(r"Using AttentionBackendEnum\.(\w+) backend\.", text):
+        return [(f"attention_selected_{known(found[1], ATTENTION_BACKENDS)}", {})]
+    if found := re.fullmatch(r"Using (\w+) attention backend out of potential backends: .+\.", text):
+        return [(f"attention_chosen_{known(found[1], ATTENTION_BACKENDS)}", {})]
+    if found := re.fullmatch(r"FlashInfer XQA decode does not support head_dim=(\d+); "
+                            r"reverting this KV-cache group to native FlashInfer decode\.", text):
+        number = diagnostic_number(found[1])
+        return [("flashinfer_xqa_reverted", {"head_dim": number})] if number is not None else []
+    if found := re.fullmatch(r"FlashInfer resolved query dtypes: prefill=\S+, decode=\S+, "
+                            r"decode_backend=([\w-]+), kv_cache_dtype=\S+, arch=\S+", text):
+        return [(f"flashinfer_decode_{DECODE_PATHS.get(found[1], 'other')}", {})]
+    if text == "Using V2 Model Runner":
+        return [("model_runner_v2", {})]
+    if re.fullmatch(r"Model Runner V2 does not yet support .+; using the V1 model runner instead\.", text):
+        return [("model_runner_v1", {})]
+    if found := re.fullmatch(rf"Graph capturing finished in (\d+) secs, took ({NUMBER}) GiB", text):
+        capture_ms, graph_mib = diagnostic_number(found[1], 1000), diagnostic_number(found[2], 1024)
+        return ([("graphs_captured", {"capture_ms": capture_ms, "graph_mib": graph_mib})]
+                if capture_ms is not None and graph_mib is not None else [])
+    if found := re.fullmatch(r"Creating offloading spec with name: (\S+)", text):
+        return [(f"kv_offloading_{OFFLOADING_SPECS.get(found[1], 'other')}", {})]
+    return []
+
+
+def argument_fields(node: ast.AST | None, config: str = "") -> dict[str, ast.AST]:
+    """Read direct fields of a literal dictionary or a named config's keyword-only repr; never evaluate a call."""
+    pairs: list[tuple[str, ast.AST]]
+    if isinstance(node, ast.Dict):
+        pairs = [(key.value, value) for key, value in zip(node.keys, node.values, strict=True)
+                 if isinstance(key, ast.Constant) and isinstance(key.value, str)]
+        if len(pairs) != len(node.keys):
+            return {}
+    elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == config
+          and not node.args and all(keyword.arg is not None for keyword in node.keywords)):
+        pairs = [(keyword.arg, keyword.value) for keyword in node.keywords if keyword.arg is not None]
+    else:
+        return {}
+    fields = dict(pairs)
+    return fields if len(fields) == len(pairs) else {}  # duplicate keys are ambiguous
+
+
+def argument_literal(node: ast.AST | None) -> object:
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd):
+        value = argument_literal(node.operand)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return -value if isinstance(node.op, ast.USub) else value
+    return node  # an unsupported representation cannot look like a scalar value
+
+
+def non_default_args(text: str) -> list[tuple[str, dict[str, int]]]:
+    """Requested settings from a bounded Python-expression dict, not selections. Quoted strings are never searched.
+
+    Configs may be literal dicts or named calls with keyword fields. Unsupported reprs, including <Enum: value>,
+    make the whole line unknown. This deliberately loses diagnostics rather than interpreting arbitrary repr text.
+    """
+    if len(text) > LINE_BYTES or not text.startswith("non-default args: "):
+        return []
+    try:
+        root = ast.parse(text.removeprefix("non-default args: "), mode="eval").body
+    except (SyntaxError, ValueError, RecursionError):
+        return []
+    if sum(1 for _ in ast.walk(root)) > 512:
+        return []
+    fields = argument_fields(root)
+    speculative = argument_fields(fields.get("speculative_config"), "SpeculativeConfig")
+    chosen: list[tuple[str, dict[str, int]]] = []
+    for group, is_speculative in ((fields, False), (speculative, True)):
+        for key, (code, factor) in ARG_NUMBERS.items():
+            if (key == "num_speculative_tokens") != is_speculative:
+                continue
+            value = argument_literal(group.get(key))
+            if key == "prefix_cache_retention_interval" and key in group and value is None:
+                chosen.append((f"{code}_none", {}))
+            elif (isinstance(value, int | float) and not isinstance(value, bool)
+                  and (number := diagnostic_number(value, factor)) is not None):
+                chosen.append((code, {"value": number}))
+        for key, words in ARG_WORDS.items():
+            if (key in {"draft_sample_method", "rejection_sample_method"}) != is_speculative:
+                continue
+            value = argument_literal(group.get(key))
+            if isinstance(value, str):
+                chosen.append((f"arg_{key}_{known(value, words)}", {}))
+        if is_speculative:
+            chosen += [(f"arg_{key}", {}) for key in ARG_FLAGS if isinstance(group.get(key), ast.List | ast.Tuple)]
+    kernel = argument_fields(fields.get("kernel_config"), "KernelConfig")
+    for quant, node in argument_fields(kernel.get("linear_backend_per_quant")).items():
+        backend = argument_literal(node)
+        if isinstance(backend, str):
+            chosen.append((f"arg_linear_{known(quant, LINEAR_QUANTS)}_{known(backend, LINEAR_BACKENDS)}", {}))
+    attention = argument_fields(fields.get("attention_config"), "AttentionConfig")
+    for kind, node in argument_fields(attention.get("backend_per_kind")).items():
+        backend = argument_literal(node)
+        if isinstance(backend, str):
+            chosen.append((f"arg_attention_{known(kind, CACHE_KINDS)}_{known(backend, ATTENTION_BACKENDS)}", {}))
+    return chosen
+
+
+def known(word: str, words: frozenset[str]) -> str:
+    return next((candidate.lower() for candidate in words if word.isascii() and word.lower() == candidate.lower()),
+                "other")
 
 
 def gateway_row(line: bytes) -> dict[str, Any] | None:

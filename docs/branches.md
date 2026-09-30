@@ -37,7 +37,7 @@ Vision from `47d71ae` is now integrated too, with `VISION=0` and an explicit [sy
 | `live-2026-09-28` | `940471a` | Dense prefix retention is integrated in the text launcher. The branch is retained as the source of that change; its history adds no remaining feature. A new GPU comparison is pending. |
 | `thinking-budget` | `466a82d` | Optional thinking-token budgets are integrated and disabled by default. The source branch remains retained, with no unintegrated feature. GPU enforcement and quality evaluation are pending. |
 | `vision-captions` | `47d71ae` | Includes `8672e62`. Implements image input for Gemma, key permissions, launcher/bootstrap and a vision smoke. Integrated into the current shared configuration, launcher and smoke, with `VISION=0`. Source retained; GPU validation is pending. |
-| `held-criterion` | `a898060` | Includes throughput and fixes its cache-capacity stopping criterion. Workload and metric-selection ideas are reused in the new interference client; its A/B launcher remains separate. The revised criterion needs a GPU measurement. |
+| `held-criterion` | `a898060` | Includes throughput and fixes its cache-capacity stopping criterion. Workload and metric-selection ideas are reused in the interference client; engine-choice diagnostics from `63baef9` are ported separately. Its A/B launcher remains separate, and the revised criterion needs a GPU measurement. |
 | `sweep` | `b6d4919` | Standalone sweep is ported into the current checkout, with explicit current cache capacity and local fake checks. It measures an already running engine; GPU results remain pending. The source branch retains its historical experiment queue. |
 | `split-kv-wip` | `bd0503e` | Split-KV plugin files on an older throughput base. The launcher does not register the change. Unfinished. |
 | `pictures-two-cards` | `5aa9302` | Design and recorded owner answers only. No distributor or two-card test is implemented. |
@@ -87,6 +87,11 @@ real captions, token counts or MTP throughput.
 
 ### Measurement tools
 
+The [engine-choice diagnostic](runbook.md#engine-choices) from `63baef9` is ported into the text launcher.
+It preserves fixed-code and numeric reporting without the A/B harness's in-memory history or lifecycle changes.
+Requested arguments and recognised selection messages have different meanings; missing rows do not establish a
+backend or readiness.
+
 The [standalone sweep](sweep.md) from `b6d4919` is now ported into the current checkout. Its capacity is an explicit
 input rather than a historical default; the source branch and historical experiment queue remain retained.
 
@@ -129,8 +134,8 @@ the rehearsal's JSON whitespace ban was subsequently removed. Its E2B model pin 
 2. Prepare the existing ComfyUI single-card test. Its real result gates picture-provider activation.
 3. Monitoring is integrated. Install the optional metrics key and enable the picture scrape target when setting
    up monitoring for the cards.
-4. Carry over `held-criterion` with its dry run and an explicit serving-restoration procedure. The retention
-   setting is integrated; measure its current benefit separately from carrying over the tooling.
+4. Engine-choice diagnostics from `held-criterion` are integrated. Before carrying over its remaining A/B tooling,
+   implement and check serving restoration after success and failure. Measure retention separately.
 5. Budget and vision are integrated but disabled. Check each on a GPU before activation; their enforcement,
    captions, memory use and combined MTP behavior remain separate measurements.
 6. Keep the two-card design and split-KV work separate until their first implemented checks exist.

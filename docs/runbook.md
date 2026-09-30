@@ -322,6 +322,32 @@ the first start: rent.mjs's default, `--hours 3`, which the first rental uses. T
 key, as the card stops, so a key that Vast refuses defeats both. An onstart for a permanent rental, which writes the
 two files, arms no guard and ends with the same line, is decided before permanent use.
 
+### Engine choices
+
+The text launcher keeps recognised vLLM startup messages as `engine_choice` rows in the state's
+`logs/card.jsonl`. Each row holds a fixed `code` and, where relevant, whole-number fields such as `value`,
+`head_dim`, `capture_ms` and `graph_mib`. For example, selected fields from three rows could be:
+
+```json
+{"event":"engine_choice","code":"nvfp4_gemm_marlin"}
+{"event":"engine_choice","code":"arg_prefix_cache_retention_interval_none"}
+{"event":"engine_choice","code":"graphs_captured","capture_ms":12000,"graph_mib":461}
+```
+
+The codes describe recognised kernel, attention and runner selections, graph-capture completion, offload-spec
+selection attempts and selected non-default arguments. `arg_*` describes requested configuration, rather than
+proof of the resolved kernel. FlashInfer decode and XQA fallback messages describe a KV-cache group; different
+groups can use different backends. Offload-spec selection does not prove successful offloading, and graph capture
+does not establish serving readiness. Use the existing `ready`/`up` checks for readiness.
+
+Unknown vocabulary becomes `other`; unrecognised messages add no choice row. Missing rows leave the choice unknown.
+The parser reads non-default arguments structurally without evaluating them and ignores unsupported or malformed
+representations, including enum-object repr syntax. Arbitrary model paths, credentials, prompts and raw messages
+are not copied to these rows. The picture launcher keeps its separate ComfyUI output filter.
+
+This diagnostic adds no tuning or engine restart. Compare the rows with [sweep](sweep.md) reports when recording
+an authorised measurement. Local checks use synthetic startup messages; actual card output remains to be checked.
+
 ### Optional image input
 
 `VISION=0` is the committed text manifest default. At 1, preparation verifies and copies the pinned processor and

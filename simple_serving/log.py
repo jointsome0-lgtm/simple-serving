@@ -3,11 +3,11 @@
 Contract section 10: a row about a request may hold the time, route, key label, class, scope kind, status, error
 code, token counts, the measurements, whether the request was cancelled, and the finish reason; a picture's adds
 counts, times and flags of its own (docs/pictures.md, section 11). Rows about the service itself add its boot, status
-and ports, and the card's launcher adds exit codes and a few numbers from vLLM's output (`card.py`), or ComfyUI's
-categories and its sweeper's counts and codes (`pictures/card.py`). A field outside `FIELDS` is dropped. Records of
-other libraries keep their logger, level and the class of an exception only, because their messages and tracebacks
-may quote a request. That includes uvicorn's own: its messages are mostly fixed texts, but nothing checks that each of
-them is.
+and ports, and the card's launcher adds exit codes, bounded numbers and fixed codes from vLLM's output (`card.py`),
+or ComfyUI's categories and its sweeper's counts and codes (`pictures/card.py`). A field outside `FIELDS` is dropped.
+Records of other libraries keep their logger, level and the class of an exception only, because their messages and
+tracebacks may quote a request. That includes uvicorn's own: its messages are mostly fixed texts, but nothing checks
+that each of them is.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ FIELDS = frozenset({
     "input_tokens", "output_tokens", "cached_tokens", "count_matches", "wait_ms", "first_token_ms", "total_ms",
     "exception", "boot_id", "service_status", "drain_generation", "context_tokens", "port", "reason",
     "process", "exit_code", "load_ms", "weights_mib", "weights_load_ms", "kv_cache_mib", "kv_cache_tokens",
-    "concurrency_x100", "thinking_budget",
+    "concurrency_x100", "thinking_budget", "value", "head_dim", "capture_ms", "graph_mib",
     # The picture lane's.
     "lane", "nodes", "images", "image_bytes", "upload_bytes", "references", "queue_ms", "draw_ms", "partial_loads",
     "oom", "stop_confirmed", "socket", "jobs", "grace_s", "file_cap_s", "history_cap_s", "files", "failed_files",
