@@ -48,9 +48,9 @@ VISION_SHAPE: dict[str, Any] = CHAT_SHAPE | {
 # (vllm/multimodal/media/connector.py and image.py), so the gateway checks that the two agree.
 PICTURE = re.compile(r"data:image/(png|jpeg|webp);base64,([A-Za-z0-9+/]*={0,2})")
 SIGNATURES = {"png": b"\x89PNG\r\n\x1a\n", "jpeg": b"\xff\xd8\xff"}  # WebP's is split, as RIFF....WEBP
-# The most of the picture, decoded. Gemma 4 sees at most 2520 patches of 16 by 16 pixels, about 800 by 800, so what a
-# larger picture holds beyond that only costs the card its decoding.
-PICTURE_BYTES = 1 << 20
+# The compressed image file after base64 decoding. This request-size bound does not bound raster memory;
+# vLLM applies its own pixel limit and decoder checks.
+PICTURE_BYTES = 2 << 20
 
 
 @dataclass(frozen=True)

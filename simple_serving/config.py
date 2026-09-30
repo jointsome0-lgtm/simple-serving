@@ -41,7 +41,7 @@ VISION = "vision"
 # The provisional values of contract section 7, which the dev launcher and the card use until the card has measured
 # its own (section 15, step 4).
 PROVISIONAL: dict[str, Any] = {
-    "body_limit_bytes": 2_000_000,
+    "body_limit_bytes": 4 << 20,
     "limits": {
         "reader": {"active": 4, "waiting": 8, "input_tokens": None, "max_tokens": 8192, "wall_s": 300},
         "agent": {"active": 1, "waiting": 2, "input_tokens": None, "max_tokens": 8192, "wall_s": 900},
@@ -183,7 +183,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
         alias=_string(data.get("alias"), "alias"),
         engine_url=engine_url.rstrip("/"),
         context_tokens=_optional_integer(data.get("context_tokens"), "context_tokens", 1),
-        body_limit_bytes=_integer(data.get("body_limit_bytes", 2_000_000), "body_limit_bytes", 1),
+        body_limit_bytes=_integer(data.get("body_limit_bytes", 4 << 20), "body_limit_bytes", 1),
         keys=keys,
         limits=MappingProxyType({name: _class_limits(limits.get(name), f"limits.{name}") for name in CLASSES}),
         per_key_active=_integer(per_key.get("active"), "limits.external_per_key.active", 1),

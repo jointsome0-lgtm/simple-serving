@@ -300,6 +300,10 @@ def test_the_configuration_file_holds_hashes_and_refuses_what_it_does_not_know(t
     assert settings.vision and settings.thinking_budget and settings.speculative
     assert {key.label for key in settings.keys if key.vision} == {"bot"}
     assert not loaded.vision and not any(key.vision for key in loaded.keys)
+    defaults = service_with()
+    defaults.pop("body_limit_bytes")
+    assert from_service_block(defaults, engine_url="http://127.0.0.1:1").body_limit_bytes == 4 << 20
+    assert loaded.body_limit_bytes == data["body_limit_bytes"]  # explicit limits still apply
     with pytest.raises(ConfigError, match=r"picture lane.*vision"):
         picture_config({"keys": {BOT: enabled["keys"][BOT]}}, engine_url="http://127.0.0.1:1")
     message = refused(lambda d: d.update(secret=MARKER))

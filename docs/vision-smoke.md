@@ -20,6 +20,10 @@ The gateway also requires the client's explicit `vision` permission. Configurati
 `outside` key: vision remains limited to internal owner/tester clients. The separate picture-generation lane rejects
 text vision permission altogether. Preparing or testing the synthetic fixture does not enable a real client's key.
 
+The image limit is 2 MiB (2 097 152 bytes) after base64 decoding, measured as compressed image bytes. Base64 takes
+about 2.67 MiB at that limit; the default text HTTP body limit of 4 MiB (4 194 304 bytes) leaves room for text and
+JSON. An explicit `body_limit_bytes` still governs the entire request. These limits do not bound decoded pixels.
+
 With vision enabled, the card limits requests to one image and no video or audio. `--mm-processor-cache-gb 0`
 disables the processor cache. It does not disable every engine cache. In particular, the pinned engine's image
 encoder cache is keyed by image content without the gateway's text cache salt. This work therefore makes no claim

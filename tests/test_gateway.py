@@ -9,17 +9,18 @@ import io
 import json
 import secrets
 import time
+from dataclasses import replace
 from typing import Any
 
 import httpx
 import pytest
 
 from simple_serving import app
-from simple_serving.config import CLASSES
+from simple_serving.config import CLASSES, PROVISIONAL
 from simple_serving.fake_engine import PICTURE_TOKENS, FakeEngine, Script
 from simple_serving.service import Service
 from simple_serving.stream import Translator
-from simple_serving.validation import MAX_DEPTH
+from simple_serving.validation import MAX_DEPTH, PICTURE_BYTES
 
 from .support import (
     ALIAS,
@@ -333,6 +334,8 @@ async def test_a_picture_reaches_the_engine_only_from_a_key_with_the_right_while
     block = service_with(versions={"vision": "1", "thinking_budget": "on", "mtp_speculative_tokens": "3"}
                          if vision else {})
     block["keys"][BOT] |= {"vision": True} if vision else {}
+    block["body_limit_bytes"] = PROVISIONAL["body_limit_bytes"]
+    boundaries: dict[str, str] = {}
     url = picture_url(picture())
     async with running(block) as stack, httpx.AsyncClient(timeout=10) as client:
         answers = {
@@ -342,6 +345,27 @@ async def test_a_picture_reaches_the_engine_only_from_a_key_with_the_right_while
             "outside": await generate(client, stack, picture_body("outside", url), key=OUTSIDE_A),
             "outside count": await count(client, stack, picture_body("outside count", url), key=OUTSIDE_A),
         }
+        if vision:
+            # A valid PNG at the compressed-byte cap fits the default HTTP body after base64 encoding.
+            padding = PICTURE_BYTES - len(picture())
+            for added in (0, 1):
+                image = picture("a" * (padding + added))
+                assert len(image) == PICTURE_BYTES + added
+                limit_url = picture_url(image)
+                for route in (generate, count):
+                    name = "boundary_" + route.__name__ + str(added)
+                    request = picture_body(name, limit_url)
+                    assert len(json.dumps(request).encode()) < PROVISIONAL["body_limit_bytes"]
+                    answer = await route(client, stack, request)
+                    if added:
+                        assert_refused(answer, 400, "invalid_request")
+                    else:
+                        assert answer.done if route is generate else answer.status == 200
+                        boundaries[name] = limit_url
+            # An explicitly configured smaller HTTP cap still wins before image validation.
+            stack.service.config = replace(stack.service.config, body_limit_bytes=2_000_000)
+            assert_refused(await count(client, stack, picture_body("custom body", next(iter(boundaries.values())))),
+                           413, "body_too_large")
         view = (await control(client, stack, "/v1/state", method="GET")).json()
         metrics = (await control(client, stack, "/metrics", method="GET")).body.decode()
         rejected = sum(float(line.rsplit(" ", 1)[1]) for line in metrics.splitlines()
@@ -352,10 +376,13 @@ async def test_a_picture_reaches_the_engine_only_from_a_key_with_the_right_while
     for name in ("outside", "outside count") if vision else answers:
         assert_refused(answers[name], *((403, "vision_not_allowed") if vision else (400, "invalid_request")))
     calls = [*stack.fake.calls_of("tokenize"), *stack.fake.calls_of("generate")]
-    assert sorted(prompt_of(made.body) for made in calls) == (["allowed", "allowed", "counted"] if vision else [])
+    assert sorted(prompt_of(made.body) for made in calls) == (
+        sorted(["allowed", "allowed", "counted", "boundary_generate0", "boundary_generate0", "boundary_count0"])
+        if vision else [])
     if vision:
         assert answers["allowed"].done and answers["counted"].json() == {"input_tokens": 2 + PICTURE_TOKENS}
-        assert all(made.body["messages"] == picture_body(prompt_of(made.body), url)["messages"] for made in calls)
+        assert all(made.body["messages"] == picture_body(
+            prompt_of(made.body), boundaries.get(prompt_of(made.body), url))["messages"] for made in calls)
         assert stack.fake.calls_of("generate")[0].body["thinking_token_budget"] == 128
         assert all("thinking_token_budget" not in made.body for made in stack.fake.calls_of("tokenize"))
 

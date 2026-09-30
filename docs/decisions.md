@@ -205,3 +205,14 @@ These source checks support the integration design; they do not establish real G
 The final shared check passed on Python 3.12 and 3.14: Ruff, mypy and 350 tests, with one optional vLLM source-catalog
 check skipped. The synthetic smoke includes failure and combined-timeout checks; no GPU, rental or real image was
 used. Both text feature switches remain zero, and the source branch and saved cleanup stash remain retained.
+
+## Image input size, 2026-09-30
+
+The owner raised the compressed image cap to 2 MiB, or 2 097 152 bytes. The text gateway's default HTTP body cap is
+now 4 MiB, or 4 194 304 bytes, to accommodate base64 expansion and accompanying text. Explicit `body_limit_bytes`
+settings still apply. The separate ComfyUI graph-body cap and the shared cases' explicit body setting are unchanged.
+This cap bounds input bytes; it does not establish a raster-memory or GPU-memory bound.
+
+Boundary checks accept exactly 2 MiB for both count and generation and reject one byte more before any engine call.
+The shared check passes on Python 3.12 and 3.14 with 350 tests and one optional source-catalog skip; no test cases were
+added to the collected total. Validation uses synthetic images and fake services.

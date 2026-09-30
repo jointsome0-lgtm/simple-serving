@@ -17,7 +17,8 @@ stays off by default, so it still draws through its existing ComfyUI path until 
 Outside-client and unattended operation still have open validation and budget work.
 
 The text lane also includes optional Gemma image input from `vision-captions`. `VISION=0` keeps it off. When
-enabled, permitted internal keys can submit one PNG/JPEG/WebP data URL up to 1 MiB and receive text. Real captions,
+enabled, permitted internal keys can submit one PNG/JPEG/WebP data URL up to 2 MiB of compressed image bytes and
+receive text. Real captions,
 image token counts, MTP throughput and GPU memory use still need the [vision check](docs/vision-smoke.md).
 
 ## Documentation

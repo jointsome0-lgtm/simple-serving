@@ -133,8 +133,9 @@ public listener limits the connections, the time to read headers and bodies, and
 
 ### Request
 
-This is OpenAI chat completions with streaming. The body is at most 2 000 000 bytes. The gateway counts bytes as it
-reads, chunked bodies included, and stops reading past the limit with 413 `body_too_large`, before it parses JSON.
+This is OpenAI chat completions with streaming. The default body limit is 4 MiB (4 194 304 bytes); an explicit
+`body_limit_bytes` overrides it. The gateway counts bytes as it reads, chunked bodies included, and stops reading
+past the limit with 413 `body_too_large`, before it parses JSON.
 
 | Field                  | Type and range                                   | Rule                               |
 |------------------------|--------------------------------------------------|------------------------------------|
@@ -184,7 +185,7 @@ While the engine takes pictures (Gemma 4's vision tower, loaded while `VISION` i
 message's content may instead be an array of parts, at least one, each exactly `{"type": "text", "text": string}` or
 `{"type": "image_url", "image_url": {"url": string}}`, with one `image_url` part at most in the whole request. Its
 `url` is a data URL: `data:image/png;base64,`, `data:image/jpeg;base64,` or `data:image/webp;base64,`, then strict
-base64 of at most 1 048 576 bytes that begin with the signature of that type. vLLM 0.30.0 would fetch an `http` or
+base64 of at most 2 097 152 bytes that begin with the signature of that type. vLLM 0.30.0 would fetch an `http` or
 `https` URL itself and read a `file` URL under a setting, so the gateway passes on neither. It refuses with 400
 `invalid_request` another URL, another type, bytes whose signature differs from the URL type, malformed base64, a
 larger picture, a second picture, and parts in a system or assistant message; `detail` or any other field of a part is
@@ -193,8 +194,11 @@ with 403 `vision_not_allowed` after body validation and before generation limits
 text alone need no right. The engine gets the parts as they came, and the answer is text. The gateway knows that the engine takes pictures from the entry `vision` among its pinned versions
 (section 12), which the card's launcher writes only then. While the engine takes no pictures, a content that is not a
 string is 400 `invalid_request`, as it always was, and no key may hold the right.
-The 1 MiB bound is on compressed image bytes after base64 decoding. It does not bound raster memory or prove that
-the full image is decodable. vLLM applies its own pixel limit and image decoder; gateway errors remain fixed codes.
+The 2 MiB bound is on compressed image bytes after base64 decoding. Base64 expands that maximum to about 2.67 MiB,
+leaving room for text and JSON within the default 4 MiB request body. An explicit `body_limit_bytes` still applies
+to the whole request and can reject it before image validation. The image bound does not bound raster memory or
+prove that the full image is decodable. vLLM applies its own pixel limit and image decoder; gateway errors remain
+fixed codes.
 
 ### Before the stream starts
 
@@ -499,7 +503,7 @@ body. FastAPI's default validation answer echoes the input, so it is replaced.
 | 403    | `forbidden`                                       | a key without the control right on a control route, or without the metrics or the control right on a metrics route |
 | 404    | `not_found`                                       | a path or method outside section 3           |
 | 409    | `stale_boot`, `stale_generation`, `sleep_pending` | control calls, section 8                     |
-| 413    | `body_too_large`                                  | a body over 2 000 000 bytes, a control body over 4096 bytes |
+| 413    | `body_too_large`                                  | a body over `body_limit_bytes` (default 4 194 304 bytes), a control body over 4096 bytes |
 | 429    | `queue_full`                                      | a cap of section 3, 5 or 7                   |
 | 500    | `internal_error`                                  | an error in the gateway itself               |
 | 503    | `starting`, `draining`, `drained`, `engine_unavailable` | the service is not serving             |

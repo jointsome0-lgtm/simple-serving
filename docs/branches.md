@@ -76,7 +76,7 @@ only 11 thinking tokens, so it did not demonstrate enforcement of the proposed 1
 labels fake enforcement `not_verifiable` and rejects a real check whose baselines do not exercise both caps.
 
 Vision adds a manifest flag, `VISION=0` by default, and a per-key permission. It accepts one PNG/JPEG/WebP data URL
-up to 1 MiB.
+up to 2 MiB of compressed image bytes. The text HTTP body defaults to 4 MiB; explicit body limits still apply.
 `Card.keys()` stays independent of the text `VISION` flag; `Card.config()` adds the text client permission.
 Picture manifests do not need that switch, and picture configuration rejects a true text vision permission.
 Outside keys cannot receive vision while upstream encoder embeddings are cached without the scope salt.

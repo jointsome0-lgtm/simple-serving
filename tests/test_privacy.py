@@ -76,6 +76,8 @@ async def gateway(tmp_path: Path, fake: FakeEngine, *, vision: bool = False) -> 
     versions = {"mtp_speculative_tokens": "3", **({"vision": "1"} if vision else {})}  # vLLM drafts, as on the card
     block = service_with(limits={"agent": {"waiting": 0}, "external": {"wall_s": 0.5}}, drain_deadline_s=0.5,
                          versions=versions)
+    if vision:
+        block["body_limit_bytes"] = 4 << 20  # the text default accommodates the larger base64 image
     block["keys"] = [{"sha256": hashlib.sha256(raw.encode()).hexdigest(), **entry,
                       **({"vision": True} if vision and raw == BOT else {})} for raw, entry in block["keys"].items()]
     config = {**block, "engine_url": f"http://127.0.0.1:{engine_socket.getsockname()[1]}", "health_interval_s": 0.1,

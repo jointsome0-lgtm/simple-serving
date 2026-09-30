@@ -173,8 +173,8 @@ never the key:
 ```
 
 `context_tokens` is the gateway's own limit, or `null` for the engine's. Optional fields: `body_limit_bytes`
-(2 000 000), `max_connections` (64), `idle_timeout_s` (780), `health_interval_s` (5) and `versions`, which the control
-key sees in `/v1/state` next to the gateway's own. For text, `versions.mtp_speculative_tokens` must be a positive
+(4 194 304, or 4 MiB), `max_connections` (64), `idle_timeout_s` (780), `health_interval_s` (5) and `versions`, which the
+control key sees in `/v1/state` next to the gateway's own. For text, `versions.mtp_speculative_tokens` must be a positive
 decimal count string matching `[1-9][0-9]*`, or absent when drafting is off. The launcher writes it while MTP is on;
 it enables the early `min_p` refusal described below. The text entry `versions.thinking_budget` is exactly `"on"`
 when request budgets are enabled, and absent when disabled. Other values are invalid. `versions.vision` is exactly
@@ -329,7 +329,9 @@ its tokenizer assets beside the weights. The launcher replaces `--language-model
 zero audio/video and `--mm-processor-cache-gb 0`. It grants the text client key image permission; control and metrics
 keys remain separate. Preparation rejects any switch value other than 0 or 1 before writing card state.
 
-The gateway accepts one PNG/JPEG/WebP base64 data URL up to 1 MiB of compressed bytes. It refuses network and file
+The gateway accepts one PNG/JPEG/WebP base64 data URL up to 2 MiB (2 097 152 bytes) of compressed image bytes.
+Its base64 representation takes about 2.67 MiB, leaving room for text and JSON under the default 4 MiB HTTP body
+limit. Explicit `body_limit_bytes` settings still apply to the whole request. It refuses network and file
 URLs before any engine call. The decoder and GPU memory use remain the engine's responsibility. Encoder embeddings
 can be reused across internal scopes even though prefix KV is salted. The [vision procedure](vision-smoke.md)
 uses synthetic images and an explicit `--only vision` probe; default smoke does not send images.
