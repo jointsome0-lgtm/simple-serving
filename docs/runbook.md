@@ -273,6 +273,17 @@ against 57 to 67 without the drafter, and vLLM accepted 21718 of 34343 drafted t
 `KV_OFFLOADING_GIB` in the manifest gives vLLM a copy of the KV cache in the card's RAM, and it is 0, off, until a
 rental measures it ([speed.md](speed.md), item 5). It is switched as the drafter is, by the preparation
 again and a new start, and `/v1/state` then names its size among the versions.
+The copy is a file in `/dev/shm` that is resident from the engine's start, so a size the container cannot hold is
+refused before it costs a load: bootstrap.sh ends with 9, having installed and fetched nothing, and the launcher
+gives up as `unfit` and stops the instance. `python3 /workspace/simple-serving/simple_serving/preflight.py report`
+on the card prints the numbers and the largest size that fits, and `plan --offload-gib N` prints the RAM an offer
+must have.
+
+`MODEL_PROFILE=qwen` in the manifest serves the second model, Qwen3.8-27B in NVFP4 with its own MTP layer, in
+place of Gemma: the `QWEN_` values stand for the values of the same names. It is `gemma` by default, and nothing of
+Gemma's preparation or arguments changes then. The bootstrap refuses the profile with 9 on a card that is not
+Blackwell or has under 30000 MiB, and with 3 beside `VISION=1`. The model has never been loaded here:
+[qwen.md](qwen.md) holds what the source establishes and what the first rental has to check.
 
 What else might make the card faster, not measured yet, is in [speed.md](speed.md).
 

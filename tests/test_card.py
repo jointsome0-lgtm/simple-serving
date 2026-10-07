@@ -27,7 +27,7 @@ from typing import Any, cast
 
 import pytest
 
-from simple_serving import card
+from simple_serving import card, preflight
 from simple_serving.card import Card
 from simple_serving.config import load as load_config
 from simple_serving.pictures.card import PictureCard
@@ -822,3 +822,152 @@ def test_bootstrap_fetches_the_pinned_drafter_with_mtp_on_and_keeps_a_file_only_
     (hub / "config.json").write_bytes(b'{"other": true}')
     assert bootstrap("3") == 1  # the hub's bytes are not the pinned ones
     assert [path.name for path in drafter.iterdir()] == ["model.safetensors"]  # and no part of them stays
+
+
+def test_a_copy_of_the_kv_cache_fits_only_with_the_shm_and_the_memory_for_it(tmp_path: Path) -> None:
+    gib = 1024
+    assert preflight.offload_reasons(0, None, None) == []  # off: nothing is asked of the container
+    assert preflight.offload_reasons(12, 12 * gib + 512, 24 * gib) == []
+    assert preflight.offload_reasons(12, 12 * gib + 511, 24 * gib) == ["shm_too_small"]
+    assert preflight.offload_reasons(12, 30720, 24 * gib - 1) == ["memory_too_small"]
+    # The 16 GiB that vLLM refused on a host of 251 GB whose /dev/shm was 15 GiB (docs/speed.md, item 5).
+    assert preflight.offload_reasons(16, 15 * gib, 240 * gib) == ["shm_too_small"]
+    assert preflight.offload_reasons(12, None, None, "expandable_segments:True") == [
+        "shm_too_small", "memory_too_small", "expandable_segments"]  # a number that cannot be read refuses too
+    assert preflight.largest_offload_gib(30720, 60 * gib) == 29
+    assert preflight.largest_offload_gib(15 * gib, 16 * gib) == 4
+    assert preflight.offer_needs(24) == {"offload_gib": 24, "min_memory_mib": 36 * gib, "min_ram_gb": 39,
+                                         "min_shm_mib": 24 * gib + 512}
+    cgroup, proc = tmp_path / "cgroup", tmp_path / "proc"
+    cgroup.mkdir()
+    proc.mkdir()
+    (proc / "meminfo").write_text(f"MemTotal:       {64 * gib * 1024} kB\nMemFree:        1 kB\n")
+    assert preflight.memory_limit_mib(cgroup, proc) == 64 * gib  # no limit: the machine's RAM
+    (cgroup / "memory.max").write_text("max\n")
+    assert preflight.memory_limit_mib(cgroup, proc) == 64 * gib
+    (cgroup / "memory.max").write_text(f"{20 * gib * 1024 * 1024}\n")
+    assert preflight.memory_limit_mib(cgroup, proc) == 20 * gib  # the container's limit, below the machine's
+    assert preflight.gpu_reasons((120, 32607), 120, 30000) == []
+    assert preflight.gpu_reasons((89, 24564), 120, 30000) == ["gpu_compute_cap_too_low", "gpu_memory_too_small"]
+    assert preflight.gpu_reasons(None, 120, 30000) == ["gpu_unknown"]
+
+
+@pytest.mark.anyio
+async def test_a_copy_the_container_cannot_hold_starts_nothing_gives_up_and_stops_the_instance(
+        state: Path, logged: io.StringIO, monkeypatch: pytest.MonkeyPatch) -> None:
+    stand_in(state / ENGINE)
+    stand_in(state / GATEWAY)
+    monkeypatch.setattr(preflight, "measured", lambda environ: {"shm_free_mib": 15360, "memory_limit_mib": 20480})
+    vast = FakeVast()
+    assert await card.launch(card_at(state, KV_OFFLOADING_GIB="16"), asyncio.Event(), vast) == "unfit"
+    assert vast.stopped and (state / "given-up").read_text() == "unfit\n"
+    assert [row["code"] for row in rows(logged, "unfit")] == ["shm_too_small", "memory_too_small"]
+    assert sorted(path.name for path in (state / "vllm/bin").iterdir()) == ["vllm", "vllm.plan"]  # never ran
+    monkeypatch.setattr(preflight, "measured", lambda environ: pytest.fail("off, nothing is read"))
+    assert card_at(state).unfit() == []
+
+
+def test_the_qwen_profile_is_one_manifest_value_and_gemmas_arguments_stay_as_they_are(state: Path) -> None:
+    (state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL}))
+    gemma, qwen = card_at(state), card_at(state, MODEL_PROFILE="qwen")
+    m = gemma.manifest
+    assert m["MODEL_PROFILE"] == "gemma"  # off by default
+    without = replace(gemma, manifest={name: value for name, value in m.items()
+                                       if name != "MODEL_PROFILE" and not name.startswith("QWEN_")})
+    assert gemma.engine().argv == without.engine().argv and gemma.config() == without.config()
+    assert "model_profile" not in card.pinned_versions(m)
+    assert not {"qwen3", m["QWEN_MODEL_ALIAS"], "--prefix-match-unit"} & set(gemma.engine().argv)
+    argv = qwen.engine().argv
+    assert argv[2] == str(state / "models" / m["QWEN_MODEL_REVISION"]) != gemma.engine().argv[2]
+
+    def value(name: str) -> str:
+        return argv[argv.index(name) + 1]
+
+    assert value("--served-model-name") == m["QWEN_MODEL_ALIAS"] == qwen.config()["alias"]
+    assert value("--tokenizer") == str(state / "tokenizers" / m["QWEN_TOKENIZER_REVISION"])
+    assert value("--max-model-len") == m["QWEN_CONTEXT_TOKENS"] and qwen.config()["context_tokens"] == 32768
+    assert value("--reasoning-parser") == "qwen3"
+    # The drafter is a layer of the weights' own: no model is named, and nothing of a second repository is pinned.
+    assert value("--speculative-config") == '{"method": "mtp", "num_speculative_tokens": 3}'
+    # Nothing of the repository runs as code: vLLM 0.30.0 has the architecture (docs/qwen.md, fact 1).
+    assert "--trust-remote-code" not in argv and "--language-model-only" in argv and "--prefix-match-unit" not in argv
+    assert card.pinned_versions(qwen.manifest) == {
+        "vllm": m["VLLM_VERSION"], "model_revision": m["QWEN_MODEL_REVISION"],
+        "tokenizer_revision": m["QWEN_TOKENIZER_REVISION"], "model_profile": "qwen", "mtp_speculative_tokens": "3"}
+    budget = card_at(state, MODEL_PROFILE="qwen", THINKING_BUDGET="1", QWEN_PREFIX_MATCH_UNIT="32",
+                     QWEN_MTP_SPECULATIVE_TOKENS="0")
+    assert budget.engine().argv[-4:] == ["--reasoning-config",
+                                         '{"reasoning_start_str": "<think>", "reasoning_end_str": "</think>"}',
+                                         "--prefix-match-unit", "32"]
+    assert "--speculative-config" not in budget.engine().argv
+    # Every pinned file has its size, which is what the bootstrap asks of the disk before it fetches.
+    sizes = dict(entry.split(":") for entry in m["QWEN_MODEL_SIZES"].split(","))
+    files = dict(entry.split(":") for entry in m["QWEN_MODEL_FILES"].split(","))
+    assert sizes.keys() == files.keys() and all(re.fullmatch("[0-9a-f]{64}", digest) for digest in files.values())
+    assert sum(map(int, sizes.values())) == 20_559_300_089
+
+
+def test_bootstrap_refuses_an_unfit_container_before_it_installs_and_fetches_qwen_by_its_hashes(
+        tmp_path: Path) -> None:
+    code, state, root, hub, calls = (tmp_path / name for name in ("code", "state", "root", "hub", "calls"))
+    for path in (code / "card", code / "simple_serving", root, hub, tmp_path / "bin"):
+        path.mkdir(parents=True)
+    for name in ("card/bootstrap.sh", "card/onstart.sh", "simple_serving/preflight.py"):
+        shutil.copy(card.CODE / name, code / name)
+    for name in ("gateway", "vllm"):
+        (code / f"card/{name}-requirements.txt").write_text(f"{name}==0.0.1 \\\n    --hash=sha256:{'0' * 64}\n")
+    manifest = (card.CODE / "card/manifest.env").read_text()
+    loaded = Card.load(state=state, environ={}, root=root).manifest
+    files = {"model.safetensors": b"synthetic qwen weights", "model-mtp-bf16.safetensors": b"synthetic mtp layer",
+             "tokenizer.json": b'{"synthetic": "qwen"}'}
+    for name, data in files.items():
+        (hub / name).write_bytes(data)
+    (state / "tokenizer").mkdir(parents=True)
+    (state / "tokenizer/tokenizer.json").write_bytes(b"{}")  # Gemma's, which the qwen profile leaves alone
+    (state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL}) + "\n")
+    for path in (state / "gateway/bin/pip", state / "vllm/bin/pip", state / GATEWAY):
+        recorder(path, calls)
+    aria2c = tmp_path / "bin/aria2c"  # notes its call and fetches the file of its URL from `hub`
+    aria2c.write_text(f'#!/bin/sh\necho "aria2c $*" >> {calls}\nfor arg; do case $arg in --dir=*) dir=${{arg#*=}};; '
+                      f'--out=*) out=${{arg#*=}};; esac; url=$arg; done\ncp "{hub}/${{url##*/}}" "$dir/$out"\n')
+    aria2c.chmod(0o700)
+    environ = {"PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "SIMPLE_SERVING_CARD_DIR": str(state),
+               "SIMPLE_SERVING_CARD_ROOT": str(root), **CREDENTIAL}
+
+    def pinned(*names: str) -> str:
+        return ",".join(f"{name}:{hashlib.sha256(files[name]).hexdigest()}" for name in names)
+
+    weights = ("model.safetensors", "model-mtp-bf16.safetensors")
+    pins = {"VLLM_VERSION": "0.0.1", "QWEN_MODEL_FILES": pinned(*weights),
+            "QWEN_MODEL_SIZES": ",".join(f"{name}:{len(files[name])}" for name in weights),
+            "QWEN_TOKENIZER_FILES": pinned("tokenizer.json")}
+
+    def bootstrap(gpu: str = "12.0, 32607", **changes: str) -> int:
+        smi = tmp_path / "bin/nvidia-smi"  # the card: its compute capability and its memory
+        smi.write_text(f'#!/bin/sh\necho "{gpu}"\n')
+        smi.chmod(0o700)
+        lines = {**pins, "MODEL_PROFILE": "qwen", **changes}.items()
+        (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in lines))
+        return subprocess.run(["bash", str(code / "card/bootstrap.sh")], stdin=subprocess.DEVNULL, env=environ,
+                              capture_output=True, timeout=60, check=False).returncode
+
+    assert bootstrap(MODEL_PROFILE="llama") == 3 and bootstrap(VISION="1") == 3  # no such profile; qwen is text only
+    assert bootstrap(MODEL_PROFILE="gemma", KV_OFFLOADING_GIB="1000000") == 9  # a copy no container holds
+    assert bootstrap("8.9, 24564") == 9  # a 4090: not the card NVFP4's kernels are for, and too small
+    assert bootstrap("12.0, 16303") == 9  # a Blackwell card too small for the weights
+    assert bootstrap(QWEN_MODEL_SIZES=f"model.safetensors:{1 << 60}") == 9  # more than the disk holds
+    assert not calls.exists() and not (state / "models").exists()  # refused before pip and before any fetch
+    model, tokenizer = state / "models" / loaded["QWEN_MODEL_REVISION"], state / "tokenizers"
+    (hub / "model-mtp-bf16.safetensors").write_bytes(b"other bytes")
+    assert bootstrap() == 1  # the hub's bytes are not the pinned ones
+    assert [path.name for path in model.iterdir()] == ["model.safetensors"]  # and no part of them stays
+    (hub / "model-mtp-bf16.safetensors").write_bytes(files["model-mtp-bf16.safetensors"])
+    assert bootstrap() == 0
+    fetched = [line.rsplit(" ", 1)[1] for line in calls.read_text().splitlines() if line.startswith("aria2c")]
+    assert fetched == [f"https://huggingface.co/{loaded['QWEN_MODEL_REPO']}/resolve/{loaded['QWEN_MODEL_REVISION']}/"
+                       f"{name}" for name in ("model.safetensors", "model-mtp-bf16.safetensors",
+                                              "model-mtp-bf16.safetensors", "tokenizer.json")]
+    assert {path.name: path.read_bytes() for path in model.iterdir()} == {name: files[name] for name in weights}
+    assert (tokenizer / loaded["QWEN_TOKENIZER_REVISION"] / "tokenizer.json").read_bytes() == files["tokenizer.json"]
+    assert (state / "tokenizer/tokenizer.json").read_bytes() == b"{}" and not (state / "drafters").exists()
+    assert calls.read_text().count("python -m simple_serving.card") == 1

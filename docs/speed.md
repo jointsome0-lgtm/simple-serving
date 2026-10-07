@@ -53,18 +53,51 @@ should compare cached prompt tokens, reader TTFT and interference pauses against
 4. **The drafter's count.** 3 was measured against none, and 2 and 4 were not. Its acceptance fell from 78 to 62 and
    49 per cent over the three positions.
 5. **A copy of the KV cache in RAM** (`KV_OFFLOADING_GIB`, off). The owner asked for it on 2026-09-27, so that a
-   reader who reads on the card while it is measured keeps their story warm. The cache on the GPU holds 104492
-   tokens, and four long stories at once do not fit in it: a story whose prefix was dropped reads all of it again,
-   30000 to 44000 tokens, 10 to 15 s of the card at the 3000 tokens a second simple-story-chat's throughput study
-   assumed. vLLM's native backend keeps the dropped blocks in a pinned buffer and loads them back over PCIe. By vLLM
-   0.30.0's source it stores what a later hit can use: every block of the global layers, 40 KiB a token, and of the
-   sliding layers only the windows at the prompt's end and at the shared prefix's end, about 412 MiB each. A story of
-   40000 tokens would then take about 2.5 GiB, and 12 GiB would keep four. That is an estimate, not a measurement.
-   Before turning it on, read the container's memory (`/sys/fs/cgroup/memory.max`, or `free -g` where that is `max`)
-   and the engine's resident memory in the reference run, and leave the engine that and a few GiB more. A buffer that
-   does not fit fails the engine at its start, and the launcher then stops the instance. It is measured on four long
-   stories interleaved, with and without it: the prompt tokens read again (`input_tokens` against `cached_tokens` in
-   the gateway's log) and each turn's first token.
+   reader who reads on the card while it is measured keeps their story warm. The cache on the GPU held 104492
+   tokens, and four long stories at once do not fit in it. This item was corrected on 2026-10-07 from vLLM 0.30.0's
+   source and from the two measurements of 2026-09-27 that `held-criterion` records at `a898060`; paths below are in
+   the `v0.30.0` tree, and `offloading/` is `vllm/distributed/kv_transfer/kv_connector/v1/offloading/`.
+   - *Where it lives.* One file in `/dev/shm`, at a fixed path, mapped shared
+     (`vllm/v1/kv_offload/cpu/shared_offload_region.py:111,121-151`). vLLM refuses a size above that mount's free
+     space at its start (`:138`, `vllm/distributed/device_communicators/shm_broadcast.py:227-247`) and faults every
+     page in (`shared_offload_region.py:211-235`), so the whole size is resident from the first minute and counts
+     against the container's memory. Pinning it with `cudaHostRegister` is tried, and a failure is a warning
+     (`vllm/v1/kv_offload/cpu/gpu_worker.py:193-220`).
+   - *`/dev/shm` decides, and the offer does not show it.* Its size was 15 GiB on a host of 251 GB, where 16 GiB was
+     refused with "Insufficient space in /dev/shm", and 30 GiB on a host of 63 GB. It is set when the container is
+     created (Docker's `--shm-size` or `--ipc=host`, which vLLM's own message names); no option or variable of vLLM
+     0.30.0 moves the file elsewhere, and a remount from inside needs a privilege that no rental has been seen to
+     give. So the size is read once the container is up, and the buffer follows it:
+     `python3 simple_serving/preflight.py report` prints `/dev/shm`'s free space, the memory limit and the largest
+     `KV_OFFLOADING_GIB` that fits.
+   - *A size that does not fit is refused before it costs anything.* `card/bootstrap.sh` ends with 9 before it
+     installs or fetches, and the launcher gives up as `unfit` and stops the instance before it loads
+     (`simple_serving/preflight.py`). The rule: `/dev/shm` holds the size and 512 MiB more, and the memory limit
+     holds the size and 12 GiB for the engine. The 12 GiB are provisional, since no rental recorded the engine's
+     resident memory. vLLM also refuses any copy while `PYTORCH_CUDA_ALLOC_CONF` holds `expandable_segments:True`
+     (`vllm/config/vllm.py:1090-1109`); the check refuses that first.
+   - *What is written.* Prompt blocks, as they are computed and not when the GPU drops them
+     (`offloading/scheduler.py:1464-1740`), one chunk for a GPU block of a cache group, 1.25 MiB for Gemma. The
+     global layers cost 40 KiB a token and the sliding layers 400 KiB. With `--prefix-cache-retention-interval None`,
+     which the launcher sets, every sliding block is stored
+     (`vllm/v1/core/single_type_kv_cache_manager.py:1108-1117`): **440 KiB a token written**, so a prompt of 16000
+     tokens writes 6.7 GiB and one of 40000 writes 16.8 GiB. With retention 0 only the windows at the prompt's end
+     and at a shared prefix's end are stored, about 412 MiB each, which is what this item said before.
+   - *What a hit needs.* Every global chunk of the prefix and one window of sliding chunks at its end
+     (`offloading/scheduler.py:642-718,841-866`): N x 40 KiB + about 412 MiB, 1.0 GiB at 16000 tokens. The rest of
+     what was written is dropped first, since a lookup touches only what a hit needs
+     (`:720-737`, `vllm/v1/kv_offload/cpu/policies/lru.py:43-78`).
+   - *Sizing.* A session's chunks last from one of its turns to its next when all that is touched or written in
+     between fits: for T sessions that take turns, each growing D tokens a turn, about
+     T x (N x 40 KiB + 412 MiB + D x 440 KiB). Twenty sessions at D = 300 need 12.9 GiB at 3000 tokens, 17.8 GiB at
+     9500 and 22.8 GiB at 16000. This is derived, not measured. A size at or below the GPU's own cache, 6 to 9 GiB,
+     adds nothing (vLLM's `docs/features/kv_offloading_usage.md:326`).
+   - *Measured so far.* On the 5090 with the 31B and its drafter, 12 GiB started, and four interleaved stories read 0
+     of 294715 prompt tokens from it, under retention 0. On the cheap card with Gemma 4 E2B, 8 GiB read 146304 of
+     295905. The copy under dense retention has never run. Its cost to a prefill step, and the speed of a load from
+     RAM, are not known.
+   - *How it is measured.* The [worlds measurement](worlds.md), with the copy off and on, on one card: cached
+     prompt tokens in later turns and each turn's first token.
 
 ## Concurrency measurement tool
 

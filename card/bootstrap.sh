@@ -11,8 +11,11 @@
 # runs card/onstart.sh for the first start. At every later start the rental's own onstart runs it (README, "The card"):
 # the preparation changes no onstart, which the platform may restore at a start. A second run changes nothing that
 # is in place, and no run prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed;
-# 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS or KV_OFFLOADING_GIB is not a count, or THINKING_BUDGET or VISION
-# is neither 0 nor 1; 4 no keys, or not two or three different SHA-256 digests; 5 the card holds other keys, which stay.
+# 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS or KV_OFFLOADING_GIB is not a count, THINKING_BUDGET or VISION
+# is neither 0 nor 1, or MODEL_PROFILE is neither gemma nor qwen, or qwen with VISION=1; 4 no keys, or not two or three
+# different SHA-256 digests; 5 the card holds other keys, which stay; 9 the container does not fit the manifest, and
+# nothing was installed or fetched: KV_OFFLOADING_GIB does not fit /dev/shm or the memory, or the qwen profile's
+# weights need another card or more disk (simple_serving/preflight.py prints the numbers).
 # A card with only the first two keys can add the metrics key for its next start. The last step is the launcher's
 # start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
 # SIMPLE_SERVING_CARD_DIR and SIMPLE_SERVING_CARD_ROOT move the state and /root, for tests.
@@ -23,6 +26,24 @@ state=${SIMPLE_SERVING_CARD_DIR:-/workspace/simple-serving-card}
 source "$code/card/manifest.env"
 stamped=("$code/card/manifest.env" "$code/card/gateway-requirements.txt" "$code/card/vllm-requirements.txt")
 
+# The model's profile. With qwen each QWEN_<NAME> stands for <NAME>, as in simple_serving/card.py, the tokenizer has a
+# directory of its own, and no drafter is fetched: the model's is inside its weights.
+profile=${MODEL_PROFILE:-gemma}
+tokenizer=$state/tokenizer
+case $profile in
+  gemma) ;;
+  qwen)
+    for pin in MODEL_REPO MODEL_REVISION MODEL_FILES MODEL_SIZES TOKENIZER_REPO TOKENIZER_REVISION TOKENIZER_FILES \
+      MTP_SPECULATIVE_TOKENS MIN_COMPUTE_CAP MIN_GPU_MIB; do
+      name=QWEN_$pin
+      [[ -n ${!name:-} ]] || exit 3
+      printf -v "$pin" %s "${!name}"
+    done
+    [[ $MIN_COMPUTE_CAP =~ ^[1-9][0-9]*$ && $MIN_GPU_MIB =~ ^[1-9][0-9]*$ ]] || exit 3
+    tokenizer=$state/tokenizers/$TOKENIZER_REVISION ;;
+  *) exit 3 ;;
+esac
+
 for pin in VLLM_VERSION MODEL_REPO MODEL_REVISION MODEL_FILES TOKENIZER_REPO TOKENIZER_REVISION TOKENIZER_FILES; do
   [[ -n ${!pin} ]] || exit 3
 done
@@ -32,7 +53,8 @@ for file in "${stamped[@]}"; do [[ -s $file ]] || exit 3; done
 [[ ${KV_OFFLOADING_GIB:-} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3  # GiB for the KV cache's copy in RAM, the same way
 [[ ${THINKING_BUDGET:-} =~ ^[01]$ ]] || exit 3  # the thinking budget, on or off
 [[ ${VISION:-} =~ ^[01]$ ]] || exit 3  # 1 loads Gemma 4's vision tower, 0 keeps it off the GPU
-if [[ $MTP_SPECULATIVE_TOKENS != 0 ]]; then
+[[ $profile == gemma || $VISION == 0 ]] || exit 3  # the qwen profile is text only
+if [[ $MTP_SPECULATIVE_TOKENS != 0 && $profile == gemma ]]; then
   for pin in DRAFTER_REPO DRAFTER_REVISION DRAFTER_FILES; do [[ -n ${!pin:-} ]] || exit 3; done
 fi
 # With VISION=1 vLLM 0.30.0 builds Gemma 4's picture processor from the weights' directory, and transformers loads a
@@ -50,7 +72,15 @@ if [[ $VISION == 1 ]]; then
 fi
 grep -Fq "vllm==$VLLM_VERSION " "$code/card/vllm-requirements.txt" || exit 3
 model=$state/models/$MODEL_REVISION
-mkdir -p "$model" "$state/tokenizer"
+# What the container must have for this manifest, before anything is installed or fetched: room in /dev/shm and in
+# its memory for the KV cache's copy, and for the qwen profile the card its weights need and the disk for them. With
+# neither asked, as in the manifest's defaults, nothing is checked.
+fit=()
+[[ $KV_OFFLOADING_GIB == 0 ]] || fit+=(--offload-gib "$KV_OFFLOADING_GIB")
+[[ $profile == gemma ]] ||
+  fit+=(--min-compute-cap "$MIN_COMPUTE_CAP" --min-gpu-mib "$MIN_GPU_MIB" --files "$MODEL_SIZES" --into "$model")
+if (( ${#fit[@]} )); then python3 "$code/simple_serving/preflight.py" check "${fit[@]}" || exit 9; fi
+mkdir -p "$model" "$tokenizer"
 
 read -r client || true
 read -r control || true
@@ -112,17 +142,17 @@ fetch() {
 # processor's while VISION is 0. Hidden ones stay: this glob skips them, and so does vLLM's.
 for path in "$model"/*; do [[ ,$MODEL_FILES$processor == *,"${path##*/}":* ]] || rm -f "$path"; done
 fetch "$MODEL_REPO" "$MODEL_REVISION" "$MODEL_FILES" "$model"
-fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "$TOKENIZER_FILES" "$state/tokenizer"
+fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "$TOKENIZER_FILES" "$tokenizer"
 # The processor's files are copies of the tokenizer's, which the fetch then checks against their pins. The chat
 # template stays out: vLLM takes it from --tokenizer alone.
 if [[ -n $processor ]]; then
   IFS=, read -ra entries <<< "${processor#,}"
-  for entry in "${entries[@]}"; do cp "$state/tokenizer/${entry%%:*}" "$model/"; done
+  for entry in "${entries[@]}"; do cp "$tokenizer/${entry%%:*}" "$model/"; done
   fetch "$TOKENIZER_REPO" "$TOKENIZER_REVISION" "${processor#,}" "$model"
 fi
 # The drafter in a directory of its own, since the loop above empties the weights' of all it does not pin, and vLLM
 # loads every *.safetensors in each. Off, nothing of it is fetched or removed.
-if [[ $MTP_SPECULATIVE_TOKENS != 0 ]]; then
+if [[ $MTP_SPECULATIVE_TOKENS != 0 && $profile == gemma ]]; then
   drafter=$state/drafters/$DRAFTER_REVISION
   mkdir -p "$drafter"
   for path in "$drafter"/*; do [[ ,$DRAFTER_FILES == *,"${path##*/}":* ]] || rm -f "$path"; done

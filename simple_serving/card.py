@@ -58,7 +58,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
-from . import log, vast
+from . import log, preflight, vast
 from .config import DRAFTED_TOKENS, IDLE_TIMEOUT_S, PROVISIONAL, THINKING_BUDGET, VISION
 
 CODE = Path(__file__).resolve().parent.parent  # the checkout
@@ -83,6 +83,10 @@ ENGINE_ENV = {"VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1", "HF_HUB_OFFLINE":
 # (tokenizer_config.json), and vLLM 0.30.0's CHANNEL_START and CHANNEL_END (vllm/parser/gemma4.py:38-39). vLLM counts
 # a budget's tokens from the first, and writes the second once they are spent.
 THOUGHT_MARKERS = {"reasoning_start_str": "<|channel>", "reasoning_end_str": "<channel|>"}
+# The manifest's second model, MODEL_PROFILE=qwen (docs/qwen.md): Qwen3.8-27B in NVFP4, vLLM's Qwen3_5 architecture.
+# Its thought is <think>...</think> (the pinned chat_template.jinja:165-168; vllm/parser/qwen3.py:41-42).
+QWEN = "qwen"
+QWEN_THOUGHT_MARKERS = {"reasoning_start_str": "<think>", "reasoning_end_str": "</think>"}
 
 # vLLM's wording of the numbers kept, as in the source of vLLM 0.30.0, and provisional until the first rental checks
 # each against its output. A field's last word names its unit, and SCALE turns vLLM's GiB, seconds and factors into it.
@@ -214,17 +218,20 @@ class Card:
         return {name: int(self.manifest[f"{name.upper()}_PORT"]) for name in ("public", "control", "engine")}
 
     def engine(self) -> Command:
-        m = self.manifest
+        m = profiled(self.manifest)
+        qwen = m.get("MODEL_PROFILE") == QWEN
+        tokenizer = self.state / "tokenizers" / m["TOKENIZER_REVISION"] if qwen else self.state / "tokenizer"
         return Command([
             str(self.state / "vllm/bin/vllm"), "serve", str(self.state / "models" / m["MODEL_REVISION"]),
             "--served-model-name", m["MODEL_ALIAS"], "--host", "127.0.0.1", "--port", m["ENGINE_PORT"],
-            "--tokenizer", str(self.state / "tokenizer"), "--max-model-len", m["CONTEXT_TOKENS"],
+            "--tokenizer", str(tokenizer), "--max-model-len", m["CONTEXT_TOKENS"],
             "--max-num-seqs", m["MAX_NUM_SEQS"], "--max-num-batched-tokens", m["MAX_NUM_BATCHED_TOKENS"],
             "--gpu-memory-utilization", m["GPU_MEMORY_UTILIZATION"], "--kv-cache-dtype", m["KV_CACHE_DTYPE"],
             "--scheduling-policy", "priority", "--enable-prefix-caching", "--enable-prompt-tokens-details",
             # Dense sliding-window checkpoints for reuse between story turns; dated measurements are in docs/speed.md.
             "--prefix-cache-retention-interval", "None",
-            "--reasoning-parser", "gemma4",  # the model's thinking in the reasoning field, apart from the answer
+            # The model's thinking in the reasoning field, apart from the answer.
+            "--reasoning-parser", "qwen3" if qwen else "gemma4",
             # A schema's JSON from xgrammar alone, which has no fallback: a schema compiles with the pinned version or
             # is refused. Whitespace between its tokens is allowed, as the bot's llama.cpp allows it: forbidden, it left
             # 5 of the action measurement's 18 sheets with nobody on them (contract, "Decided").
@@ -233,15 +240,21 @@ class Card:
             # Sampling defaults from vLLM: the model's generation_config.json is pinned for its stop ids alone.
             "--generation-config", "vllm",
             "--disable-uvicorn-access-log", "--uvicorn-log-level", "warning",
-            *self.speculation(), *self.offloading(), *self.reasoning(),
+            *self.speculation(), *self.offloading(), *self.reasoning(), *self.matching(),
         ], {name: value for name, value in os.environ.items() if name != "CONTAINER_API_KEY"} | ENGINE_ENV)
 
     def speculation(self) -> list[str]:
         """vLLM's arguments for Gemma 4's multi-token prediction, and none while MTP_SPECULATIVE_TOKENS is 0: the
         drafter that bootstrap.sh fetched drafts that many tokens a step, and the heretic verifies each."""
-        tokens = int(self.manifest["MTP_SPECULATIVE_TOKENS"])
+        m = profiled(self.manifest)
+        tokens = int(m["MTP_SPECULATIVE_TOKENS"])
         if not tokens:
             return []
+        if m.get("MODEL_PROFILE") == QWEN:
+            # Qwen's drafter is a layer inside its own weights (mtp.* in model-mtp-bf16.safetensors), which vLLM
+            # 0.30.0 loads from the target's directory when no model is named (vllm/config/speculative.py:1127-1140).
+            # The model card's method name, qwen3_5_mtp, is deprecated there for this one (:1121-1125).
+            return ["--speculative-config", json.dumps({"method": "mtp", "num_speculative_tokens": tokens})]
         drafter = self.state / "drafters" / self.manifest["DRAFTER_REVISION"]
         return ["--speculative-config",
                 json.dumps({"method": "mtp", "model": str(drafter), "num_speculative_tokens": tokens})]
@@ -257,14 +270,30 @@ class Card:
         the same markers from --reasoning-parser gemma4 without it (vllm/config/reasoning.py:83-95), so the argument
         pins them rather than turns the budget on: with or without it, the gateway is what refuses a budget while the
         switch is 0. It is not among the factors of vLLM's compile cache (VllmConfig.compute_hash)."""
-        return ["--reasoning-config", json.dumps(THOUGHT_MARKERS)] if int(self.manifest["THINKING_BUDGET"]) else []
+        if not int(self.manifest["THINKING_BUDGET"]):
+            return []
+        qwen = self.manifest.get("MODEL_PROFILE") == QWEN
+        return ["--reasoning-config", json.dumps(QWEN_THOUGHT_MARKERS if qwen else THOUGHT_MARKERS)]
+
+    def matching(self) -> list[str]:
+        """vLLM's argument for where a prefix hit may land, for a profile that sets PREFIX_MATCH_UNIT above 0, and
+        none otherwise. Qwen's cache block is as wide as one recurrent state, about 1600 tokens, and by default a hit
+        lands only on a block's edge; a finer unit that divides the block lets it land on the last prompt's own edge
+        (vllm/config/cache.py:91-102). Gemma's blocks are 16 and 32 tokens, so it has no such value."""
+        unit = int(profiled(self.manifest).get("PREFIX_MATCH_UNIT", "0"))
+        return ["--prefix-match-unit", str(unit)] if unit else []
+
+    def unfit(self) -> list[str]:
+        """Why this container cannot hold the manifest's copy of the KV cache in RAM, by preflight.py's codes, or
+        nothing. While KV_OFFLOADING_GIB is 0, nothing is read."""
+        return preflight.offload_unfit(int(self.manifest.get("KV_OFFLOADING_GIB", "0")))
 
     def vision(self) -> list[str]:
         """vLLM's arguments for pictures. While VISION is 0, text only: the vision tower stays off the GPU. With 1 it
         loads, a prompt holds one image at most and no video or audio, and the processor cache is disabled. The
         separate encoder cache still reuses embeddings across scopes (contract section 10)."""
-        if not int(self.manifest["VISION"]):
-            return ["--language-model-only"]
+        if not int(self.manifest["VISION"]) or self.manifest.get("MODEL_PROFILE") == QWEN:
+            return ["--language-model-only"]  # the Qwen profile is text only: bootstrap.sh refuses it with VISION=1
         return ["--limit-mm-per-prompt", json.dumps({"image": 1, "video": 0, "audio": 0}),
                 "--mm-processor-cache-gb", "0"]
 
@@ -276,7 +305,7 @@ class Card:
     def config(self) -> dict[str, Any]:
         """The gateway's configuration: the provisional limits, the manifest's model and ports, and the hashes of the
         keys. The text client key may send pictures while vLLM takes them."""
-        m, keys = self.manifest, self.keys()
+        m, keys = profiled(self.manifest), self.keys()
         if int(m["VISION"]):
             keys[0]["vision"] = True
         return PROVISIONAL | {
@@ -324,11 +353,15 @@ def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
     size, so that a record says which it measured. Drafted tokens tell the gateway which min_p vLLM refuses
     (config.DRAFTED_TOKENS). The thinking budget and vision entries allow a request's budget and pictures to reach
     vLLM (config.THINKING_BUDGET and config.VISION)."""
+    manifest = profiled(manifest)
+    qwen = manifest.get("MODEL_PROFILE") == QWEN
     pins = {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
             "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
+    if qwen:
+        pins |= {"model_profile": QWEN}
     if int(manifest["MTP_SPECULATIVE_TOKENS"]):
-        pins |= {"drafter_revision": manifest["DRAFTER_REVISION"],
-                 DRAFTED_TOKENS: manifest["MTP_SPECULATIVE_TOKENS"]}
+        pins |= {} if qwen else {"drafter_revision": manifest["DRAFTER_REVISION"]}  # Qwen's drafter is in its weights
+        pins |= {DRAFTED_TOKENS: manifest["MTP_SPECULATIVE_TOKENS"]}
     if int(manifest["KV_OFFLOADING_GIB"]):
         pins |= {"kv_offloading_gib": manifest["KV_OFFLOADING_GIB"]}
     if int(manifest["THINKING_BUDGET"]):
@@ -340,8 +373,17 @@ def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
 
 def read_manifest(code: Path = CODE, folder: str = "card", name: str = "manifest.env") -> dict[str, str]:
     lines = (line.strip() for line in (code / folder / name).read_text().splitlines())
-    return {name: value for name, _, value in (line.partition("=") for line in lines)
-            if name and not name.startswith("#")}
+    return dict(profiled({name: value for name, _, value in (line.partition("=") for line in lines)
+                          if name and not name.startswith("#")}))
+
+
+def profiled(manifest: Mapping[str, str]) -> Mapping[str, str]:
+    """The manifest as its model profile reads it. With MODEL_PROFILE=qwen each QWEN_<NAME> stands for <NAME>, as in
+    bootstrap.sh; with gemma, or with no such value, the manifest is itself."""
+    if manifest.get("MODEL_PROFILE") != QWEN:
+        return manifest
+    return {**manifest, **{name.removeprefix("QWEN_"): value for name, value in manifest.items()
+                           if name.startswith("QWEN_")}}
 
 
 def credential(environ: Mapping[str, str], root: Path) -> dict[str, str]:
@@ -469,6 +511,12 @@ async def launch(card: Card, ended: asyncio.Event, stop: vast.Stop) -> str:
     when the card had given up and no retry came."""
     pair = card.pair()
     outcome = await retried(card.state / GIVEN_UP, ended)
+    if outcome is None and (reasons := card.unfit()):
+        # A copy of the KV cache that this container cannot hold would fail vLLM at its start, after the minutes of
+        # its load: nothing is started, and the card gives up as after a failed load.
+        for reason in reasons:
+            log.row("unfit", code=reason)
+        outcome = "unfit"
     if outcome is None:
         try:
             outcome = await pair.run(card.engine(), card.gateway(), float(card.manifest["LOAD_DEADLINE_S"]), ended)
