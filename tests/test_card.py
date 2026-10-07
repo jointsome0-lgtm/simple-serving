@@ -907,6 +907,40 @@ def test_the_qwen_profile_is_one_manifest_value_and_gemmas_arguments_stay_as_the
     assert sum(map(int, sizes.values())) == 20_559_300_089
 
 
+def test_the_small_profile_a_gpu_cache_size_and_more_generations_at_once_are_manifest_values(state: Path) -> None:
+    (state / "keys.json").write_text(json.dumps({"client": CLIENT, "control": CONTROL}))
+    gemma = card_at(state)
+    m = gemma.manifest
+    assert (m["KV_CACHE_MEMORY_MIB"], m["GENERATIONS_AT_ONCE"]) == ("0", "0")  # off by default
+    without = replace(gemma, manifest={name: value for name, value in m.items() if not name.startswith(
+        ("SMALL_", "KV_CACHE_MEMORY_MIB", "GENERATIONS_AT_ONCE"))})
+    assert gemma.engine().argv == without.engine().argv and gemma.config() == without.config()
+    assert "--kv-cache-memory-bytes" not in gemma.engine().argv
+    assert not {"kv_cache_memory_mib", "generations_at_once"} & card.pinned_versions(m).keys()
+    small = card_at(state, MODEL_PROFILE="small", KV_CACHE_MEMORY_MIB="384", KV_OFFLOADING_GIB="4",
+                    GENERATIONS_AT_ONCE="8")
+    argv = small.engine().argv
+
+    def value(name: str) -> str:
+        return argv[argv.index(name) + 1]
+
+    assert argv[2] == str(state / "models" / m["SMALL_MODEL_REVISION"])
+    assert value("--served-model-name") == m["SMALL_MODEL_ALIAS"] == small.config()["alias"] == "gemma-4-e2b-it"
+    assert value("--tokenizer") == str(state / "tokenizers" / m["SMALL_TOKENIZER_REVISION"])
+    assert value("--max-model-len") == "16384" and small.config()["context_tokens"] == 16384
+    assert json.loads(value("--speculative-config")) == {
+        "method": "mtp", "num_speculative_tokens": 3, "model": str(state / "drafters" / m["SMALL_DRAFTER_REVISION"])}
+    # The GPU's cache is 384 MiB whatever the card has free, and the copy in RAM is the manifest's.
+    assert value("--kv-cache-memory-bytes") == str(384 << 20) and value("--kv-offloading-size") == "4"
+    assert "--language-model-only" in argv
+    limits = small.config()["limits"]
+    assert limits["shared"]["active"] == 8 and {limits[cls]["active"] for cls in ("reader", "agent", "internal")} == {8}
+    assert limits["reader"]["waiting"] == gemma.config()["limits"]["reader"]["waiting"]  # only the count at once
+    pinned = card.pinned_versions(small.manifest)
+    assert (pinned["model_profile"], pinned["kv_cache_memory_mib"], pinned["generations_at_once"]) == (
+        "small", "384", "8")
+
+
 def test_bootstrap_refuses_an_unfit_container_before_it_installs_and_fetches_qwen_by_its_hashes(
         tmp_path: Path) -> None:
     code, state, root, hub, calls = (tmp_path / name for name in ("code", "state", "root", "hub", "calls"))
@@ -971,3 +1005,19 @@ def test_bootstrap_refuses_an_unfit_container_before_it_installs_and_fetches_qwe
     assert (tokenizer / loaded["QWEN_TOKENIZER_REVISION"] / "tokenizer.json").read_bytes() == files["tokenizer.json"]
     assert (state / "tokenizer/tokenizer.json").read_bytes() == b"{}" and not (state / "drafters").exists()
     assert calls.read_text().count("python -m simple_serving.card") == 1
+    # The small profile has a model, a tokenizer and a drafter of its own, each by its hash.
+    files |= {"small.safetensors": b"synthetic small weights", "small-drafter.safetensors": b"synthetic drafter",
+              "small-tokenizer.json": b'{"synthetic": "small"}'}
+    for name in ("small.safetensors", "small-drafter.safetensors", "small-tokenizer.json"):
+        (hub / name).write_bytes(files[name])
+    small = {"MODEL_PROFILE": "small", "SMALL_MODEL_FILES": pinned("small.safetensors"),
+             "SMALL_TOKENIZER_FILES": pinned("small-tokenizer.json"),
+             "SMALL_DRAFTER_FILES": pinned("small-drafter.safetensors")}
+    assert bootstrap(**small, GENERATIONS_AT_ONCE="9") == 3  # more than vLLM's batch holds
+    assert bootstrap(**small, KV_CACHE_MEMORY_MIB="384", GENERATIONS_AT_ONCE="8") == 0
+    kept = {str(path.relative_to(state)): path.read_bytes() for path in state.rglob("small*") if path.is_file()}
+    assert kept == {f"models/{loaded['SMALL_MODEL_REVISION']}/small.safetensors": files["small.safetensors"],
+                    f"tokenizers/{loaded['SMALL_TOKENIZER_REVISION']}/small-tokenizer.json":
+                        files["small-tokenizer.json"],
+                    f"drafters/{loaded['SMALL_DRAFTER_REVISION']}/small-drafter.safetensors":
+                        files["small-drafter.safetensors"]}

@@ -13,11 +13,18 @@ answer.
 uv run python -m simple_serving.interference.worlds
 ```
 
-It starts this repository's gateway in front of the fake engine, twice, and prints both runs. The fake's prefix
+It starts this repository's gateway in front of the fake engine, three times, and prints the runs. The fake's prefix
 cache is a stand-in: whole blocks chained from the cache salt, the least recently used dropped first, 100000 tokens in
-the first run and 2000000 in the second. The first is too small for twenty sessions of 12000 tokens and hits nothing;
-the second holds them. That is the picture a copy of the KV cache in RAM is meant to change, and the dry run shows
-only what the report looks like in each case. Its times and sizes are the stand-in's and predict nothing.
+the first two runs and 2000000 in the third. The first is too small for twenty sessions of 12000 tokens and hits
+nothing; the second puts what it drops into a second store, as into a copy in RAM, and finds it there; the third
+holds them all. That is the picture a copy of the KV cache in RAM is meant to change, and the dry run shows only what
+the report looks like in each case. Its times and sizes are the stand-in's and predict nothing.
+
+`totals.engine_hit_tokens` are the engine's own counters over the run, read through `/metrics/engine`: prompt tokens
+served from the GPU's cache (`local`) and from the copy (`external`), and `engine_preemptions` the requests it put
+back for want of room. `python -m simple_serving.interference.probes` has two smaller measurements on the same
+stand-in: `reload`, what a prefix costs to bring back, and `schemas`, what a new schema costs. Their one planned use
+is [the cheap card](cheap-card.md).
 
 ## Against a card
 

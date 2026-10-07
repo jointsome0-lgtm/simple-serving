@@ -87,6 +87,10 @@ THOUGHT_MARKERS = {"reasoning_start_str": "<|channel>", "reasoning_end_str": "<c
 # Its thought is <think>...</think> (the pinned chat_template.jinja:165-168; vllm/parser/qwen3.py:41-42).
 QWEN = "qwen"
 QWEN_THOUGHT_MARKERS = {"reasoning_start_str": "<think>", "reasoning_end_str": "</think>"}
+# MODEL_PROFILE=small (docs/cheap-card.md): Google's Gemma 4 E2B with its assistant, for a card of 16 GB on which the
+# service's mechanisms are tried before the 5090. Its arguments are Gemma's.
+SMALL = "small"
+PROFILES = {QWEN: "QWEN_", SMALL: "SMALL_"}  # a profile's prefix in the manifest
 
 # vLLM's wording of the numbers kept, as in the source of vLLM 0.30.0, and provisional until the first rental checks
 # each against its output. A field's last word names its unit, and SCALE turns vLLM's GiB, seconds and factors into it.
@@ -220,7 +224,8 @@ class Card:
     def engine(self) -> Command:
         m = profiled(self.manifest)
         qwen = m.get("MODEL_PROFILE") == QWEN
-        tokenizer = self.state / "tokenizers" / m["TOKENIZER_REVISION"] if qwen else self.state / "tokenizer"
+        other = m.get("MODEL_PROFILE") in PROFILES
+        tokenizer = self.state / "tokenizers" / m["TOKENIZER_REVISION"] if other else self.state / "tokenizer"
         return Command([
             str(self.state / "vllm/bin/vllm"), "serve", str(self.state / "models" / m["MODEL_REVISION"]),
             "--served-model-name", m["MODEL_ALIAS"], "--host", "127.0.0.1", "--port", m["ENGINE_PORT"],
@@ -240,7 +245,7 @@ class Card:
             # Sampling defaults from vLLM: the model's generation_config.json is pinned for its stop ids alone.
             "--generation-config", "vllm",
             "--disable-uvicorn-access-log", "--uvicorn-log-level", "warning",
-            *self.speculation(), *self.offloading(), *self.reasoning(), *self.matching(),
+            *self.speculation(), *self.offloading(), *self.reasoning(), *self.matching(), *self.cache(),
         ], {name: value for name, value in os.environ.items() if name != "CONTAINER_API_KEY"} | ENGINE_ENV)
 
     def speculation(self) -> list[str]:
@@ -255,7 +260,7 @@ class Card:
             # 0.30.0 loads from the target's directory when no model is named (vllm/config/speculative.py:1127-1140).
             # The model card's method name, qwen3_5_mtp, is deprecated there for this one (:1121-1125).
             return ["--speculative-config", json.dumps({"method": "mtp", "num_speculative_tokens": tokens})]
-        drafter = self.state / "drafters" / self.manifest["DRAFTER_REVISION"]
+        drafter = self.state / "drafters" / m["DRAFTER_REVISION"]
         return ["--speculative-config",
                 json.dumps({"method": "mtp", "model": str(drafter), "num_speculative_tokens": tokens})]
 
@@ -288,12 +293,31 @@ class Card:
         nothing. While KV_OFFLOADING_GIB is 0, nothing is read."""
         return preflight.offload_unfit(int(self.manifest.get("KV_OFFLOADING_GIB", "0")))
 
+    def cache(self) -> list[str]:
+        """vLLM's argument for a KV cache of KV_CACHE_MEMORY_MIB on the GPU, and none while that is 0, when vLLM
+        sizes the cache from GPU_MEMORY_UTILIZATION. A measurement makes the cache small on purpose with it, so that
+        a small model's sessions fall out of the GPU's cache as a large model's do (docs/cheap-card.md). vLLM then
+        ignores GPU_MEMORY_UTILIZATION (vllm/config/cache.py:228-235)."""
+        mib = int(profiled(self.manifest).get("KV_CACHE_MEMORY_MIB", "0"))
+        return ["--kv-cache-memory-bytes", str(mib << 20)] if mib else []
+
+    def limits(self) -> dict[str, Any]:
+        """The gateway's limits: the provisional ones, or with GENERATIONS_AT_ONCE above 0 that many generations at
+        once over all classes and for each of our three, so that a measurement reaches the engine with more than
+        the contract's four. Waiting places and the outside class stay as they are."""
+        limits: dict[str, Any] = PROVISIONAL["limits"]
+        at_once = int(profiled(self.manifest).get("GENERATIONS_AT_ONCE", "0"))
+        if not at_once:
+            return limits
+        return limits | {"shared": {"active": at_once}} | {
+            cls: limits[cls] | {"active": at_once} for cls in ("reader", "agent", "internal")}
+
     def vision(self) -> list[str]:
         """vLLM's arguments for pictures. While VISION is 0, text only: the vision tower stays off the GPU. With 1 it
         loads, a prompt holds one image at most and no video or audio, and the processor cache is disabled. The
         separate encoder cache still reuses embeddings across scopes (contract section 10)."""
-        if not int(self.manifest["VISION"]) or self.manifest.get("MODEL_PROFILE") == QWEN:
-            return ["--language-model-only"]  # the Qwen profile is text only: bootstrap.sh refuses it with VISION=1
+        if not int(self.manifest["VISION"]) or self.manifest.get("MODEL_PROFILE") in PROFILES:
+            return ["--language-model-only"]  # another profile is text only: bootstrap.sh refuses it with VISION=1
         return ["--limit-mm-per-prompt", json.dumps({"image": 1, "video": 0, "audio": 0}),
                 "--mm-processor-cache-gb", "0"]
 
@@ -309,6 +333,7 @@ class Card:
         if int(m["VISION"]):
             keys[0]["vision"] = True
         return PROVISIONAL | {
+            "limits": self.limits(),
             "alias": m["MODEL_ALIAS"],
             "context_tokens": int(m["CONTEXT_TOKENS"]),
             "engine_url": f"http://127.0.0.1:{m['ENGINE_PORT']}",
@@ -357,8 +382,12 @@ def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
     qwen = manifest.get("MODEL_PROFILE") == QWEN
     pins = {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
             "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
-    if qwen:
-        pins |= {"model_profile": QWEN}
+    if manifest.get("MODEL_PROFILE") in PROFILES:
+        pins |= {"model_profile": manifest["MODEL_PROFILE"]}
+    if int(manifest.get("KV_CACHE_MEMORY_MIB", "0")):
+        pins |= {"kv_cache_memory_mib": manifest["KV_CACHE_MEMORY_MIB"]}
+    if int(manifest.get("GENERATIONS_AT_ONCE", "0")):
+        pins |= {"generations_at_once": manifest["GENERATIONS_AT_ONCE"]}
     if int(manifest["MTP_SPECULATIVE_TOKENS"]):
         pins |= {} if qwen else {"drafter_revision": manifest["DRAFTER_REVISION"]}  # Qwen's drafter is in its weights
         pins |= {DRAFTED_TOKENS: manifest["MTP_SPECULATIVE_TOKENS"]}
@@ -378,12 +407,13 @@ def read_manifest(code: Path = CODE, folder: str = "card", name: str = "manifest
 
 
 def profiled(manifest: Mapping[str, str]) -> Mapping[str, str]:
-    """The manifest as its model profile reads it. With MODEL_PROFILE=qwen each QWEN_<NAME> stands for <NAME>, as in
-    bootstrap.sh; with gemma, or with no such value, the manifest is itself."""
-    if manifest.get("MODEL_PROFILE") != QWEN:
+    """The manifest as its model profile reads it. With MODEL_PROFILE=qwen each QWEN_<NAME> stands for <NAME>, and
+    with small each SMALL_<NAME>, as in bootstrap.sh; with gemma, or with no such value, the manifest is itself."""
+    prefix = PROFILES.get(manifest.get("MODEL_PROFILE", ""))
+    if prefix is None:
         return manifest
-    return {**manifest, **{name.removeprefix("QWEN_"): value for name, value in manifest.items()
-                           if name.startswith("QWEN_")}}
+    return {**manifest, **{name.removeprefix(prefix): value for name, value in manifest.items()
+                           if name.startswith(prefix)}}
 
 
 def credential(environ: Mapping[str, str], root: Path) -> dict[str, str]:

@@ -15,8 +15,10 @@ the first token and the whole time, and for the run its requests and output toke
 or answer. The text is invented lines, sized by one count through the gateway.
 
 With no arguments, the dry run: the real gateway in front of the fake engine, whose cache is the stand-in below, once
-small and once large. It shows that the client counts what the engine reports, and what a cache too small for the
-worlds looks like in these numbers. It is not a GPU, and its times and its sizes predict nothing.
+small, once small with a copy behind it and once large. It shows that the client counts what the engine reports, and
+what a cache too small for the worlds looks like in these numbers, with a copy and without one. It is not a GPU, and
+its times and its sizes predict nothing. `totals.engine_hit_tokens` are the engine's own counters over the run: prompt
+tokens served from the GPU's cache (`local`) and from the copy (`external`).
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import time
 from collections import OrderedDict
@@ -164,24 +167,56 @@ async def measure(client: httpx.AsyncClient, target: Target, shape: Shape) -> di
     return report | {"status": "failed" if failed else "ok", "code": "requests_failed" if failed else "ok"}
 
 
+COUNTERS = {"prefix_cache_hits": "local", "external_prefix_cache_hits": "external", "num_preemptions": "preempted"}
+HITS = re.compile(rf"^vllm:({'|'.join(COUNTERS)})_total(?:\{{[^}}]*\}})?\s+(\S+)", re.MULTILINE)
+
+
+async def hits(client: httpx.AsyncClient, control: str, control_key: str) -> dict[str, int]:
+    """The prompt tokens the engine has served from the GPU's cache (`local`) and from the copy in RAM (`external`)
+    since its start, by vLLM 0.30.0's two counters (vllm/v1/metrics/loggers.py:601,626) through the gateway's
+    relay, and the requests it has put back for want of room in the GPU's cache (`preempted`, :667). A request's
+    own `cached_tokens` does not say which of the two stores it was."""
+    found = dict.fromkeys(COUNTERS.values(), 0.0)
+    text = (await metrics.read(client, control, "/metrics/engine", control_key)).decode("utf-8", "replace")
+    for name, value in HITS.findall(text):
+        with contextlib.suppress(ValueError):
+            found[COUNTERS[name]] += float(value)
+    return {name: int(value) for name, value in found.items()}
+
+
+def gained(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    return {name: after[name] - before[name] for name in before}
+
+
+async def target(client: httpx.AsyncClient, public: str, control: str, key: str,
+                 control_key: str) -> tuple[Target, int]:
+    """The gateway's model and context, once it says it is ready."""
+    try:
+        state = json.loads(await metrics.read(client, control, "/v1/state", control_key))
+    except (ValueError, RecursionError):
+        raise RunError("state_invalid") from None
+    if not isinstance(state, dict) or state.get("status") != "ready":
+        raise RunError("target_not_ready")
+    alias, context = state.get("model"), state.get("context_tokens")
+    if not isinstance(alias, str) or not alias or len(alias) > 256 or type(context) is not int:
+        raise RunError("state_invalid")
+    return Target(public, key, alias), context
+
+
 async def _against(public: str, control: str, key: str, control_key: str, shape: Shape,
                    max_seconds: float) -> dict[str, Any]:
     report: dict[str, Any] = {"schema_version": 1, "status": "failed", "code": "not_started"}
     try:
         async with (httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client,
                     asyncio.timeout(max_seconds)):
-            try:
-                state = json.loads(await metrics.read(client, control, "/v1/state", control_key))
-            except (ValueError, RecursionError):
-                raise RunError("state_invalid") from None
-            if not isinstance(state, dict) or state.get("status") != "ready":
-                raise RunError("target_not_ready")
-            alias, context = state.get("model"), state.get("context_tokens")
-            if not isinstance(alias, str) or not alias or len(alias) > 256 or type(context) is not int:
-                raise RunError("state_invalid")
+            to, context = await target(client, public, control, key, control_key)
             if shape.system_tokens + shape.last_tokens + shape.answer_tokens > context:
                 raise RunError("context_limit")
-            report = await measure(client, Target(public, key, alias), shape)
+            before = await hits(client, control, control_key)
+            report = await measure(client, to, shape)
+            if "totals" in report:
+                engine = gained(before, await hits(client, control, control_key))
+                report["totals"] |= {"engine_preemptions": engine.pop("preempted"), "engine_hit_tokens": engine}
     except (RunError, metrics.DiagnosticError) as error:
         report |= {"status": "failed", "code": str(error)}
     except TimeoutError:
@@ -199,14 +234,23 @@ ANSWER = ['{"deed": "', *("the keeper walks the shore " for _ in range(12)), '",
 SMALL, LARGE = 100_000, 2_000_000  # the dry run's two caches, in tokens: too small for its worlds, and large enough
 
 
+LOAD_S_PER_TOKEN, COMPILE_S = 1 / 500000, 0.05  # a token back from the copy, and a schema's text not seen before
+
+
 class PrefixCache:
     """A prefix cache of `capacity` tokens for the fake engine: whole blocks, chained from the cache salt, the least
-    recently used dropped first. It keeps hashes and counts, never text. `seen` is what it told each generation."""
+    recently used dropped first. With `copy` above 0 a block it drops goes to a second store of that many tokens, as
+    to a copy in RAM, and a prefix found there comes back at LOAD_S_PER_TOKEN. A schema whose text is new costs
+    COMPILE_S once. It keeps hashes and counts, never text. `seen` is what it told each generation, `local` and
+    `external` the tokens it has served from each store."""
 
-    def __init__(self, capacity: int) -> None:
-        self.room = capacity // BLOCK_TOKENS
+    def __init__(self, capacity: int, copy: int = 0) -> None:
+        self.room, self.copy_room = capacity // BLOCK_TOKENS, copy // BLOCK_TOKENS
         self.blocks: OrderedDict[bytes, None] = OrderedDict()
+        self.copy: OrderedDict[bytes, None] = OrderedDict()
+        self.schemas: set[str] = set()
         self.seen: list[tuple[int, int]] = []
+        self.local = self.external = 0
 
     def __call__(self, body: Any) -> Any:
         from ..fake_engine import Script, _prompt_text  # noqa: PLC0415 - only the dry run and its test use the fake
@@ -214,23 +258,42 @@ class PrefixCache:
         if not isinstance(body, dict) or "cache_salt" not in body:
             return Script()  # a count
         text = _prompt_text(body)
-        prompt, chain, hits, missed = max(1, math.ceil(len(text) / 4)), [], 0, False
+        prompt, chain, local, loaded, missed = max(1, math.ceil(len(text) / 4)), [], 0, 0, False
         link = hashlib.sha256(str(body["cache_salt"]).encode()).digest()
         for start in range(0, len(text) - BLOCK_TOKENS * 4 + 1, BLOCK_TOKENS * 4):
             link = hashlib.sha256(link + text[start:start + BLOCK_TOKENS * 4].encode()).digest()
-            missed = missed or link not in self.blocks
-            hits += not missed
+            missed = missed or (link not in self.blocks and link not in self.copy)
+            if not missed and (loaded or link not in self.blocks):
+                loaded += 1  # from the first block the GPU lacks, the rest of the prefix comes from the copy
+            elif not missed:
+                local += 1
             chain.append(link)
         for link in chain:
+            self.copy.pop(link, None)
             self.blocks[link] = None
             self.blocks.move_to_end(link)
         while len(self.blocks) > self.room:
-            self.blocks.popitem(last=False)
-        cached = hits * BLOCK_TOKENS
+            dropped, _ = self.blocks.popitem(last=False)
+            if self.copy_room:
+                self.copy[dropped] = None
+        while len(self.copy) > self.copy_room:
+            self.copy.popitem(last=False)
+        cached = (local + loaded) * BLOCK_TOKENS
+        self.local, self.external = self.local + local * BLOCK_TOKENS, self.external + loaded * BLOCK_TOKENS
         self.seen.append((prompt, cached))
+        schema = json.dumps(body.get("response_format"))
+        compile_s = 0.0 if schema in self.schemas else COMPILE_S
+        self.schemas.add(schema)
         return Script(events=[{"role": "assistant"}, *({"content": part} for part in ANSWER),
                               {"finish_reason": "stop"}], usage={"cached_tokens": cached},
-                      first_delay_s=(prompt - cached) * PREFILL_S_PER_TOKEN, delay_s=STEP_S)
+                      first_delay_s=((prompt - cached) * PREFILL_S_PER_TOKEN + loaded * BLOCK_TOKENS * LOAD_S_PER_TOKEN
+                                     + compile_s), delay_s=STEP_S)
+
+    def metrics(self) -> str:
+        """The two of vLLM 0.30.0's counters that tell a hit in the GPU's cache from a load from the copy."""
+        return ("vllm:num_preemptions_total 0.0\n"
+                f"vllm:prefix_cache_hits_total {float(self.local)}\n"
+                f"vllm:external_prefix_cache_hits_total {float(self.external)}\n")
 
 
 @dataclass(frozen=True)
@@ -244,12 +307,17 @@ class Dry:
 
 
 @contextlib.asynccontextmanager
-async def dry_gateway(capacity: int, worlds: int) -> AsyncIterator[Dry]:
-    """The gateway of this repository in front of the fake engine with a cache of `capacity` tokens."""
+async def dry_gateway(capacity: int, worlds: int, copy: int = 0) -> AsyncIterator[Dry]:
+    """The gateway of this repository in front of the fake engine with a cache of `capacity` tokens, and behind it
+    a copy of `copy` tokens."""
     from .. import vast  # noqa: PLC0415 - only the dry run starts a gateway
     from ..config import PROVISIONAL, Listener, from_service_block  # noqa: PLC0415
-    from ..fake_engine import FakeEngine  # noqa: PLC0415
+    from ..fake_engine import Call, FakeEngine, _respond  # noqa: PLC0415
     from ..server import Gateway, Servers, bind  # noqa: PLC0415
+
+    class Engine(FakeEngine):
+        async def _metrics(self, call: Call, send: Any) -> None:
+            await _respond(send, 200, cache.metrics().encode(), b"text/plain; version=0.0.4; charset=utf-8")
 
     key, control_key = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
     limits = PROVISIONAL["limits"] | {"reader": PROVISIONAL["limits"]["reader"] | {"waiting": max(8, worlds)}}
@@ -257,7 +325,7 @@ async def dry_gateway(capacity: int, worlds: int) -> AsyncIterator[Dry]:
         key: {"label": "worlds", "classes": ["reader", "internal"], "default": "internal", "scopes": True,
               "control": False},
         control_key: {"label": "control", "classes": [], "default": None, "scopes": False, "control": True}}}
-    fake, cache = FakeEngine(block["alias"], block["context_tokens"]), PrefixCache(capacity)
+    fake, cache = Engine(block["alias"], block["context_tokens"]), PrefixCache(capacity, copy)
     fake.script = cache
     sock = bind(Listener("127.0.0.1", 0))
     engine = Servers([(fake, sock)], graceful_s=1)
@@ -274,14 +342,16 @@ async def dry_gateway(capacity: int, worlds: int) -> AsyncIterator[Dry]:
 
 
 async def dry(shape: Shape, max_seconds: float) -> dict[str, Any]:
-    """The same worlds twice, each on a new gateway: a cache too small for them, then one that holds them all."""
+    """The same worlds three times, each on a new gateway: a cache too small for them, the same cache with a copy
+    behind it, and a cache that holds them all."""
     report: dict[str, Any] = {"schema_version": 1, "synthetic": True, "status": "ok", "code": "ok",
                               "shape": asdict(shape), "runs": []}
-    for name, capacity in (("small_cache", SMALL), ("large_cache", LARGE)):
-        async with dry_gateway(capacity, shape.worlds) as gateway:
+    for name, capacity, copy in (("small_cache", SMALL, 0), ("small_cache_with_copy", SMALL, LARGE),
+                                 ("large_cache", LARGE, 0)):
+        async with dry_gateway(capacity, shape.worlds, copy) as gateway:
             run = await _against(gateway.public, gateway.control, gateway.key, gateway.control_key, shape,
                                  max_seconds)
-        report["runs"].append({"cache": name, "cache_tokens": capacity, "status": run["status"],
+        report["runs"].append({"cache": name, "cache_tokens": capacity, "copy_tokens": copy, "status": run["status"],
                                "code": run["code"], "totals": run.get("totals")})
         if run["status"] != "ok":
             report |= {"status": "failed", "code": run["code"]}

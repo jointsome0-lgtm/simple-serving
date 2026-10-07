@@ -11,8 +11,9 @@
 # runs card/onstart.sh for the first start. At every later start the rental's own onstart runs it (README, "The card"):
 # the preparation changes no onstart, which the platform may restore at a start. A second run changes nothing that
 # is in place, and no run prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed;
-# 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS or KV_OFFLOADING_GIB is not a count, THINKING_BUDGET or VISION
-# is neither 0 nor 1, or MODEL_PROFILE is neither gemma nor qwen, or qwen with VISION=1; 4 no keys, or not two or three
+# 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS, KV_OFFLOADING_GIB, KV_CACHE_MEMORY_MIB or GENERATIONS_AT_ONCE
+# is not a count or the last is above MAX_NUM_SEQS, THINKING_BUDGET or VISION is neither 0 nor 1, MODEL_PROFILE is not
+# gemma, qwen or small, or it is not gemma with VISION=1; 4 no keys, or not two or three
 # different SHA-256 digests; 5 the card holds other keys, which stay; 9 the container does not fit the manifest, and
 # nothing was installed or fetched: KV_OFFLOADING_GIB does not fit /dev/shm or the memory, or the qwen profile's
 # weights need another card or more disk (simple_serving/preflight.py prints the numbers).
@@ -26,20 +27,23 @@ state=${SIMPLE_SERVING_CARD_DIR:-/workspace/simple-serving-card}
 source "$code/card/manifest.env"
 stamped=("$code/card/manifest.env" "$code/card/gateway-requirements.txt" "$code/card/vllm-requirements.txt")
 
-# The model's profile. With qwen each QWEN_<NAME> stands for <NAME>, as in simple_serving/card.py, the tokenizer has a
-# directory of its own, and no drafter is fetched: the model's is inside its weights.
+# The model's profile. With qwen each QWEN_<NAME> stands for <NAME>, and with small each SMALL_<NAME>, as in
+# simple_serving/card.py, and the tokenizer has a directory of its own. A profile names its own model and tokenizer,
+# and its own drafter while it drafts; qwen fetches no drafter, since the model's is inside its weights.
 profile=${MODEL_PROFILE:-gemma}
 tokenizer=$state/tokenizer
 case $profile in
   gemma) ;;
-  qwen)
-    for pin in MODEL_REPO MODEL_REVISION MODEL_FILES MODEL_SIZES TOKENIZER_REPO TOKENIZER_REVISION TOKENIZER_FILES \
-      MTP_SPECULATIVE_TOKENS MIN_COMPUTE_CAP MIN_GPU_MIB; do
-      name=QWEN_$pin
-      [[ -n ${!name:-} ]] || exit 3
-      printf -v "$pin" %s "${!name}"
-    done
-    [[ $MIN_COMPUTE_CAP =~ ^[1-9][0-9]*$ && $MIN_GPU_MIB =~ ^[1-9][0-9]*$ ]] || exit 3
+  qwen | small)
+    prefix=${profile^^}_
+    own=(MODEL_REPO MODEL_REVISION MODEL_FILES TOKENIZER_REPO TOKENIZER_REVISION TOKENIZER_FILES MTP_SPECULATIVE_TOKENS)
+    [[ $profile != qwen ]] || own+=(MODEL_SIZES MIN_COMPUTE_CAP MIN_GPU_MIB)
+    for pin in "${own[@]}"; do name=$prefix$pin; [[ -n ${!name:-} ]] || exit 3; done
+    for name in $(compgen -v "$prefix"); do printf -v "${name#"$prefix"}" %s "${!name}"; done
+    if [[ $profile == small && $MTP_SPECULATIVE_TOKENS != 0 ]]; then
+      for pin in DRAFTER_REPO DRAFTER_REVISION DRAFTER_FILES; do name=$prefix$pin; [[ -n ${!name:-} ]] || exit 3; done
+    fi
+    [[ $profile != qwen || ( $MIN_COMPUTE_CAP =~ ^[1-9][0-9]*$ && $MIN_GPU_MIB =~ ^[1-9][0-9]*$ ) ]] || exit 3
     tokenizer=$state/tokenizers/$TOKENIZER_REVISION ;;
   *) exit 3 ;;
 esac
@@ -53,8 +57,12 @@ for file in "${stamped[@]}"; do [[ -s $file ]] || exit 3; done
 [[ ${KV_OFFLOADING_GIB:-} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3  # GiB for the KV cache's copy in RAM, the same way
 [[ ${THINKING_BUDGET:-} =~ ^[01]$ ]] || exit 3  # the thinking budget, on or off
 [[ ${VISION:-} =~ ^[01]$ ]] || exit 3  # 1 loads Gemma 4's vision tower, 0 keeps it off the GPU
-[[ $profile == gemma || $VISION == 0 ]] || exit 3  # the qwen profile is text only
-if [[ $MTP_SPECULATIVE_TOKENS != 0 && $profile == gemma ]]; then
+[[ $profile == gemma || $VISION == 0 ]] || exit 3  # another profile is text only
+# MiB of KV cache on the GPU in place of vLLM's own size, and generations at once in place of the contract's limits:
+# counts, 0 for neither, and no more generations than vLLM's batch holds.
+[[ ${KV_CACHE_MEMORY_MIB:=0} =~ ^(0|[1-9][0-9]*)$ && ${GENERATIONS_AT_ONCE:=0} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3
+(( GENERATIONS_AT_ONCE <= MAX_NUM_SEQS )) || exit 3
+if [[ $MTP_SPECULATIVE_TOKENS != 0 && $profile != qwen ]]; then
   for pin in DRAFTER_REPO DRAFTER_REVISION DRAFTER_FILES; do [[ -n ${!pin:-} ]] || exit 3; done
 fi
 # With VISION=1 vLLM 0.30.0 builds Gemma 4's picture processor from the weights' directory, and transformers loads a
@@ -77,7 +85,7 @@ model=$state/models/$MODEL_REVISION
 # neither asked, as in the manifest's defaults, nothing is checked.
 fit=()
 [[ $KV_OFFLOADING_GIB == 0 ]] || fit+=(--offload-gib "$KV_OFFLOADING_GIB")
-[[ $profile == gemma ]] ||
+[[ $profile != qwen ]] ||
   fit+=(--min-compute-cap "$MIN_COMPUTE_CAP" --min-gpu-mib "$MIN_GPU_MIB" --files "$MODEL_SIZES" --into "$model")
 if (( ${#fit[@]} )); then python3 "$code/simple_serving/preflight.py" check "${fit[@]}" || exit 9; fi
 mkdir -p "$model" "$tokenizer"
@@ -152,7 +160,7 @@ if [[ -n $processor ]]; then
 fi
 # The drafter in a directory of its own, since the loop above empties the weights' of all it does not pin, and vLLM
 # loads every *.safetensors in each. Off, nothing of it is fetched or removed.
-if [[ $MTP_SPECULATIVE_TOKENS != 0 && $profile == gemma ]]; then
+if [[ $MTP_SPECULATIVE_TOKENS != 0 && $profile != qwen ]]; then
   drafter=$state/drafters/$DRAFTER_REVISION
   mkdir -p "$drafter"
   for path in "$drafter"/*; do [[ ,$DRAFTER_FILES == *,"${path##*/}":* ]] || rm -f "$path"; done

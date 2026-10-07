@@ -37,6 +37,8 @@ image token counts, MTP throughput and GPU memory use still need the [vision che
 - [Vision smoke](docs/vision-smoke.md): optional Gemma image input, key permission and synthetic validation.
 - [Worlds measurement](docs/worlds.md): many growing sessions at once through the gateway, with cached tokens a turn.
 - [Qwen3.8-27B profile](docs/qwen.md): the second text model behind `MODEL_PROFILE`, unmeasured until a rental.
+- [The cheap card](docs/cheap-card.md): one rental of a 16 GB card with Gemma 4 E2B for the copy of the KV cache
+  and for speed, step by step; prepared, not run.
 - [Prefill interference](docs/prefill-interference.md): a synthetic demonstration and client measurements through
   an existing text gateway, before deciding on prefill/decode disaggregation.
 
