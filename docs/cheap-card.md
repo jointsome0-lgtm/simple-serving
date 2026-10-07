@@ -6,8 +6,10 @@ the KV cache in RAM brings a session's prefix back, what a load from it costs, w
 whether the gateway and the engine take eight requests at once, and what a new schema costs. The 31B and Qwen do not
 fit in 16 GB, so no speed and no size of theirs is learnt here.
 
-Nothing below has run on a card. Every command of "The steps" that needs no GPU was rehearsed on 2026-10-07 against
-the fake engine or in a copy of the checkout ([what was rehearsed](#what-was-rehearsed)). The rental is the owner's
+It ran once, on 2026-10-07, and [speed.md](speed.md#measured-on-the-cheap-card-2026-10-07) has what it measured and
+[what it leaves for the 5090](speed.md#before-the-5090-with-the-31b); the text below is the plan as it stood, with
+the two corrections of that day in steps 7 and 10. Before the rental every command of "The steps" that needs no GPU
+was rehearsed on 2026-10-07 against the fake engine or in a copy of the checkout ([what was rehearsed](#what-was-rehearsed)). The rental is the owner's
 to start, under simple-story-chat's `docs/gpu.md`, "While the cards are paid for". The order and the size of the
 steps are as a review of 2026-10-07 left them.
 

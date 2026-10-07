@@ -145,6 +145,27 @@ One reading, not checked, is that a session's first return comes from the copy a
 cache for its later turns. The worlds report now sets each session's first return apart from its later ones
 ([worlds.md](worlds.md)), and the next card settles it.
 
+## Before the 5090 with the 31B
+
+What has to be decided before a long run on a 5090 with the 31B, what is known for each, and which step measures
+it. The steps are [cheap-card.md](cheap-card.md)'s, run there with `MODEL_PROFILE=gemma` and without
+`KV_CACHE_MEMORY_MIB`; nothing here has run with the 31B, and every size in this section is arithmetic from 440 KiB
+a token, which is itself derived and not measured.
+
+| To decide | What is known | What measures it |
+| --- | --- | --- |
+| The copy's size against `/dev/shm` | The copy holds sessions x prompt tokens x 440 KiB. `/dev/shm` was 15 GiB on the one 5090 host seen, where 16 GiB was refused. `plan --sessions 2 --prompt-tokens 16000` and `--sessions 4 --prompt-tokens 8000` both print 14 GiB, 14848 MiB of `/dev/shm` and 28 GB of RAM: the most that fits. Four stories of 16000 tokens need 27 GiB, 28160 MiB and 42 GB, and do not fit without a larger `/dev/shm`. So without one, the copy keeps two long stories warm, not four. | Step 1, `preflight.py report`, in the first minute: `shm_free_mib`, `memory_limit_mib`, `largest_offload_gib`. `plan` with the run's own sessions and tokens before the rental. |
+| `--shm-size` at creation | Not established: Vast's pages disagree ([cheap-card.md](cheap-card.md#devshm-on-vast)), and the cheap card got 11264 MiB without asking and tried no remount. simple-story-chat's renter would need one more `env` entry in `createBody` (`local/rent-plan.ts`), beside `'-p 22:22': '1'`: `'--shm-size=32g': '1'`, behind an option that is off by default. That change is simple-story-chat's and is not made here. | Step 1 on a container created with the entry: `shm_free_mib` near 32768 says Vast honours it. A few minutes of any card answer it, the cheapest included. |
+| Retention 0 with a copy | Under retention 0 a prompt of 16000 tokens writes 1.0 to 1.4 GiB in place of 6.7 (its global layers and one or two windows), so 14 GiB would hold some ten stories. But the launcher always passes `--prefix-cache-retention-interval None` and has no switch for it; dense retention is what made a story's second turn 372 ms against 6406 on the GPU alone; and the one run of the 31B with a copy, 12 GiB under retention 0, read 0 of 294715 tokens from it, for a reason never found. A switch would be an additive manifest value, not written: it is the owner's choice whether that run is wanted. | Steps 3 and 8, the worlds with the copy off and on, once under each retention, on one card: `later_turns_cached_share`, `ttft_ms` and `by_turn`. |
+| `ENGINE_RESERVE_MIB` | 12 GiB, provisional (`simple_serving/preflight.py`). The engine's anonymous memory with E2B was 3.68 GB without a copy and 4.01 GB with one; the 31B's is not known, and the weights' loading may peak above the resting number. Too small a reserve lets a copy through that the container then cannot hold; too large refuses one that fits. | Step 6's read of the cgroup's `memory.current` and `anon`, with the copy off, and step 8's with it on; and `memory.peak` beside them, which the steps do not read yet. |
+| 8 at once | The gateway and the engine took 8 generations under the strict schema with E2B: 48 requests, none failed, no preemption. With the 31B a running request holds its global layers and one window, 40 KiB a token and about 412 MiB: 1.0 GiB at 16000 tokens, so 8 of them ask 8.1 GiB of a GPU cache that was 6011 MiB with the drafter, and 4 ask 4.1. By this arithmetic 8 long prompts at once do not fit and the engine puts requests back; 8 of 8000 tokens ask 5.7 GiB of its 5.9 and barely fit. `GENERATIONS_AT_ONCE` stays 0, the provisional 4, until it is measured. | Step 5 with the stories' own sizes (`--system-tokens`, `--first-tokens`, `--last-tokens`) at 4 and 8: `failed`, `engine_preemptions` and `output_tokens_per_s`. The [sweep](sweep.md) has the finer levels. |
+| The warm-up | `WARM_UP=1` is the default and has never met an engine. The 31B's first request after a start is not known either. | The launcher's `warm_up` row (`code`, `total_ms`) and the first row of step 6's schema probe, whose first token should be near `ttft_ms.repeated`. With `WARM_UP=0` on another start, the same number is what the warm-up saves. |
+| The hit split | With a copy, one prefix a session counted as the copy's and the rest as the GPU's, unexplained ([above](#measured-on-the-cheap-card-2026-10-07)). It decides nothing by itself, but a copy that restores a prefix only once would. | Step 8's worlds, `totals.by_turn`. |
+
+The order that spends least: `plan` before the rental; step 1 in the first minute, since `/dev/shm` decides whether
+a copy is tried at all; then the load with `KV_OFFLOADING_GIB=0` and steps 6, 3 and 5; then one start with the
+copy, at 172 to 271 s a start on the cheap card and unknown for the 31B, and step 8.
+
 ## Concurrency measurement tool
 
 The [standalone sweep](sweep.md) from `b6d4919` is now ported into the current checkout. It plans 24 levels and can
