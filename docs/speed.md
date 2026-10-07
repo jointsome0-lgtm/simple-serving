@@ -115,6 +115,36 @@ should compare cached prompt tokens, reader TTFT and interference pauses against
    - *How it is measured.* The [worlds measurement](worlds.md), with the copy off and on, on one card: cached
      prompt tokens in later turns and each turn's first token.
 
+## Measured on the cheap card (2026-10-07)
+
+One rental, an RTX 5060 Ti of 16311 MiB with Gemma 4 E2B (`MODEL_PROFILE=small`), by
+[cheap-card.md](cheap-card.md); one run of each step, with synthetic text. Every time was taken on the owner's
+machine through the SSH tunnel, whose round trip is in each of them: a repeated small request took 310 ms in all.
+The numbers say how the engine and the gateway behave; none of them is a speed of the 31B.
+
+| What | Measured |
+| --- | --- |
+| The container | `/dev/shm` 11264 MiB free, memory limit 32630 MiB, largest copy that fits 10 GiB. No remount was tried. |
+| Preparation and loads | Bootstrap 323 s. First load 271 s; a start with another size of the copy 172 to 174 s, three times. |
+| The GPU cache | `KV_CACHE_MEMORY_MIB=768` gave `kv_cache_tokens` 199136, 3.95 KiB a token by vLLM's count. A world of 160000 tokens did not stay in it, so that count is not what the cache holds under dense retention. |
+| The first request after a start | 6283 ms and, after another start, 8711 ms, where the next took 310 ms. `WARM_UP` is meant for this and is not measured. |
+| A new strict schema | 26 of 26 answered; first token 320.1 ms with a schema never seen against 309.7 ms repeated: about 10 ms to compile. |
+| The engine's memory, copy off | 3.68 GB anonymous in the container, 10702 MiB on the GPU. With a copy of 4 GiB: 4.01 GB anonymous and 4.31 GB shared. |
+| Reload, copy off (8000 tokens, 20 other sessions between) | First token cold 1360 ms, from the GPU cache 541 ms (8096 of 8473 tokens), after the others 1438 ms: read again. |
+| Reload, copy 4 GiB | After the others 580 ms, 7968 of 8303 tokens from the copy; from the GPU cache 651 ms. A load from RAM cost what a GPU hit costs. A cold prefill took 1331 ms with the copy and without: writing it cost nothing seen. The same text from another scope got 0 cached tokens. |
+| The counters | `vllm:prefix_cache_hits_total`, `vllm:external_prefix_cache_hits_total` and `vllm:num_preemptions_total` are all in the engine's metrics, and a request's `usage.cached_tokens` counts tokens from the copy. |
+| Worlds, 4 x 5 sessions x 8 turns, copy off | 160 requests, none failed; later turns' cached share 0.0; 196 s, first token p50 2525 ms, 0.82 requests a second. |
+| The same, copy 4 GiB | Share 0.9525, 136 of 140 later turns with their whole prefix; 79 s, p50 638 ms, 2.03 requests a second. Hit tokens: 1018720 counted as the GPU's, 141344 as the copy's. |
+| The same, copy 2 GiB | Share 0.9528; 86 s, p50 593 ms. Hit tokens 1015744 and 140640. |
+| The same, copy 1 GiB | Share 0.0; 204 s; hit tokens 0 and 0. |
+| At once, one session a world | 4: 24 requests, none failed, 307 tokens a second. 8: 48 requests, none failed, 0 preemptions, 389 tokens a second, first token p50 470 ms. |
+
+Not explained: with the copy on, the engine counted about 141000 hit tokens as the copy's, near one whole prefix
+for each of the 20 sessions, and a million as the GPU's, though with the copy off the same run had no GPU hit at all.
+One reading, not checked, is that a session's first return comes from the copy and the prefix then stays in the GPU
+cache for its later turns. The worlds report now sets each session's first return apart from its later ones
+([worlds.md](worlds.md)), and the next card settles it.
+
 ## Concurrency measurement tool
 
 The [standalone sweep](sweep.md) from `b6d4919` is now ported into the current checkout. It plans 24 levels and can

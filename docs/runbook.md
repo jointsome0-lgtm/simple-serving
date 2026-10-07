@@ -260,8 +260,23 @@ ssh <card> 'cd /workspace/simple-serving &&
   /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card'
 ```
 
-`--stop` ends the tunnel's hold too, and a new `up` confirms that the card is ready. `MTP_SPECULATIVE_TOKENS=0` and the
-same steps turn it off; the drafter's directory stays.
+`--stop` ends the tunnel's hold, and an `up` that runs opens the tunnel again by itself while the instance runs: it
+survives the stop and the new start, and a second `up` is refused as "another up runs" (seen on 2026-10-07; this
+paragraph said before that a new `up` was needed). That `up` printed `ready` for the old pair and prints nothing for
+the new one, so the new pair is ready when the card's log has one more `ready` row than before the stop:
+
+```
+ssh <card> 'grep -c "\"event\": *\"ready\"" /workspace/simple-serving-card/logs/card.jsonl'
+```
+
+With no `up` running, a new `up` confirms it as before. `MTP_SPECULATIVE_TOKENS=0` and the same steps turn the
+drafter off; its directory stays.
+
+`WARM_UP=1` in the manifest, the default, has the gateway send the engine one small generation of its own under a
+strict schema before it first reports `ready`, since the first request after a start took 6 to 9 seconds on
+2026-10-07 where the next took 0.3. The log row `warm_up` holds its `code` and `total_ms`. A warm-up that fails or
+takes over 60 seconds does not hold `ready` back. Whether it takes the whole delay off the first reader is not
+measured; `WARM_UP=0` and a new start turn it off.
 
 Measured on a 5090 on 2026-09-26, with 3 drafted tokens and the manifest's fp8 cache: the pair was ready in 102 s.
 The weights took 20070 MiB, against 19149 without the drafter, and the cache 6011 MiB, 104492 tokens, against
@@ -401,8 +416,8 @@ uv run python -m simple_serving.cli up | sleep | status | keys | trial --ssh-hos
 
 ssh's own failure, exit code 255, gets one more try after 2 seconds where the call had done nothing yet: the forward
 of `sleep` and `status` before the remote command's first line, which starts nothing, and `trial`'s read of the id
-when nothing came back. `up` already tries SSH every 10 seconds. On 2026-10-07 two of some sixty ssh calls to a
-trial card ended so, with nothing run. The same rule holds for an `ssh <card> ...` line typed by hand: 255 with no
+when nothing came back. `up` already tries SSH every 10 seconds. On 2026-10-07 two ssh calls to a trial card ended so, with nothing
+run. The same rule holds for an `ssh <card> ...` line typed by hand: 255 with no
 output is repeated once when the command only reads, or after the card's `logs/card.jsonl` shows that it did not
 run. A line that stops or starts the pair is never repeated blind, since a second `--stop` ends the pair the first
 one's start brought up.

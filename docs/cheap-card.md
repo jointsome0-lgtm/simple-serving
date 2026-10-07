@@ -247,14 +247,22 @@ ssh HOST bash /workspace/simple-serving/card/bootstrap.sh < /dev/null &&
   ssh HOST 'cd /workspace/simple-serving &&
     /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card --stop &&
     /workspace/simple-serving-card/gateway/bin/python -m simple_serving.card'
-uv run python -m simple_serving.cli up
+ssh HOST 'grep -c "\"event\": *\"ready\"" /workspace/simple-serving-card/logs/card.jsonl'
 ssh HOST 'grep -hE "engine_measure|load_ms" /workspace/simple-serving-card/logs/card.jsonl | tail -6' | tee OUT/engine-on.jsonl
 ```
 
 The pair is stopped only when the bootstrap ends with 0. It ends with 9 and changes nothing when the container
-cannot hold the size, and the pair it left serves on; then the next smaller size, once. `--stop` ends `up` too, so
-`up` is started again and its seconds to `ready` are the load: on 2026-09-27 a start with a new size of the copy took
-228 seconds, as a first load does.
+cannot hold the size, and the pair it left serves on; then the next smaller size, once.
+
+`up` is not started again: it survives `--stop` and the new start, since the instance keeps running and `up` opens
+its tunnel again by itself. A second `up` is refused with "another up runs", and on 2026-10-07 waiting on one cost
+5.5 idle minutes. `up` prints `ready` once and not again for the new pair, so the wait is for the card's own row: the
+count of `ready` rows, read before the stop, is one more once the new pair serves, and the row's `load_ms` is the
+load. Ask every 15 seconds or so. A start with a new size of the copy took 172 to 174 seconds on 2026-10-07, three
+times, against 271 for the first load, and 228 on 2026-09-27.
+
+An `ssh` line that ends with 255 and no output did not run, twice on 2026-10-07. Check the card's log before
+repeating the line of the stop and the start: a second `--stop` would end the pair that the first one started.
 
 ### 8. Counters, reload and worlds, copy on
 
@@ -302,10 +310,11 @@ pressure and the step says nothing.
 sed -i -E 's/^(KV_OFFLOADING_GIB)=.*/\1=1/' card/manifest.env
 ```
 
-then the copy of the file, the bootstrap, the stop, the start and `up` of step 7, and the worlds of step 8 into
-`OUT/worlds-on-1gib.json`. The run writes 1.9 GiB and, by speed.md item 5, needs 0.6 GiB for its hits. A
-`later_turns_cached_share` near step 8's says the copy drops what no hit needs first, and the 5090's size follows
-that formula; one near step 3's says it needs room for all that is written.
+then the copy of the file, the bootstrap, the stop, the start and the wait for `ready` of step 7, and the worlds of
+step 8 into `OUT/worlds-on-1gib.json`. The run writes 1.9 GiB, and a hit needs 0.6 GiB of it. A
+`later_turns_cached_share` near step 8's would say the copy drops what no hit needs first; one near step 3's says it
+needs room for all that is written. On 2026-10-07 it was the second: 0.0 at 1 GiB, and 0.95 at 2 GiB as at 4 GiB
+([speed.md](speed.md#measured-on-the-cheap-card-2026-10-07)).
 
 ### 5. Eight at once
 
