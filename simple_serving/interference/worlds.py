@@ -34,7 +34,7 @@ import re
 import secrets
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -105,7 +105,8 @@ class Session:
 
 
 async def _world(client: httpx.AsyncClient, target: Target, shape: Shape, index: int, per_line: float,
-                 origin: float, rows: list[dict[str, Any]]) -> None:
+                 origin: float, rows: list[dict[str, Any]],
+                 ended: Callable[[int], Awaitable[None]] | None = None) -> None:
     scope = workload.scope()
     spread = (shape.last_tokens - shape.first_tokens) // shape.sessions
     sessions = [Session(shape, per_line, spread * number) for number in range(shape.sessions)]
@@ -129,6 +130,22 @@ async def _world(client: httpx.AsyncClient, target: Target, shape: Shape, index:
                     **{name: usage.get(name) for name in ("prompt_tokens", "cached_tokens", "completion_tokens",
                                                           "wait_ms")}}
             rows.append(row)
+        if ended is not None:
+            await ended(turn)
+
+
+def by_turn(done: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The requests that ended well, turn by turn. Turn 1 is every session's first return to its prefix, and the
+    turns after it its later returns: a copy that only brings a prefix back once shows in the first and not in the
+    others."""
+    view = []
+    for turn in sorted({row["turn"] for row in done}):
+        rows = [row for row in done if row["turn"] == turn]
+        prompt, cached = sum(row["prompt_tokens"] for row in rows), sum(row["cached_tokens"] or 0 for row in rows)
+        view.append({"turn": turn, "requests": len(rows), "prompt_tokens": prompt, "cached_tokens": cached,
+                     "cached_share": round(cached / prompt, 4) if prompt else None,
+                     "ttft_p50_ms": _gaps([row["ttft_ms"] for row in rows if row["ttft_ms"] is not None])["p50"]})
+    return view
 
 
 def totals(rows: list[dict[str, Any]], wall_s: float) -> dict[str, Any]:
@@ -137,7 +154,8 @@ def totals(rows: list[dict[str, Any]], wall_s: float) -> dict[str, Any]:
     cached = sum(row["cached_tokens"] or 0 for row in done)
     output = sum(row["completion_tokens"] for row in done)
     later = [row for row in done if row["turn"]]
-    return {"requests": len(rows), "failed": len(rows) - len(done), "wall_s": round(wall_s, 3),
+    return {"by_turn": by_turn(done),
+            "requests": len(rows), "failed": len(rows) - len(done), "wall_s": round(wall_s, 3),
             "requests_per_s": round(len(done) / wall_s, 3), "output_tokens_per_s": round(output / wall_s, 3),
             "prompt_tokens": prompt, "cached_tokens": cached, "completion_tokens": output,
             "cached_share": round(cached / prompt, 4) if prompt else None,
@@ -148,7 +166,9 @@ def totals(rows: list[dict[str, Any]], wall_s: float) -> dict[str, Any]:
             "total_ms": _gaps([row["total_ms"] for row in done])}
 
 
-async def measure(client: httpx.AsyncClient, target: Target, shape: Shape) -> dict[str, Any]:
+async def measure(client: httpx.AsyncClient, target: Target, shape: Shape,
+                  ended: Callable[[int], Awaitable[None]] | None = None) -> dict[str, Any]:
+    """Run the worlds. `ended` is awaited by each world after each of its turns."""
     report: dict[str, Any] = {"schema_version": 1, "status": "failed", "code": "not_started", "shape": asdict(shape)}
     try:
         sample = workload.body(target.alias, [{"role": "user", "content": lines("note 00000000", 0, SAMPLE_UNITS)}],
@@ -158,7 +178,7 @@ async def measure(client: httpx.AsyncClient, target: Target, shape: Shape) -> di
         return report | {"code": str(error)}
     rows: list[dict[str, Any]] = []
     origin = time.monotonic()
-    await asyncio.gather(*(_world(client, target, shape, index, per_line, origin, rows)
+    await asyncio.gather(*(_world(client, target, shape, index, per_line, origin, rows, ended)
                            for index in range(shape.worlds)))
     rows.sort(key=lambda row: row["started_ms"])
     report |= {"tokens_per_line": round(per_line, 3), "requests": rows,
@@ -213,10 +233,25 @@ async def _against(public: str, control: str, key: str, control_key: str, shape:
             if shape.system_tokens + shape.last_tokens + shape.answer_tokens > context:
                 raise RunError("context_limit")
             before = await hits(client, control, control_key)
-            report = await measure(client, to, shape)
+            waiting, marks = dict.fromkeys(range(shape.turns), shape.worlds), {-1: before}
+
+            async def ended(turn: int) -> None:
+                """Read the engine's counters once the last world has ended a turn. The worlds do not wait for one
+                another, so a faster world's next turn is counted with this one: the split by turn is approximate."""
+                waiting[turn] -= 1
+                if not waiting[turn]:
+                    with contextlib.suppress(metrics.DiagnosticError, httpx.HTTPError):
+                        marks[turn] = await hits(client, control, control_key)
+
+            report = await measure(client, to, shape, ended)
             if "totals" in report:
                 engine = gained(before, await hits(client, control, control_key))
                 report["totals"] |= {"engine_preemptions": engine.pop("preempted"), "engine_hit_tokens": engine}
+                for row in report["totals"]["by_turn"]:
+                    since, now = marks.get(row["turn"] - 1), marks.get(row["turn"])
+                    if since is not None and now is not None:
+                        split = gained(since, now)
+                        row["engine_hit_tokens"] = {name: split[name] for name in ("local", "external")}
     except (RunError, metrics.DiagnosticError) as error:
         report |= {"status": "failed", "code": str(error)}
     except TimeoutError:
