@@ -373,7 +373,22 @@ class Service(Lifecycle):
         await self._watch_checks(self._check_engine)
 
     async def _check_engine(self) -> None:
-        self._engine_answered(await self.engine.context_length(self.config.alias))
+        length = await self.engine.context_length(self.config.alias)
+        if self.config.warm_up and self._engine_length is None and length is not None:
+            await self._warm_up()
+        self._engine_answered(length)
+
+    async def _warm_up(self) -> None:
+        """Before the first ready of a boot, one generation of the gateway's own, so that what the engine does once
+        for its first generation is not a reader's wait. It is no caller's work: it takes no place, holds nothing
+        awake and is in no count. A warm-up that fails is logged and the service is ready all the same."""
+        started = asyncio.get_running_loop().time()
+        try:
+            await self.engine.warm(self.config.alias, self.config.engine_priority["internal"])
+            code = "ok"
+        except (ServiceError, TimeoutError) as error:
+            code = "timeout" if isinstance(error, TimeoutError) else "failed"
+        log.row("warm_up", code=code, total_ms=round((asyncio.get_running_loop().time() - started) * 1000))
 
     def _engine_answered(self, length: int | None) -> None:
         """The engine answered a check with the alias's context length, or with None: it serves another model."""

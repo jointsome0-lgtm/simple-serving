@@ -25,6 +25,17 @@ METRICS_TIMEOUT_S = 5.0  # below Prometheus's scrape timeout of 10 s
 METRICS_LIMIT_BYTES = 8_000_000  # vLLM's exposition is some hundreds of kilobytes
 # No read timeout for counts and generations: a long prompt takes long to read, and the class's wall time bounds both.
 UNBOUNDED = httpx.Timeout(None, connect=CONNECT_TIMEOUT_S)
+# The gateway's own first generation (EngineClient.warm): a fixed line under a small strict schema, in the shape of a
+# reader's request. The first generation after a start took 6.3 s and 8.7 s where the next took 0.3 s (Gemma 4 E2B on
+# a 5060 Ti, 2026-10-07); this one is to take that in place of a reader's. Whether it takes all of it is not measured.
+WARM_TIMEOUT_S = 60.0
+WARM_SALT = "simple-serving-warm-up"
+WARM_REQUEST = ChatRequest(
+    messages=[{"role": "user", "content": "Answer with ok."}], max_tokens=8, enable_thinking=False,
+    sampling={"temperature": 0}, thinking_token_budget=None,
+    response_format={"type": "json_schema", "json_schema": {"name": "warm", "strict": True, "schema": {
+        "type": "object", "additionalProperties": False, "required": ["ok"],
+        "properties": {"ok": {"type": "boolean"}}}}})
 
 
 class EngineError(ServiceError):
@@ -121,6 +132,17 @@ class EngineClient:
                     raise EngineError("engine_unavailable")
                 return length
         return None
+
+    async def warm(self, alias: str, priority: int) -> None:
+        """One small generation, read to its end within WARM_TIMEOUT_S. EngineError or TimeoutError when it fails."""
+        async with asyncio.timeout(WARM_TIMEOUT_S):
+            stream = await self.generate(generation_payload(alias, WARM_REQUEST, priority=priority,
+                                                            cache_salt=WARM_SALT))
+            try:
+                while await stream.next_event() is not None:
+                    pass
+            finally:
+                await stream.aclose()
 
     async def metrics(self) -> tuple[bytes, str]:
         """The engine's own /metrics in the text format 0.0.4, with its content type, read within METRICS_TIMEOUT_S

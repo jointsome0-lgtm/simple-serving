@@ -24,7 +24,8 @@ CLASSES = ("reader", "agent", "internal", "external")
 SHARED = ("agent", "internal", "external")  # the classes that share places; readers have their own
 
 FIELDS = {"alias", "engine_url", "listen", "context_tokens", "body_limit_bytes", "max_connections", "keys", "limits",
-          "count_limits", "engine_priority", "drain_deadline_s", "idle_timeout_s", "health_interval_s", "versions"}
+          "count_limits", "engine_priority", "drain_deadline_s", "idle_timeout_s", "health_interval_s", "versions",
+          "warm_up"}
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 LOOPBACK_V4, LOOPBACK_V6 = ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_address("::1")
 IDLE_TIMEOUT_S = 780  # without work of ours, before the service falls asleep (contract section 8)
@@ -115,6 +116,7 @@ class Config:
     speculative: bool  # vLLM drafts tokens: `versions` names their count
     thinking_budget: bool  # the configuration permits passing request budgets to vLLM
     vision: bool = False  # vLLM takes pictures: `versions` names its vision tower
+    warm_up: bool = False  # one small generation of the gateway's own before the first ready
 
 
 def load(path: str) -> Config:
@@ -203,6 +205,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
         speculative=drafted is not None,
         thinking_budget=THINKING_BUDGET in versions,
         vision=vision is not None,
+        warm_up=_boolean(data.get("warm_up", False), "warm_up"),
     )
 
 

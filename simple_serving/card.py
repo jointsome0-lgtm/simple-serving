@@ -340,6 +340,7 @@ class Card:
             "listen": self.listen(),
             "keys": keys,
             "versions": pinned_versions(m),
+            "warm_up": m.get("WARM_UP", "0") == "1",
         }
 
     def listen(self) -> dict[str, dict[str, Any]]:

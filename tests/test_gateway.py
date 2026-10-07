@@ -569,3 +569,24 @@ async def test_an_error_event_the_client_does_not_read_holds_no_place_and_a_stop
     received, row = await stalled_terminal(monkeypatch, logged, script, b'data: {"error"', ending)
     assert b"The keeper" in received and b'"error"' not in received and b"[DONE]" not in received
     assert (row["status"], row["code"], row["cancelled"]) == (200, "engine_unavailable", True)
+
+
+@pytest.mark.parametrize("engine_status", [None, 500], ids=["warm", "the warm-up fails"])
+async def test_a_warm_up_is_the_gateways_own_generation_before_ready_and_its_failure_does_not_hold_ready_back(
+        logged: io.StringIO, engine_status: int | None) -> None:
+    fake = FakeEngine(ALIAS, SERVICE["context_tokens"])
+    fake.script = Script(generate_status=engine_status)
+    async with running(fake=fake) as stack:
+        assert not stack.fake.calls_of("generate")  # off unless the configuration asks for it
+    async with running(fake=fake, warm_up=True) as stack, httpx.AsyncClient(timeout=10) as client:
+        (warm,) = stack.fake.calls_of("generate")[-1:]
+        assert len(stack.fake.calls_of("generate")) == 1 and warm.body["response_format"]["json_schema"]["strict"]
+        assert warm.body["max_tokens"] == 8 and warm.body["model"] == ALIAS
+        view = (await control(client, stack, "/v1/state", method="GET")).json()
+        assert view["status"] == "ready" and not any(view["active"].values())  # it took no place
+        await asyncio.sleep(0.05)  # further checks send no second one
+        assert len(stack.fake.calls_of("generate")) == 1
+    rows = [json.loads(line) for line in logged.getvalue().splitlines()]
+    (row,) = [row for row in rows if row.get("event") == "warm_up"]
+    assert row["code"] == ("ok" if engine_status is None else "failed") and "total_ms" in row
+    assert not [row for row in rows if row.get("route") == "/v1/chat/completions"]  # and it is no request

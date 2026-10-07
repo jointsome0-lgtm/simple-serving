@@ -12,7 +12,7 @@
 # the preparation changes no onstart, which the platform may restore at a start. A second run changes nothing that
 # is in place, and no run prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed;
 # 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS, KV_OFFLOADING_GIB, KV_CACHE_MEMORY_MIB or GENERATIONS_AT_ONCE
-# is not a count or the last is above MAX_NUM_SEQS, THINKING_BUDGET or VISION is neither 0 nor 1, MODEL_PROFILE is not
+# is not a count or the last is above MAX_NUM_SEQS, THINKING_BUDGET, VISION or WARM_UP is neither 0 nor 1, MODEL_PROFILE is not
 # gemma, qwen or small, or it is not gemma with VISION=1; 4 no keys, or not two or three
 # different SHA-256 digests; 5 the card holds other keys, which stay; 9 the container does not fit the manifest, and
 # nothing was installed or fetched: KV_OFFLOADING_GIB does not fit /dev/shm or the memory, or the qwen profile's
@@ -57,6 +57,7 @@ for file in "${stamped[@]}"; do [[ -s $file ]] || exit 3; done
 [[ ${KV_OFFLOADING_GIB:-} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3  # GiB for the KV cache's copy in RAM, the same way
 [[ ${THINKING_BUDGET:-} =~ ^[01]$ ]] || exit 3  # the thinking budget, on or off
 [[ ${VISION:-} =~ ^[01]$ ]] || exit 3  # 1 loads Gemma 4's vision tower, 0 keeps it off the GPU
+[[ ${WARM_UP:=0} =~ ^[01]$ ]] || exit 3  # the gateway's own first generation, on or off
 [[ $profile == gemma || $VISION == 0 ]] || exit 3  # another profile is text only
 # MiB of KV cache on the GPU in place of vLLM's own size, and generations at once in place of the contract's limits:
 # counts, 0 for neither, and no more generations than vLLM's batch holds.
