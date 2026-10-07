@@ -35,6 +35,8 @@ image token counts, MTP throughput and GPU memory use still need the [vision che
 - [Picture smoke](docs/picture-smoke.md): one synthetic Qwen generation and record cleanup through the picture gateway.
 - [Thinking budget](docs/thinking-budget.md): optional per-request reasoning limits, disabled until GPU validation.
 - [Vision smoke](docs/vision-smoke.md): optional Gemma image input, key permission and synthetic validation.
+- [Worlds measurement](docs/worlds.md): many growing sessions at once through the gateway, with cached tokens a turn.
+- [Qwen3.8-27B profile](docs/qwen.md): the second text model behind `MODEL_PROFILE`, unmeasured until a rental.
 - [Prefill interference](docs/prefill-interference.md): a synthetic demonstration and client measurements through
   an existing text gateway, before deciding on prefill/decode disaggregation.
 
