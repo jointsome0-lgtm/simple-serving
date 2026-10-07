@@ -15,7 +15,11 @@ counters belong to the whole engine.
 `schemas` sends one prompt again and again under a strict schema of the shape sagents' world uses: about ten fields,
 nullable strings, an enum with null, arrays of objects whose fields are enums of labels. Every second request has the
 same schema as before and every other one new labels, so new text. The prompt is the same and cached, so the
-difference of their first tokens is what one compilation of a grammar costs.
+difference of their first tokens is about what a new schema costs: its compilation, with whatever else the engine
+does once for a new grammar, and the noise of two medians.
+
+`counters` sends no generation: it says which of the engine's three counters its metrics hold. `reload --other-scope`
+also asks a session's text from a new scope while its prefix is out of the GPU's cache, where nothing may be cached.
 
 Without --run each is a dry run through this repository's gateway in front of the fake engine, whose cache, copy and
 compile time are stand-ins (worlds.py): it shows the report and that the client tells the cases apart, and measures
@@ -29,6 +33,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import secrets
 import statistics
 from pathlib import Path
@@ -40,7 +45,7 @@ from ..cli import Refusal, read_config
 from . import metrics, workload
 from .cli import RunError, _base
 from .runner import Reading, Target, TrialError, _input_tokens, _stream
-from .worlds import SAMPLE_UNITS, SCHEMA, dry_gateway, gained, hits, lines, target
+from .worlds import COUNTERS, SAMPLE_UNITS, SCHEMA, dry_gateway, gained, hits, lines, target
 
 TIMEOUT_S = 180
 
@@ -82,8 +87,10 @@ def median(rows: list[dict[str, Any]], kind: str) -> float | None:
 
 
 async def reload(client: httpx.AsyncClient, to: Target, control: str, control_key: str, *, tokens: int, rounds: int,
-                 fillers: int) -> dict[str, Any]:
-    """`rounds` times: a session's cold turn, its next from the GPU's cache, `fillers` other sessions, its third."""
+                 fillers: int, other_scope: bool = False) -> dict[str, Any]:
+    """`rounds` times: a session's cold turn, its next from the GPU's cache, `fillers` other sessions, its third.
+    With `other_scope`, before the third its second turn's text is asked from a new scope (`other`): the gateway
+    gives that another cache salt, so nothing of it may come from either store."""
     line = await per_line(client, to)
     count, grow, rows = max(1, round(tokens / line)), max(1, round(300 / line)), []
 
@@ -100,12 +107,17 @@ async def reload(client: httpx.AsyncClient, to: Target, control: str, control_ke
         await step("gpu", lines(tag, 0, count + grow), scope, index)
         for _ in range(fillers):
             await step("filler", lines("note " + secrets.token_hex(4), 0, count), workload.scope(), index)
+        if other_scope:
+            await step("other", lines(tag, 0, count + grow), workload.scope(), index)
         await step("back", lines(tag, 0, count + 2 * grow), scope, index)
     back = [row for row in rows if row["kind"] == "back" and row["status"] == "ok"]
     failed = sum(row["status"] != "ok" for row in rows)
+    crossed = {"other_scope_cached_tokens": sum(
+        (row["cached_tokens"] or 0) + row["gpu_hit_tokens"] + row["copy_hit_tokens"]
+        for row in rows if row["kind"] == "other")} if other_scope else {}
     return {"schema_version": 1, "status": "failed" if failed else "ok", "code": "requests_failed" if failed else "ok",
-            "tokens": tokens, "rounds": rounds, "fillers": fillers, "rows": rows,
-            "ttft_ms": {kind: median(rows, kind) for kind in ("cold", "gpu", "back")},
+            "tokens": tokens, "rounds": rounds, "fillers": fillers, "rows": rows, **crossed,
+            "ttft_ms": {kind: median(rows, kind) for kind in ("cold", "filler", "gpu", "other", "back")},
             # Where the third turns' prefixes came from: all from the copy, all read again, or neither clearly.
             "back_from": ("copy" if back and all(row["copy_hit_tokens"] >= row["prompt_tokens"] // 2 for row in back)
                           else "gpu" if back and all(row["gpu_hit_tokens"] >= row["prompt_tokens"] // 2 for row in back)
@@ -148,6 +160,15 @@ async def schemas(client: httpx.AsyncClient, to: Target, *, tokens: int, pairs: 
             "compile_ms": round(new - repeated, 3) if new is not None and repeated is not None else None}
 
 
+async def counters(client: httpx.AsyncClient, control: str, control_key: str) -> dict[str, Any]:
+    """Which of the engine's three counters its metrics hold, and their values. No generation is sent."""
+    text = (await metrics.read(client, control, "/metrics/engine", control_key)).decode("utf-8", "replace")
+    present = {label: re.search(rf"^vllm:{name}_total", text, re.MULTILINE) is not None
+               for name, label in COUNTERS.items()}
+    return {"schema_version": 1, "status": "ok", "code": "ok", "present": present,
+            "values": await hits(client, control, control_key)}
+
+
 async def _measure(args: argparse.Namespace, public: str, control: str, key: str, control_key: str) -> dict[str, Any]:
     report: dict[str, Any] = {"schema_version": 1, "status": "failed", "code": "not_started"}
     try:
@@ -156,9 +177,11 @@ async def _measure(args: argparse.Namespace, public: str, control: str, key: str
             to, context = await target(client, public, control, key, control_key)
             if args.tokens + 1024 > context:
                 raise RunError("context_limit")
-            if args.command == "reload":
+            if args.command == "counters":
+                report = await counters(client, control, control_key)
+            elif args.command == "reload":
                 report = await reload(client, to, control, control_key, tokens=args.tokens, rounds=args.rounds,
-                                      fillers=args.fillers)
+                                      fillers=args.fillers, other_scope=args.other_scope)
             else:
                 report = await schemas(client, to, tokens=args.tokens, pairs=args.pairs, labels=args.labels)
     except (RunError, metrics.DiagnosticError, TrialError) as error:
@@ -185,7 +208,9 @@ async def _dry(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m simple_serving.interference.probes",
                                      description=(__doc__ or "").split("\n\n")[0])
-    parser.add_argument("command", choices=("reload", "schemas"))
+    parser.add_argument("command", choices=("reload", "schemas", "counters"))
+    parser.add_argument("--other-scope", action="store_true",
+                        help="reload: ask a session's text from a new scope too, before its third turn")
     parser.add_argument("--run", action="store_true", help="against a gateway; without it, the dry run")
     parser.add_argument("--config", type=Path, help="--run: owner-only CLI configuration with client/control keys")
     parser.add_argument("--out", type=Path, help="new JSON report file; required with --run, never overwritten")
