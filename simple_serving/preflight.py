@@ -4,12 +4,14 @@
                                               [--files name:bytes,... --into DIR]
     python3 simple_serving/preflight.py report
     python3 simple_serving/preflight.py plan --offload-gib N
+    python3 simple_serving/preflight.py plan --sessions S --prompt-tokens T [--kib-per-token K]
 
 card/bootstrap.sh runs `check` with the card's own python3, before a venv exists, so this file imports the standard
 library alone and runs by its path; the launcher imports it for the same rule before it starts the pair (`card.py`).
 `check` prints one line of numbers and returns 0, or 9 with the reasons in that line. `report` prints the same numbers
 with nothing asked, and the largest KV_OFFLOADING_GIB that fits: the first command of a rental that means to use the
-copy. `plan` prints what an offer must have for a size, for the renter's filter, which is not in this repository.
+copy. `plan` prints what an offer must have for a size, for the renter's filter, which is not in this repository;
+with --sessions and --prompt-tokens it first works the size out: what all the sessions write before one returns.
 
 The copy of the KV cache in RAM (docs/speed.md, item 5). vLLM 0.30.0 keeps it in one file in /dev/shm, whose path is
 fixed (vllm/v1/kv_offload/cpu/shared_offload_region.py:111), refuses a size above that mount's free space (:138 and
@@ -43,6 +45,9 @@ SHM_MARGIN_MIB = 512
 # context, the tokenizer, xgrammar's compiled schemas (VLLM_XGRAMMAR_CACHE_MB, 512 by default) and Python.
 ENGINE_RESERVE_MIB = 12 * 1024
 NO_LIMIT = 1 << 60  # a cgroup limit at or above this is no limit
+# What a token of a prompt writes to the copy with the 31B under dense retention: 40 KiB in the global layers and 400
+# in the sliding ones (docs/speed.md, item 5). Derived from the model's layers, not measured.
+DENSE_KIB_PER_TOKEN = 440
 
 
 def shm_free_mib(path: Path) -> int | None:
@@ -102,6 +107,13 @@ def offer_needs(gib: int) -> dict[str, int]:
     memory_mib = gib * 1024 + ENGINE_RESERVE_MIB
     return {"offload_gib": gib, "min_memory_mib": memory_mib, "min_ram_gb": math.ceil(memory_mib * MIB / 1e9),
             "min_shm_mib": gib * 1024 + SHM_MARGIN_MIB}
+
+
+def copy_gib(sessions: int, prompt_tokens: int, kib_per_token: int) -> int:
+    """The copy that holds every session's whole prompt as it is written, in whole GiB: sessions x tokens x the bytes
+    a token writes. A smaller one drops a session's blocks before its second turn, and then gives nothing: 1 GiB did
+    so where this rule asks 2 (Gemma 4 E2B, 2026-10-07; docs/speed.md, item 5)."""
+    return math.ceil(sessions * prompt_tokens * kib_per_token * 1024 / GIB)
 
 
 def gpu() -> tuple[int, int] | None:
@@ -171,11 +183,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-gpu-mib", type=int, default=0)
     parser.add_argument("--files")
     parser.add_argument("--into", type=Path)
+    parser.add_argument("--sessions", type=int, help="plan: sessions that take turns")
+    parser.add_argument("--prompt-tokens", type=int, help="plan: tokens of a session's prompt at its longest")
+    parser.add_argument("--kib-per-token", type=int, default=DENSE_KIB_PER_TOKEN,
+                        help="plan: KiB a token writes to the copy; 440 is the 31B's under dense retention")
     args = parser.parse_args(argv)
     if args.offload_gib < 0:
         parser.error("--offload-gib is a count of GiB")
     if args.command == "plan":
-        print(json.dumps(offer_needs(args.offload_gib)))
+        if (args.sessions is None) != (args.prompt_tokens is None):
+            parser.error("--sessions goes with --prompt-tokens")
+        if args.sessions is None:
+            print(json.dumps(offer_needs(args.offload_gib)))
+            return 0
+        if args.offload_gib or min(args.sessions, args.prompt_tokens, args.kib_per_token) < 1:
+            parser.error("--sessions, --prompt-tokens and --kib-per-token are counts, and stand in place of "
+                         "--offload-gib")
+        gib = copy_gib(args.sessions, args.prompt_tokens, args.kib_per_token)
+        print(json.dumps({"sessions": args.sessions, "prompt_tokens": args.prompt_tokens,
+                          "kib_per_token": args.kib_per_token} | offer_needs(gib)))
         return 0
     numbers, alloc_conf = measured(os.environ), os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
     line: dict[str, object] = dict(numbers)

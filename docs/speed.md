@@ -84,18 +84,34 @@ should compare cached prompt tokens, reader TTFT and interference pauses against
      tokens writes 6.7 GiB and one of 40000 writes 16.8 GiB. With retention 0 only the windows at the prompt's end
      and at a shared prefix's end are stored, about 412 MiB each, which is what this item said before.
    - *What a hit needs.* Every global chunk of the prefix and one window of sliding chunks at its end
-     (`offloading/scheduler.py:642-718,841-866`): N x 40 KiB + about 412 MiB, 1.0 GiB at 16000 tokens. The rest of
-     what was written is dropped first, since a lookup touches only what a hit needs
-     (`:720-737`, `vllm/v1/kv_offload/cpu/policies/lru.py:43-78`).
-   - *Sizing.* A session's chunks last from one of its turns to its next when all that is touched or written in
-     between fits: for T sessions that take turns, each growing D tokens a turn, about
-     T x (N x 40 KiB + 412 MiB + D x 440 KiB). Twenty sessions at D = 300 need 12.9 GiB at 3000 tokens, 17.8 GiB at
-     9500 and 22.8 GiB at 16000. This is derived, not measured. A size at or below the GPU's own cache, 6 to 9 GiB,
-     adds nothing (vLLM's `docs/features/kv_offloading_usage.md:326`).
+     (`offloading/scheduler.py:642-718,841-866`): N x 40 KiB + about 412 MiB, 1.0 GiB at 16000 tokens. A lookup
+     touches only that (`:720-737`, `vllm/v1/kv_offload/cpu/policies/lru.py:43-78`). This item sized the copy by it
+     until 2026-10-07, as T x (N x 40 KiB + 412 MiB + D x 440 KiB) for T sessions that grow D tokens a turn, and the
+     cheap card refuted that: where the same formula asked 0.6 GiB for Gemma 4 E2B, a copy of 1 GiB gave no hit at
+     all.
+   - *Sizing.* **Sessions x prompt tokens x the bytes a token writes**: the copy has to hold what all the sessions
+     write before the first of them returns. When every session starts cold, each writes its whole prompt, and in a
+     smaller copy a session's blocks are gone before its second turn; that turn is then cold again and writes in
+     full, and so is every turn after it. `python3 simple_serving/preflight.py plan --sessions S --prompt-tokens T`
+     prints the size and what an offer must have for it; `--kib-per-token` is 440 unless given.
+
+     | Sessions x prompt tokens | Bytes a token | Copy | What it is |
+     | --- | --- | --- | --- |
+     | 20 x 8850 (E2B, first turns 8300) | 9 KiB | 1.5 GiB by the rule | **Measured, E2B, 2026-10-07:** 1 GiB gave 0 of 140 later turns a cached token; 2 GiB and 4 GiB gave 136 of 140 their whole prefix. |
+     | 2 x 16000 (31B) | 440 KiB | 14 GiB | Arithmetic. The most that fits the 15 GiB of `/dev/shm` seen on a 5090 host. |
+     | 4 x 16000 (31B) | 440 KiB | 27 GiB | Arithmetic. |
+     | 20 x 8850 (31B) | 440 KiB | 75 GiB | Arithmetic. |
+
+     The rule is from one model and one workload, three sizes, one run each; where between 1 and 2 GiB the E2B copy
+     begins to work was not located. E2B's 9 KiB and the 31B's 440 KiB a token are both derived from the models'
+     layers and neither is measured. Sessions that start one after another, not all at once, may get by with less:
+     not tried. A size at or below the GPU's own cache, 6 to 9 GiB, adds nothing (vLLM's
+     `docs/features/kv_offloading_usage.md:326`).
    - *Measured so far.* On the 5090 with the 31B and its drafter, 12 GiB started, and four interleaved stories read 0
      of 294715 prompt tokens from it, under retention 0. On the cheap card with Gemma 4 E2B, 8 GiB read 146304 of
-     295905. The copy under dense retention has never run. Its cost to a prefill step, and the speed of a load from
-     RAM, are not known.
+     295905 under retention 0 (2026-09-27), and under dense retention a copy of 2 GiB or 4 GiB brought every
+     session's prefix back (2026-10-07, [below](#measured-on-the-cheap-card-2026-10-07)). With the 31B the copy
+     under dense retention has never run.
    - *How it is measured.* The [worlds measurement](worlds.md), with the copy off and on, on one card: cached
      prompt tokens in later turns and each turn's first token.
 

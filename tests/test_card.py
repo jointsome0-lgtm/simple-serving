@@ -838,6 +838,8 @@ def test_a_copy_of_the_kv_cache_fits_only_with_the_shm_and_the_memory_for_it(tmp
     assert preflight.largest_offload_gib(15 * gib, 16 * gib) == 4
     assert preflight.offer_needs(24) == {"offload_gib": 24, "min_memory_mib": 36 * gib, "min_ram_gb": 39,
                                          "min_shm_mib": 24 * gib + 512}
+    # The size is what all the sessions write before one returns: E2B's twenty needed 2 GiB where 1 GiB gave nothing.
+    assert preflight.copy_gib(20, 8300, 9) == 2 and preflight.copy_gib(4, 16000, preflight.DENSE_KIB_PER_TOKEN) == 27
     cgroup, proc = tmp_path / "cgroup", tmp_path / "proc"
     cgroup.mkdir()
     proc.mkdir()
