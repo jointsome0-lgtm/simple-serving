@@ -369,9 +369,10 @@ async def test_sleep_during_up_drains_through_a_forward_of_its_own_and_up_ends_w
 
 @pytest.mark.anyio
 async def test_sleep_stops_nothing_when_the_gateway_cannot_be_reached(tmp_path: Path, clock: Clock) -> None:
-    instance, ssh = Instance("running"), Ssh(refuse=(cli.SSH_FAILED,))
+    instance, ssh = Instance("running"), Ssh(refuse=(cli.SSH_FAILED, cli.SSH_FAILED))
     with pytest.raises(cli.Refusal, match="never stops the card itself"):
         await cli.sleep(setup_for(tmp_path, instance, ssh))
+    assert len(ssh.opened) == 2  # ssh's own failure gets one more try, and no more
     assert (instance.reads, instance.resumes) == (1, 0)  # and neither the command nor its Vast can stop
 
 
@@ -385,7 +386,8 @@ async def test_sleep_stops_nothing_when_the_gateway_cannot_be_reached(tmp_path: 
     ("running", (), {"body": VIEW | {"active": [CONTROL]}}, "200 malformed"),
     ("running", (), {"body": VIEW | {"padding": "x" * cli.ANSWER_BYTES}}, "no answer"),
     ("running", (), {"drip_s": 0.01}, "no answer"),  # a byte every 10 ms: only the bound of the whole call ends it
-    ("running", (cli.SSH_FAILED,), {}, "ssh ended with 255"),
+    ("running", (cli.SSH_FAILED, cli.SSH_FAILED), {}, "ssh ended with 255"),
+    ("running", (cli.SSH_FAILED,), {}, f"ready; contract 2, model {ALIAS}; active {{'reader': 1}}, waiting none"),
     ("running", (card.GAVE_UP,), {}, cli.GIVEN_UP),
     ("running", (card.STOP_UNCONFIRMED,), {}, cli.UNCONFIRMED),
     ("stopped", (), {}, None),
@@ -404,7 +406,9 @@ async def test_status_tells_vast_apart_from_the_gateway_and_prints_nothing_as_it
                 assert await cli.status(setup) == 0
     printed = capsys.readouterr().out
     assert printed.splitlines() == [f"vast: {vast}", *([f"gateway: {line}"] if line else [])]
-    assert CONTROL not in printed and strangers == [] and len(ssh.opened) == (vast == "running")
+    assert CONTROL not in printed and strangers == []
+    # ssh's own failure gets one more try and no more; an answer of the card's shell gets none
+    assert len(ssh.opened) == (vast == "running") * min(2, 1 + refuse.count(cli.SSH_FAILED))
 
 
 # the picture lane

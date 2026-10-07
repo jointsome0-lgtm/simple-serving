@@ -399,6 +399,14 @@ uv run python -m simple_serving.cli up | sleep | status | keys | trial --ssh-hos
   instance of its own under `pictures` in the configuration, local ports 8084 and 8085, and a lock of its own.
   [pictures.md, section 10](pictures.md#10-the-command) describes the picture CLI.
 
+ssh's own failure, exit code 255, gets one more try after 2 seconds where the call had done nothing yet: the forward
+of `sleep` and `status` before the remote command's first line, which starts nothing, and `trial`'s read of the id
+when nothing came back. `up` already tries SSH every 10 seconds. On 2026-10-07 two of some sixty ssh calls to a
+trial card ended so, with nothing run. The same rule holds for an `ssh <card> ...` line typed by hand: 255 with no
+output is repeated once when the command only reads, or after the card's `logs/card.jsonl` shows that it did not
+run. A line that stops or starts the pair is never repeated blind, since a second `--stop` ends the pair the first
+one's start brought up.
+
 The configuration is `~/.config/simple-serving/config.json`, open to its owner only, or the file that `--config`
 names:
 

@@ -82,6 +82,7 @@ POLL_S = 10  # between two reads of Vast, and two tries of SSH
 STOP_WAIT_S = 600  # for a stop in flight to end: a drain of 120 seconds at most, then Vast's own time
 START_WAIT_S = 600  # for a resumed instance to run, and then for SSH to connect
 READY_POLL_S = 5
+RETRY_S = 2  # before the one second try of an ssh call that ended with SSH_FAILED and had sent nothing
 READY_MARGIN_S = 60  # past the card's load deadline, by when the launcher has ended a load that is not ready
 CONNECT_S = 30  # from starting ssh to the remote command's first line
 CLOSE_S = 5  # from ssh's SIGTERM to its SIGKILL
@@ -299,6 +300,26 @@ async def trial(path: Path, host: str, lane: Lane = LANES["text"]) -> int:
     block = config if lane.name is None else config.get(lane.name, {})
     if not isinstance(block, dict):
         raise Refusal(f"{path} must hold a JSON object as {lane.name}")
+    answer, code = await read_trial(host)
+    if code == SSH_FAILED and not answer:  # ssh itself failed with nothing read, and reading again changes nothing
+        await pause(RETRY_S)
+        answer, code = await read_trial(host)
+    if code:
+        raise Refusal(f"could not read the instance's id from the card: ssh ended with {code}")
+    try:
+        instance, rest = answer.decode().split("\n")
+    except ValueError:  # a byte that is not UTF-8, or other than one line
+        instance, rest = "", "?"
+    if code is None or rest or not vast.INSTANCE.fullmatch(instance):
+        raise Refusal("the card's instance id is missing or of the wrong form")
+    found = block | {"instance_id": instance, "ssh_host": host}
+    write_config(path, found if lane.name is None else config | {lane.name: found})
+    say(f"trial: the instance's id and the SSH host are in {path}")
+    return 0
+
+
+async def read_trial(host: str) -> tuple[bytes, int | None]:
+    """The card's answer to READ_TRIAL and ssh's exit code, or None for an answer longer than an id."""
     # Standard error is dropped unread: whatever the card prints there could hold its key.
     process = await asyncio.create_subprocess_exec(*SSH, host, READ_TRIAL, stdin=asyncio.subprocess.DEVNULL,
                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
@@ -312,20 +333,9 @@ async def trial(path: Path, host: str, lane: Lane = LANES["text"]) -> int:
     except TimeoutError:
         await Tunnel(process).close()
         raise Refusal(f"the card did not give the instance's id within {CONNECT_S} seconds") from None
-    if code is None:  # an answer longer than an id
+    if code is None:
         await Tunnel(process).close()
-    elif code:
-        raise Refusal(f"could not read the instance's id from the card: ssh ended with {code}")
-    try:
-        instance, rest = answer.decode().split("\n")
-    except ValueError:  # a byte that is not UTF-8, or other than one line
-        instance, rest = "", "?"
-    if code is None or rest or not vast.INSTANCE.fullmatch(instance):
-        raise Refusal("the card's instance id is missing or of the wrong form")
-    found = block | {"instance_id": instance, "ssh_host": host}
-    write_config(path, found if lane.name is None else config | {lane.name: found})
-    say(f"trial: the instance's id and the SSH host are in {path}")
-    return 0
+    return answer, code
 
 
 async def up(setup: Setup) -> int:
@@ -470,9 +480,16 @@ async def status(setup: Setup) -> int:
 async def control(setup: Setup) -> AsyncIterator[str]:
     """The gateway's control listener, through a short control-only forward of this command's own on a free loopback
     port. The key goes there only after the remote command's first line, once ssh has bound the port; never to up's
-    ports, since up's lock does not show that its forwards are bound."""
+    ports, since up's lock does not show that its forwards are bound. A forward that ssh itself fails to open is
+    opened once more: the remote command starts nothing, and nothing was sent yet."""
     port = free_port()
-    tunnel = await setup.connect({port: setup.card_ports["control"]})
+    try:
+        tunnel = await setup.connect({port: setup.card_ports["control"]})
+    except NoTunnel as error:
+        if error.code != SSH_FAILED:
+            raise
+        await pause(RETRY_S)
+        tunnel = await setup.connect({port: setup.card_ports["control"]})
     try:
         yield setup.control_url(port)
     finally:
