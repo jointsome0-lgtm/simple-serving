@@ -175,8 +175,8 @@ Remote refs were retained.
 The clean `~/work/simple-serving-pictures` checkout was removed with its reproducible Python environment and
 caches. The clean `/var/tmp/simple-serving-next` checkout was retired after the MTP integration.
 The clean `/var/tmp/simple-serving-metrics` checkout was retired after the monitoring integration. Its seven
-untracked smoke logs were copied and hash-checked in
-`/home/jo/Documents/Codex/2026-09-30/qj/work/monitoring-integration/source-metrics-logs`; their contents were not printed.
+untracked smoke logs were copied and hash-checked in a working folder outside the repository; their contents were
+not printed.
 All three checkouts' code is in the current branch. One stale registration for a missing scratch checkout was pruned.
 The saved cleanup stash was preserved.
 
