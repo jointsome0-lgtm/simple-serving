@@ -222,13 +222,13 @@ async def test_the_dry_run_passes_every_probe_and_prints_no_key_no_prompt_and_no
     assert lines["budget"]["enforcement"] == "disabled"
 
     # The enabled route is checked on a second fake gateway without changing the committed manifest.
-    enabled = manifest | {"THINKING_BUDGET": "1"}
+    enabled = manifest | {"THINKING_BUDGET": "1", "MIN_P_WHILE_DRAFTING": "1"}
     setup = json.loads(launcher.read_text())
     setup["versions"] = card.pinned_versions(enabled)
     launcher.write_text(json.dumps(setup))
     async with launched(config=str(launcher)) as launch, httpx.AsyncClient(timeout=None, trust_env=False) as client:
         trial = smoke.Smoke(client, launch.public, launch.control, BOT, CONTROL, manifest["MODEL_ALIAS"],
-                            int(manifest["CONTEXT_TOKENS"]), fake=True, mtp=drafting, budget=True)
+                            int(manifest["CONTEXT_TOKENS"]), fake=True, mtp=drafting, budget=True, min_p=True)
         assert await smoke.run(trial, ["fields", "budget"]) == 0
     printed = capsys.readouterr()
     enabled_lines = {line["probe"]: line for line in map(json.loads, printed.out.splitlines())}

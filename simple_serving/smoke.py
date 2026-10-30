@@ -18,10 +18,11 @@ The probes run in this order, each within a time bound of its own, and the first
   one finish, one usage chunk after it, and [DONE].
 - fields: each optional field of section 4 alone, at a legal value. The answer with `response_format` ends in `stop`
   and follows its schema, and the one with thinking off has no reasoning. While the manifest turns multi-token
-  prediction on, the gateway refuses the min_p of 0.05 with 400 min_p_unavailable, and that refusal is what its part
-  checks; so it is for the thinking_token_budget, 400 thinking_budget_unavailable while the manifest leaves the budget
-  off. Beside them an observation that passes nothing: two answers at temperature 0.8 with one seed, compared by
-  hash.
+  prediction on and leaves MIN_P_WHILE_DRAFTING off, the gateway refuses the min_p of 0.05 with 400 min_p_unavailable,
+  and that refusal is what its part checks; so it is for the thinking_token_budget, 400 thinking_budget_unavailable
+  while the manifest leaves the budget off. With the switch on the min_p gets an answer like any field, which says
+  nothing of whether it filtered: that is simple_serving/min_p_proof.py. Beside them an observation that passes
+  nothing: two answers at temperature 0.8 with one seed, compared by hash.
 - reasoning: thinking on gives reasoning and an answer, thinking off an answer alone.
 - finish: `length` at a small max_tokens, after exactly that many tokens, and `stop`.
 - refusal: a schema that the engine cannot compile is 400 invalid_request, before any stream.
@@ -473,6 +474,7 @@ class Smoke:
     record: Record | None = None
     mtp: bool = False  # the manifest turns multi-token prediction on: vLLM drafts tokens
     budget: bool = False  # the manifest turns the thinking budget on: the gateway passes it to vLLM
+    min_p: bool = False  # the manifest lifts vLLM's refusal of a min_p: the gateway passes it while vLLM drafts
     undo: Callable[[], Awaitable[bool]] | None = None  # what the running probe changed and run() undoes
 
     def headers(self, listener: str) -> dict[str, str]:
@@ -658,7 +660,7 @@ async def probe_fields(smoke: Smoke) -> dict[str, Any]:
             answer = answer_problems(stream.content, WORD_SCHEMA)
         if stream.ok and name == "chat_template_kwargs" and stream.reasoning:
             failed.append("reasoning")
-        if name == "min_p" and smoke.mtp:  # vLLM drafts tokens, and the gateway refuses it first (contract section 4)
+        if name == "min_p" and smoke.mtp and not smoke.min_p:  # vLLM would refuse it, and the gateway does (section 4)
             parts[name] = refused(stream, "min_p_unavailable")
         elif name == "thinking_token_budget" and not smoke.budget:  # the budget is off (section 4)
             parts[name] = refused(stream, "thinking_budget_unavailable")
@@ -1238,7 +1240,8 @@ async def smoke_run(args: argparse.Namespace, config: dict[str, Any], manifest: 
         smoke = Smoke(client, f"http://127.0.0.1:{args.public_port}", f"http://127.0.0.1:{args.control_port}",
                       config["client_key"], config["control_key"], manifest["MODEL_ALIAS"],
                       int(manifest["CONTEXT_TOKENS"]), args.fake, files, record,
-                      mtp=int(manifest["MTP_SPECULATIVE_TOKENS"]) > 0, budget=int(manifest["THINKING_BUDGET"]) > 0)
+                      mtp=int(manifest["MTP_SPECULATIVE_TOKENS"]) > 0, budget=int(manifest["THINKING_BUDGET"]) > 0,
+                      min_p=int(manifest["MIN_P_WHILE_DRAFTING"]) > 0)
         return await run(smoke, names)
 
 

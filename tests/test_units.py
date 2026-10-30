@@ -290,6 +290,9 @@ def test_the_configuration_file_holds_hashes_and_refuses_what_it_does_not_know(t
         assert "versions" in refused(lambda d, value=value: d.update(versions={"thinking_budget": value}))
     for value in ("0", "on", "", True, 1):
         assert "versions" in refused(lambda d, value=value: d.update(versions={"vision": value}))
+    assert "versions" in refused(lambda d: d.update(versions={"min_p_while_drafting": "on"}))  # nothing drafts
+    assert "versions" in refused(lambda d: d.update(versions={"mtp_speculative_tokens": "3",
+                                                              "min_p_while_drafting": "1"}))
     assert "vision" in refused(lambda d: d["keys"][0].update(vision=True))
     assert "vision" in refused(lambda d: d["keys"][0].update(vision="true"))
     assert "outside key" in refused(lambda d: (d.update(versions={"vision": "1"}),

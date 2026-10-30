@@ -242,11 +242,15 @@ async def test_without_optional_fields_thinking_is_off_and_sampling_is_left_to_t
     assert generation.body["priority"] == SERVICE["engine_priority"]["internal"]
 
 
-@pytest.mark.parametrize("drafting", [True, False], ids=["drafting", "not drafting"])
+@pytest.mark.parametrize("versions", [{"mtp_speculative_tokens": "3"}, {},
+                                      {"mtp_speculative_tokens": "3", "min_p_while_drafting": "on"}],
+                         ids=["drafting", "not drafting", "drafting with the refusal lifted"])
 async def test_a_min_p_that_vllm_refuses_while_it_drafts_is_refused_before_the_engine_sees_anything(
-        drafting: bool) -> None:
+        versions: dict[str, str]) -> None:
     """vLLM 0.30.0 refuses a min_p above 1e-5 with speculative decoding, except at temperature 0 (service.py). The
-    gateway knows that vLLM drafts from the count that the card's launcher names among the versions."""
+    gateway knows that vLLM drafts from the count that the card's launcher names among the versions, and that the
+    card lifted the refusal from the entry beside it."""
+    drafting = list(versions) == ["mtp_speculative_tokens"]
     bodies: dict[str, tuple[dict[str, float], bool]] = {  # each request's fields, and whether vLLM refuses them
         "temperature left out": ({"min_p": 0.05}, True),  # 1 for vLLM
         "temperature 0.2": ({"min_p": 1, "temperature": 0.2}, True),
@@ -257,7 +261,6 @@ async def test_a_min_p_that_vllm_refuses_while_it_drafts_is_refused_before_the_e
         "zero": ({"min_p": 0}, False),
         "min_p left out": ({}, False),
     }
-    versions = {"mtp_speculative_tokens": "3"} if drafting else {}
     async with running(versions=versions) as stack, httpx.AsyncClient(timeout=10) as client:
         over_limit = await generate(client, stack, user_body(
             "max_tokens checked first", min_p=0.05, max_tokens=SERVICE["limits"]["internal"]["max_tokens"] + 1))

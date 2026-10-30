@@ -9,7 +9,8 @@ contains real vLLM rentals and RTX 5090 measurements, including the choice to ke
 prediction. Those dated results do not verify a current live deployment or every mode of the contract.
 
 Under MTP, the text gateway rejects `min_p > 1e-5` with 400 `min_p_unavailable` unless `temperature` is 0,
-before sending anything to vLLM. Counting is unaffected. See the [generation contract](docs/contract-v2.md#4-generation-post-v1chatcompletions).
+before sending anything to vLLM, while the manifest leaves `MIN_P_WHILE_DRAFTING` at 0. Counting is unaffected. See the
+[generation contract](docs/contract-v2.md#4-generation-post-v1chatcompletions).
 
 The text API remains contract v2. The picture lane's phase 1 code is integrated locally, with a fake ComfyUI,
 picture card files and `--lane pictures` in the CLI. Its real card test remains pending. The bot's provider switch

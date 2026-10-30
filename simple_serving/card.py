@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Self
 
 from . import log, vast
-from .config import DRAFTED_TOKENS, IDLE_TIMEOUT_S, PROVISIONAL, THINKING_BUDGET, VISION
+from .config import DRAFTED_TOKENS, IDLE_TIMEOUT_S, MIN_P_WHILE_DRAFTING, PROVISIONAL, THINKING_BUDGET, VISION
 
 CODE = Path(__file__).resolve().parent.parent  # the checkout
 STATE = Path(os.environ.get("SIMPLE_SERVING_CARD_DIR", "/workspace/simple-serving-card"))
@@ -234,7 +234,14 @@ class Card:
             "--generation-config", "vllm",
             "--disable-uvicorn-access-log", "--uvicorn-log-level", "warning",
             *self.speculation(), *self.offloading(), *self.reasoning(),
-        ], {name: value for name, value in os.environ.items() if name != "CONTAINER_API_KEY"} | ENGINE_ENV)
+        ], {name: value for name, value in os.environ.items() if name != "CONTAINER_API_KEY"} | ENGINE_ENV
+            | self.runner())
+
+    def runner(self) -> dict[str, str]:
+        """The V2 model runner, fixed by name while vLLM's refusal of a min_p is lifted (bootstrap.sh): vLLM picks it by
+        itself where nothing rules it out (VllmConfig.use_v2_model_runner), and the V1 runner would drop the filter
+        without a word. Otherwise nothing, so that the engine's environment stays as it was."""
+        return {"VLLM_USE_V2_MODEL_RUNNER": "1"} if min_p_while_drafting(self.manifest) else {}
 
     def speculation(self) -> list[str]:
         """vLLM's arguments for Gemma 4's multi-token prediction, and none while MTP_SPECULATIVE_TOKENS is 0: the
@@ -318,17 +325,25 @@ class Card:
             return False
 
 
+def min_p_while_drafting(manifest: Mapping[str, str]) -> bool:
+    """Whether vLLM drafts and its refusal of a min_p is lifted: without a drafter there is nothing to lift."""
+    return bool(int(manifest["MTP_SPECULATIVE_TOKENS"]) and int(manifest["MIN_P_WHILE_DRAFTING"]))
+
+
 def pinned_versions(manifest: Mapping[str, str]) -> dict[str, str]:
     """The engine's pins that the gateway shows the control key in /v1/state, beside its own (contract section 12).
     With multi-token prediction on they name the drafter and its tokens too, and with the KV cache's copy in RAM its
     size, so that a record says which it measured. Drafted tokens tell the gateway which min_p vLLM refuses
-    (config.DRAFTED_TOKENS). The thinking budget and vision entries allow a request's budget and pictures to reach
-    vLLM (config.THINKING_BUDGET and config.VISION)."""
+    (config.DRAFTED_TOKENS), unless the entry of MIN_P_WHILE_DRAFTING says that it filters by it. The thinking budget
+    and vision entries allow a request's budget and pictures to reach vLLM (config.THINKING_BUDGET and
+    config.VISION)."""
     pins = {"vllm": manifest["VLLM_VERSION"], "model_revision": manifest["MODEL_REVISION"],
             "tokenizer_revision": manifest["TOKENIZER_REVISION"]}
     if int(manifest["MTP_SPECULATIVE_TOKENS"]):
         pins |= {"drafter_revision": manifest["DRAFTER_REVISION"],
                  DRAFTED_TOKENS: manifest["MTP_SPECULATIVE_TOKENS"]}
+    if min_p_while_drafting(manifest):
+        pins |= {MIN_P_WHILE_DRAFTING: "on"}
     if int(manifest["KV_OFFLOADING_GIB"]):
         pins |= {"kv_offloading_gib": manifest["KV_OFFLOADING_GIB"]}
     if int(manifest["THINKING_BUDGET"]):

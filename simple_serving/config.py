@@ -32,6 +32,9 @@ IDLE_TIMEOUT_S = 780  # without work of ours, before the service falls asleep (c
 # prediction, their count (card.pinned_versions). The gateway takes it as the sign that vLLM runs speculative decoding,
 # and then refuses a min_p that vLLM would refuse (service.py).
 DRAFTED_TOKENS = "mtp_speculative_tokens"
+# The entry of `versions`, "on", that the card's launcher writes beside the count while vLLM's refusal of a min_p is
+# lifted (card.pinned_versions). Then vLLM filters drafted positions too, and the gateway passes the field on.
+MIN_P_WHILE_DRAFTING = "min_p_while_drafting"
 # The entry of `versions`, "on", that the card's launcher writes while it passes vLLM the markers of a thinking budget
 # (card.pinned_versions). Only then does the gateway pass a request's thinking_token_budget on (service.py).
 THINKING_BUDGET = "thinking_budget"
@@ -115,6 +118,7 @@ class Config:
     speculative: bool  # vLLM drafts tokens: `versions` names their count
     thinking_budget: bool  # the configuration permits passing request budgets to vLLM
     vision: bool = False  # vLLM takes pictures: `versions` names its vision tower
+    min_p_while_drafting: bool = False  # vLLM's refusal of a min_p is lifted: `versions` says so beside the count
 
 
 def load(path: str) -> Config:
@@ -172,6 +176,8 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
     drafted = versions.get(DRAFTED_TOKENS)
     if drafted is not None and not re.fullmatch(r"[1-9][0-9]*", drafted):
         raise ConfigError(f"versions.{DRAFTED_TOKENS} must be a count above 0, or left out while nothing drafts")
+    if versions.get(MIN_P_WHILE_DRAFTING, "on") != "on" or (MIN_P_WHILE_DRAFTING in versions and drafted is None):
+        raise ConfigError(f"versions.{MIN_P_WHILE_DRAFTING} must be \"on\" beside {DRAFTED_TOKENS}, or left out")
     if versions.get(THINKING_BUDGET, "on") != "on":
         raise ConfigError(f"versions.{THINKING_BUDGET} must be \"on\", or left out while the budget is off")
     vision = versions.get(VISION)
@@ -202,6 +208,7 @@ def _config(data: dict[str, Any], keys: tuple[Key, ...]) -> Config:
         versions=MappingProxyType(dict(versions)),
         speculative=drafted is not None,
         thinking_budget=THINKING_BUDGET in versions,
+        min_p_while_drafting=MIN_P_WHILE_DRAFTING in versions,
         vision=vision is not None,
     )
 

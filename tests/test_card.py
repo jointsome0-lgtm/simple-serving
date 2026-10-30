@@ -162,6 +162,17 @@ def test_mtp_thinking_budget_and_vision_reach_vllm_and_the_pins_only_when_on(sta
     assert card.pinned_versions(vision.manifest) == card.pinned_versions(budget.manifest) | {"vision": "1"}
 
 
+def test_vllms_refusal_of_a_min_p_stays_with_the_switch_off_and_a_lifted_one_fixes_the_v2_runner(state: Path) -> None:
+    off, on = card_at(state), card_at(state, MIN_P_WHILE_DRAFTING="1")
+    assert off.manifest["MIN_P_WHILE_DRAFTING"] == "0"  # the committed state, until a card proves it
+    assert "VLLM_USE_V2_MODEL_RUNNER" not in off.engine().env
+    assert on.engine().env["VLLM_USE_V2_MODEL_RUNNER"] == "1" and on.engine().argv == off.engine().argv
+    assert card.pinned_versions(on.manifest) == card.pinned_versions(off.manifest) | {"min_p_while_drafting": "on"}
+    nothing_drafts = card_at(state, MIN_P_WHILE_DRAFTING="1", MTP_SPECULATIVE_TOKENS="0")
+    assert "VLLM_USE_V2_MODEL_RUNNER" not in nothing_drafts.engine().env
+    assert "min_p_while_drafting" not in card.pinned_versions(nothing_drafts.manifest)
+
+
 def test_the_kv_cache_copy_in_ram_is_off_by_default_and_reaches_vllm_and_the_pins_only_when_on(state: Path) -> None:
     off, on = card_at(state), card_at(state, KV_OFFLOADING_GIB="12")
     assert off.manifest["KV_OFFLOADING_GIB"] == "0"  # pinned RAM a card may lack, until a rental measures it
@@ -692,7 +703,7 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     manifest_path = code / "card/manifest.env"
     base = manifest_path.read_text()
     before_calls, before_prepared = calls.read_bytes(), (state / "prepared").read_bytes()
-    for switch in ("THINKING_BUDGET", "VISION"):
+    for switch in ("THINKING_BUDGET", "VISION", "MIN_P_WHILE_DRAFTING"):
         for value in (None, "", "2", "01", "-1", "on"):
             changed = base.replace(f"{switch}=0\n", "") if value is None else base + f"{switch}={value}\n"
             manifest_path.write_text(changed)
@@ -777,8 +788,9 @@ def test_bootstrap_fetches_the_pinned_drafter_with_mtp_on_and_keeps_a_file_only_
                                 ("TOKENIZER_FILES", [state / "tokenizer/tokenizer.json"]),
                                 ("DRAFTER_FILES", [hub / "model.safetensors", hub / "config.json"]))}
 
-    def bootstrap(tokens: str, vision: str = "0") -> int:
-        lines = {"VLLM_VERSION": "0.0.1", "MTP_SPECULATIVE_TOKENS": tokens, "VISION": vision, **pins}.items()
+    def bootstrap(tokens: str, vision: str = "0", min_p: str = "0") -> int:
+        lines = {"VLLM_VERSION": "0.0.1", "MTP_SPECULATIVE_TOKENS": tokens, "VISION": vision,
+                 "MIN_P_WHILE_DRAFTING": min_p, **pins}.items()
         (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in lines))
         return subprocess.run(["bash", str(code / "card/bootstrap.sh")], stdin=subprocess.DEVNULL, env=environ,
                               capture_output=True, timeout=60, check=False).returncode
@@ -796,6 +808,23 @@ def test_bootstrap_fetches_the_pinned_drafter_with_mtp_on_and_keeps_a_file_only_
     assert sorted(path.name for path in drafter.iterdir()) == ["config.json", "model.safetensors"]
     assert (drafter / "model.safetensors").read_bytes() == b"synthetic drafter"
     assert bootstrap("3") == 0 and len(fetched()) == 2  # nothing more to fetch
+    # vLLM's one line, in a synthetic file: changed only from a pinned hash to a pinned hash, and off only read.
+    pristine = "before\n        if self.min_p > _SAMPLING_EPS or self.logit_bias:\nafter\n"
+    lifted = "before\n        if self.logit_bias:\nafter\n"
+    pins |= {"MIN_P_PRISTINE": hashlib.sha256(pristine.encode()).hexdigest(),
+             "MIN_P_LIFTED": hashlib.sha256(lifted.encode()).hexdigest()}
+    sampling = state / "vllm/lib/python3.12/site-packages/vllm/sampling_params.py"
+    assert bootstrap("3", min_p="1") == 1  # no file to change: nothing would filter
+    sampling.parent.mkdir(parents=True)
+    sampling.write_text(pristine)
+    assert bootstrap("3") == 0 and sampling.read_text() == pristine
+    assert bootstrap("0", min_p="1") == 0 and sampling.read_text() == pristine  # without a drafter nothing is lifted
+    for _ in range(2):
+        assert bootstrap("3", min_p="1") == 0 and sampling.read_text() == lifted
+    assert bootstrap("3") == 0 and sampling.read_text() == pristine
+    sampling.write_text("another vLLM\n")
+    assert bootstrap("3", min_p="1") == 1 and bootstrap("3") == 0 and sampling.read_text() == "another vLLM\n"
+    assert [path.name for path in sampling.parent.iterdir()] == ["sampling_params.py"]
     processor = ("processor_config.json", "tokenizer_config.json")
     for name in processor:
         (hub / name).write_bytes(b'{"synthetic_processor": true}')

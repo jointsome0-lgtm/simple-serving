@@ -166,6 +166,12 @@ This follows the [pinned engine's sampling validation](https://github.com/vllm-p
 The launcher signals drafting through `versions.mtp_speculative_tokens` in the gateway configuration, as specified
 in section 12. Without that entry, the gateway passes valid `min_p` values through unchanged.
 
+`MIN_P_WHILE_DRAFTING=1` in the text manifest, off as committed, changes this. vLLM's V2 model runner filters drafted
+positions like any other: the refusal holds for the V1 runner, which drops the filter. With the switch on the
+preparation lifts that one line of the pinned engine, hash-checked, the launcher fixes the V2 runner and writes
+`versions.min_p_while_drafting`, and the gateway passes valid `min_p` values through unchanged while the engine drafts.
+No GPU has shown this yet; see [the runbook](runbook.md#min_p-while-drafting).
+
 `thinking_token_budget` requests a cap on reasoning tokens, counted from the opening marker `<|channel>`.
 The pinned engine's budget path forces the closing marker `<channel|>` when the budget is spent.
 `max_tokens` still limits reasoning and the answer together. With thinking off there is no reasoning to cap.

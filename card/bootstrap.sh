@@ -11,8 +11,9 @@
 # runs card/onstart.sh for the first start. At every later start the rental's own onstart runs it (README, "The card"):
 # the preparation changes no onstart, which the platform may restore at a start. A second run changes nothing that
 # is in place, and no run prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed;
-# 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS or KV_OFFLOADING_GIB is not a count, or THINKING_BUDGET or VISION
-# is neither 0 nor 1; 4 no keys, or not two or three different SHA-256 digests; 5 the card holds other keys, which stay.
+# 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS or KV_OFFLOADING_GIB is not a count, or THINKING_BUDGET, VISION
+# or MIN_P_WHILE_DRAFTING is neither 0 nor 1; 4 no keys, or not two or three different SHA-256 digests; 5 the card
+# holds other keys, which stay.
 # A card with only the first two keys can add the metrics key for its next start. The last step is the launcher's
 # start, with its own codes (simple_serving/card.py): 3 also when the card lacks the instance's credential.
 # SIMPLE_SERVING_CARD_DIR and SIMPLE_SERVING_CARD_ROOT move the state and /root, for tests.
@@ -32,6 +33,8 @@ for file in "${stamped[@]}"; do [[ -s $file ]] || exit 3; done
 [[ ${KV_OFFLOADING_GIB:-} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3  # GiB for the KV cache's copy in RAM, the same way
 [[ ${THINKING_BUDGET:-} =~ ^[01]$ ]] || exit 3  # the thinking budget, on or off
 [[ ${VISION:-} =~ ^[01]$ ]] || exit 3  # 1 loads Gemma 4's vision tower, 0 keeps it off the GPU
+[[ ${MIN_P_WHILE_DRAFTING:-} =~ ^[01]$ ]] || exit 3  # vLLM's refusal of a min_p while it drafts, lifted or not
+[[ ${MIN_P_PRISTINE:-} =~ ^[0-9a-f]{64}$ && ${MIN_P_LIFTED:-} =~ ^[0-9a-f]{64}$ ]] || exit 3
 if [[ $MTP_SPECULATIVE_TOKENS != 0 ]]; then
   for pin in DRAFTER_REPO DRAFTER_REVISION DRAFTER_FILES; do [[ -n ${!pin:-} ]] || exit 3; done
 fi
@@ -80,6 +83,31 @@ for venv in gateway vllm; do
     -r "$code/card/$venv-requirements.txt"
   "$state/$venv/bin/pip" check  # --no-deps trusts the lock to hold every requirement; this checks that it does
 done
+
+# rewrite <file> <from line> <to line> <hash of the result>: the file with that line changed, in one step, or as it was
+# when the result is not the one pinned.
+rewrite() {
+  cp -p "$1" "$1.new"
+  sed -i "s/^$2\$/$3/" "$1.new"
+  [[ $(sha256sum < "$1.new") == "$4  -" ]] || { rm -f "$1.new"; exit 1; }
+  mv -f "$1.new" "$1"
+}
+# vLLM 0.30.0 refuses a min_p while it drafts, a guard that holds for the V1 runner, which drops the filter. With
+# MIN_P_WHILE_DRAFTING at 1 and a drafter, that line goes, and only from the file the wheel holds: any other file stops
+# the preparation. Otherwise a file with the line lifted, which pip leaves in place, gets it back, and all else stays.
+refused='        if self.min_p > _SAMPLING_EPS or self.logit_bias:'
+lifted='        if self.logit_bias:'
+sampling=("$state"/vllm/lib/python*/site-packages/vllm/sampling_params.py)
+held=$(sha256sum 2>/dev/null < "${sampling[0]}" || true)
+if [[ $MIN_P_WHILE_DRAFTING == 1 && $MTP_SPECULATIVE_TOKENS != 0 ]]; then
+  if [[ $held == "$MIN_P_PRISTINE  -" ]]; then
+    rewrite "${sampling[0]}" "$refused" "$lifted" "$MIN_P_LIFTED"
+  elif [[ $held != "$MIN_P_LIFTED  -" ]]; then
+    exit 1
+  fi
+elif [[ $held == "$MIN_P_LIFTED  -" ]]; then
+  rewrite "${sampling[0]}" "$lifted" "$refused" "$MIN_P_PRISTINE"
+fi
 
 # fetch <repo> <revision> <files> <directory>: each name:sha256 of the comma-separated files, from the Hugging Face
 # hub, kept only with its hash. A file arrives under a hidden name, with aria2's control file beside it, and takes its
