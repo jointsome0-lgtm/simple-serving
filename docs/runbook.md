@@ -179,7 +179,8 @@ never the key:
 (4 194 304, or 4 MiB), `max_connections` (64), `idle_timeout_s` (780), `health_interval_s` (5) and `versions`, which the
 control key sees in `/v1/state` next to the gateway's own. For text, `versions.mtp_speculative_tokens` must be a positive
 decimal count string matching `[1-9][0-9]*`, or absent when drafting is off. The launcher writes it while MTP is on;
-it enables the early `min_p` refusal described below. The text entry `versions.thinking_budget` is exactly `"on"`
+it enables the early `min_p` refusal described below. `versions.min_p_while_drafting` is exactly `"on"` beside it when
+the manifest lifts that refusal, as it does by default, and absent otherwise. The text entry `versions.thinking_budget` is exactly `"on"`
 when request budgets are enabled, and absent when disabled. Other values are invalid. `versions.vision` is exactly
 `"1"` when the text engine loads its vision tower, and absent otherwise. Keys default to `vision: false`; a true
 permission requires that version entry and cannot belong to an outside key. The ComfyUI lane rejects text vision
@@ -241,11 +242,59 @@ change, only their speed. The drafter reads the heretic's KV cache and keeps non
 come out of the cache's share of the memory. `/v1/state` names the drafter's revision and the count among the
 versions, and so does the smoke's record.
 
-With MTP, the gateway returns 400 `min_p_unavailable` for `min_p > 1e-5` unless `temperature` is 0.
-An omitted temperature means 1. The refusal follows the class's `max_tokens` check and precedes counting and
-admission, so no part of the refused generation reaches vLLM. Counting requests are unaffected.
-Only the control key sees `"unavailable_fields": ["min_p"]` in `/v1/state` while MTP is on. With
-`MTP_SPECULATIVE_TOKENS=0`, valid `min_p` values pass through unchanged and that state field is absent.
+With MTP and `MIN_P_WHILE_DRAFTING=0`, the gateway returns 400 `min_p_unavailable` for `min_p > 1e-5` unless
+`temperature` is 0. An omitted temperature means 1. The refusal follows the class's `max_tokens` check and precedes
+counting and admission, so no part of the refused generation reaches vLLM. Counting requests are unaffected.
+Only the control key sees `"unavailable_fields": ["min_p"]` in `/v1/state` in that state. With
+`MTP_SPECULATIVE_TOKENS=0` or `MIN_P_WHILE_DRAFTING=1`, valid `min_p` values pass through unchanged and that state
+field is absent.
+
+### min_p while drafting
+
+`MIN_P_WHILE_DRAFTING=1` is the text manifest's default ([decisions.md](decisions.md)). With MTP on, `bootstrap.sh`
+takes one line out of `vllm/sampling_params.py` in vLLM's venv, from `MIN_P_PRISTINE` to `MIN_P_LIFTED` and only
+between those hashes, or stops with 1. The launcher sets `VLLM_USE_V2_MODEL_RUNNER=1` and writes
+`versions.min_p_while_drafting`, and the gateway passes `min_p` and drops `unavailable_fields`. With the line gone, the
+V1 runner would drop the filter silently, hence the fixed runner and its check below.
+
+At 0 the preparation restores the line, nothing new reaches the engine's environment, and the refusal above stands.
+Either way a change of the switch changes the manifest's stamp, so a prepared card needs the preparation again before
+the launcher starts its pair.
+
+The proof passed on 2026-10-30, exit 0, on an RTX 5090, instance 58435580, from 18:28 to 18:38 UTC, at commit 9c8761b
+with the switch at 1 in the card's copy. Its logs are `2026-10-30/text-on-card/min-p-run3.pull` in the owner's
+simple-story-chat-runs.
+
+| Step | Result |
+| --- | --- |
+| `runner` | `model_runner_v2` |
+| `filter`, `min_p` 0.08, temperature 0.8 | armed: 6400 tokens, 0 below, 3428 accepted of 8931 drafted; control: 6400 tokens, 97 below, 3425 accepted of 8922 drafted |
+| `repeat`, penalty 1.5 | share of repeated tokens 0.975 plain, 0.829 penalised |
+| `schema` | 208 answers, 0 cut, 0 broken, beside 147 plain requests |
+| `speed`, median tokens a second | 124.6 at `min_p` 0, 125.1 at 0.05, 125.8 at 0.08; accepted 20366, 20771 and 20763 of about 51650 drafted |
+
+Not shown by that run:
+
+- A `repetition_penalty` of 1.05 is not measured; only 1.5 is.
+- vLLM's issue 54437 is not excluded. vLLM 0.30.0 has neither half of its fix, and it can reach unconstrained grammar
+  rows when a draft hand-off is lost, so 0 failures in 208 answers of one synthetic schema are an observation.
+- The patch's hash holds only on the locked wheel. Another vLLM stops the preparation with 1 and needs its own pins,
+  and this proof again.
+
+The proof takes about 15 minutes on a card that serves nothing else, once the pair is ready. That is the launcher's
+`ready` row: the engine's `/health` answers other than 200 for about a minute after `weights_load` (2026-10-30, `ready`
+at 141510 ms), so a wait on it needs `curl -f`.
+
+```
+cd /workspace/simple-serving
+/workspace/simple-serving-card/gateway/bin/python -m simple_serving.min_p_proof --plan --until 0
+/workspace/simple-serving-card/gateway/bin/python -m simple_serving.min_p_proof --until "$(( $(date +%s) + 1200 ))"
+```
+
+It asks vLLM directly, since the gateway takes no `logprobs`, prints numbers and fixed words, and exits 0 only when
+each step passed. `filter` is the proof itself: no token below 0.08 of the best after temperature at `min_p` 0.08,
+while the control at `min_p` 0 must show such tokens, or the step is inconclusive. `schema` runs schema answers
+beside plain requests that come and go. A card that fails `filter` goes back to 0.
 
 A card prepared with another count is not prepared for this manifest, and the launcher starts nothing there until the
 preparation runs again. Copy the checkout to the card again, and run the preparation with nothing on stdin, since the
@@ -458,8 +507,8 @@ The probes run in this order, each within a time bound of its own, and the first
 - `completion`: one short completion, and its stream as section 4 has it: the alias in every chunk, one finish, one
   usage chunk, then `[DONE]`.
 - `fields`: each optional field of section 4 alone, at a legal value, and the answer with `response_format` follows
-  its schema. With MTP enabled in the manifest, the `min_p` value of 0.05 must instead return 400
-  `min_p_unavailable`. Beside them, two answers with one seed at temperature 0.8 are compared by hash,
+  its schema. With MTP on and `MIN_P_WHILE_DRAFTING=0` in the manifest, the `min_p` value of 0.05 must instead
+  return 400 `min_p_unavailable`. Beside them, two answers with one seed at temperature 0.8 are compared by hash,
   an observation that passes nothing.
   A budget of 64 must return `thinking_budget_unavailable` while the manifest leaves budgets disabled.
 - `reasoning`: thinking on gives reasoning and an answer, thinking off an answer alone.
@@ -517,8 +566,8 @@ uv run python -m simple_serving.dev --config dev.json --engine-port 8200 --publi
 uv run python -m simple_serving.smoke --config keys.json --public-port 8201 --control-port 8202 --fake --card-dir logs/dry-run
 ```
 
-The pause after each event holds a stream open while the abort probe looks for it. With MTP enabled in the
-manifest, the dry-run pins enable the same `min_p` refusal as on the card.
+The pause after each event holds a stream open while the abort probe looks for it. With MTP on and
+`MIN_P_WHILE_DRAFTING=0` in the manifest, the dry-run pins enable the same `min_p` refusal as on the card.
 
 ## The first rental
 

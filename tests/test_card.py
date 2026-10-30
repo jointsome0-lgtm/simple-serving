@@ -145,7 +145,8 @@ def test_mtp_thinking_budget_and_vision_reach_vllm_and_the_pins_only_when_on(sta
     assert on.engine().argv == [*off.engine().argv, "--speculative-config",
                                 f'{{"method": "mtp", "model": "{drafter}", "num_speculative_tokens": 3}}']
     assert card.pinned_versions(on.manifest) == card.pinned_versions(off.manifest) | {
-        "drafter_revision": on.manifest["DRAFTER_REVISION"], "mtp_speculative_tokens": "3"}
+        "drafter_revision": on.manifest["DRAFTER_REVISION"], "mtp_speculative_tokens": "3",
+        "min_p_while_drafting": "on"}
     assert on.manifest["THINKING_BUDGET"] == "0"
     assert "--reasoning-config" not in on.engine().argv and "thinking_budget" not in card.pinned_versions(on.manifest)
     budget = card_at(state, THINKING_BUDGET="1")
@@ -160,6 +161,19 @@ def test_mtp_thinking_budget_and_vision_reach_vllm_and_the_pins_only_when_on(sta
     at = argv.index("--language-model-only")
     assert vision.engine().argv == [*argv[:at], *args, *argv[at + 1:]]
     assert card.pinned_versions(vision.manifest) == card.pinned_versions(budget.manifest) | {"vision": "1"}
+
+
+def test_vllms_refusal_of_a_min_p_stays_with_the_switch_off_and_a_lifted_one_fixes_the_v2_runner(state: Path) -> None:
+    off, on = card_at(state, MIN_P_WHILE_DRAFTING="0"), card_at(state)
+    assert on.manifest["MIN_P_WHILE_DRAFTING"] == "1"  # on by default since the card's proof of 2026-10-30
+    assert "VLLM_USE_V2_MODEL_RUNNER" not in off.engine().env
+    assert on.engine().env["VLLM_USE_V2_MODEL_RUNNER"] == "1" and on.engine().argv == off.engine().argv
+    assert card.pinned_versions(on.manifest) == card.pinned_versions(off.manifest) | {"min_p_while_drafting": "on"}
+    nothing_drafts = card_at(state, MIN_P_WHILE_DRAFTING="1", MTP_SPECULATIVE_TOKENS="0")
+    assert "VLLM_USE_V2_MODEL_RUNNER" not in nothing_drafts.engine().env
+    assert "min_p_while_drafting" not in card.pinned_versions(nothing_drafts.manifest)
+    profile = card_at(state, MODEL_PROFILE="qwen", QWEN_MTP_SPECULATIVE_TOKENS="0")  # the count is the profile's
+    assert "VLLM_USE_V2_MODEL_RUNNER" not in profile.engine().env
 
 
 def test_the_kv_cache_copy_in_ram_is_off_by_default_and_reaches_vllm_and_the_pins_only_when_on(state: Path) -> None:
@@ -692,9 +706,10 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     manifest_path = code / "card/manifest.env"
     base = manifest_path.read_text()
     before_calls, before_prepared = calls.read_bytes(), (state / "prepared").read_bytes()
-    for switch in ("THINKING_BUDGET", "VISION"):
+    for switch in ("THINKING_BUDGET", "VISION", "MIN_P_WHILE_DRAFTING"):
         for value in (None, "", "2", "01", "-1", "on"):
-            changed = base.replace(f"{switch}=0\n", "") if value is None else base + f"{switch}={value}\n"
+            line = rf"^{switch}=\d\n"
+            changed = re.sub(line, "", base, flags=re.MULTILINE) if value is None else base + f"{switch}={value}\n"
             manifest_path.write_text(changed)
             assert bootstrap("") == 3
             assert calls.read_bytes() == before_calls and (state / "prepared").read_bytes() == before_prepared
@@ -777,8 +792,9 @@ def test_bootstrap_fetches_the_pinned_drafter_with_mtp_on_and_keeps_a_file_only_
                                 ("TOKENIZER_FILES", [state / "tokenizer/tokenizer.json"]),
                                 ("DRAFTER_FILES", [hub / "model.safetensors", hub / "config.json"]))}
 
-    def bootstrap(tokens: str, vision: str = "0") -> int:
-        lines = {"VLLM_VERSION": "0.0.1", "MTP_SPECULATIVE_TOKENS": tokens, "VISION": vision, **pins}.items()
+    def bootstrap(tokens: str, vision: str = "0", min_p: str = "0") -> int:
+        lines = {"VLLM_VERSION": "0.0.1", "MTP_SPECULATIVE_TOKENS": tokens, "VISION": vision,
+                 "MIN_P_WHILE_DRAFTING": min_p, **pins}.items()
         (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in lines))
         return subprocess.run(["bash", str(code / "card/bootstrap.sh")], stdin=subprocess.DEVNULL, env=environ,
                               capture_output=True, timeout=60, check=False).returncode
@@ -796,6 +812,23 @@ def test_bootstrap_fetches_the_pinned_drafter_with_mtp_on_and_keeps_a_file_only_
     assert sorted(path.name for path in drafter.iterdir()) == ["config.json", "model.safetensors"]
     assert (drafter / "model.safetensors").read_bytes() == b"synthetic drafter"
     assert bootstrap("3") == 0 and len(fetched()) == 2  # nothing more to fetch
+    # vLLM's one line, in a synthetic file: changed only from a pinned hash to a pinned hash, and off only read.
+    pristine = "before\n        if self.min_p > _SAMPLING_EPS or self.logit_bias:\nafter\n"
+    lifted = "before\n        if self.logit_bias:\nafter\n"
+    pins |= {"MIN_P_PRISTINE": hashlib.sha256(pristine.encode()).hexdigest(),
+             "MIN_P_LIFTED": hashlib.sha256(lifted.encode()).hexdigest()}
+    sampling = state / "vllm/lib/python3.12/site-packages/vllm/sampling_params.py"
+    assert bootstrap("3", min_p="1") == 1  # no file to change: nothing would filter
+    sampling.parent.mkdir(parents=True)
+    sampling.write_text(pristine)
+    assert bootstrap("3") == 0 and sampling.read_text() == pristine
+    assert bootstrap("0", min_p="1") == 0 and sampling.read_text() == pristine  # without a drafter nothing is lifted
+    for _ in range(2):
+        assert bootstrap("3", min_p="1") == 0 and sampling.read_text() == lifted
+    assert bootstrap("3") == 0 and sampling.read_text() == pristine
+    sampling.write_text("another vLLM\n")
+    assert bootstrap("3", min_p="1") == 1 and bootstrap("3") == 0 and sampling.read_text() == "another vLLM\n"
+    assert [path.name for path in sampling.parent.iterdir()] == ["sampling_params.py"]
     processor = ("processor_config.json", "tokenizer_config.json")
     for name in processor:
         (hub / name).write_bytes(b'{"synthetic_processor": true}')
@@ -895,7 +928,8 @@ def test_the_qwen_profile_is_one_manifest_value_and_gemmas_arguments_stay_as_the
     assert "--trust-remote-code" not in argv and "--language-model-only" in argv and "--prefix-match-unit" not in argv
     assert card.pinned_versions(qwen.manifest) == {
         "vllm": m["VLLM_VERSION"], "model_revision": m["QWEN_MODEL_REVISION"],
-        "tokenizer_revision": m["QWEN_TOKENIZER_REVISION"], "model_profile": "qwen", "mtp_speculative_tokens": "3"}
+        "tokenizer_revision": m["QWEN_TOKENIZER_REVISION"], "model_profile": "qwen", "mtp_speculative_tokens": "3",
+        "min_p_while_drafting": "on"}
     budget = card_at(state, MODEL_PROFILE="qwen", THINKING_BUDGET="1", QWEN_PREFIX_MATCH_UNIT="32",
                      QWEN_MTP_SPECULATIVE_TOKENS="0")
     assert budget.engine().argv[-4:] == ["--reasoning-config",
@@ -982,7 +1016,7 @@ def test_bootstrap_refuses_an_unfit_container_before_it_installs_and_fetches_qwe
         smi = tmp_path / "bin/nvidia-smi"  # the card: its compute capability and its memory
         smi.write_text(f'#!/bin/sh\necho "{gpu}"\n')
         smi.chmod(0o700)
-        lines = {**pins, "MODEL_PROFILE": "qwen", **changes}.items()
+        lines = {**pins, "MODEL_PROFILE": "qwen", "MIN_P_WHILE_DRAFTING": "0", **changes}.items()
         (code / "card/manifest.env").write_text(manifest + "".join(f"{name}={value}\n" for name, value in lines))
         return subprocess.run(["bash", str(code / "card/bootstrap.sh")], stdin=subprocess.DEVNULL, env=environ,
                               capture_output=True, timeout=60, check=False).returncode

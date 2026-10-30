@@ -290,3 +290,33 @@ PNG checks cover container structure and chunk checksums, without decoding the i
 The shared check passes on Python 3.12.3 and 3.14.7: Ruff, mypy on 68 source files and 357 tests, with the existing
 optional vLLM source-catalog skip. No GPU, rental, real data or owner configuration is used; the full real-card
 test and picture-provider activation remain pending.
+
+## min_p while drafting, 2026-10-30
+
+The owner agreed on 2026-10-30 to prepare the way to `min_p` with MTP on, not yet to turn it on. The refusal of
+2026-09-27 stands as long as `MIN_P_WHILE_DRAFTING=0`, which is how the manifest is committed. vLLM 0.30.0's guard
+(`vllm/sampling_params.py:1046-1050`) is stale for the V2 model runner: its rejection sampler passes the target logits
+through the sampler's own `apply_sampling_params`, min_p included, before it verifies drafts, while the V1 runner
+really drops the filter. Upstream still has the guard at v0.33.0rc2.
+
+With the switch on, the preparation lifts that one line, only between two pinned hashes, taken from the wheel the lock
+pins (sha256 `ef52ee58…`) and not from the tag. The launcher fixes the V2 runner and writes
+`versions.min_p_while_drafting`, and the gateway passes the field. The line goes in the manifest with the rest of the
+pins, so adding it changes the stamp: a prepared card takes the preparation again, which then only reads the file.
+
+No GPU run has happened. `simple_serving/min_p_proof.py` is the check, about 15 minutes on a card, with a control at
+`min_p` 0 that must show tokens the filter would remove; speed at `min_p` 0.05 and 0.08 is unmeasured. Structured
+output is a separate risk and not new: vLLM's fix for its issue 54437 first shipped in v0.32.0, so 0.30.0 can in
+principle verify drafts against grammar rows that allow everything. The evidence that schemas hold with MTP on this
+card is 124 of 124 frame requests parsed on 2026-09-28 (simple-story-chat's `docs/knowledge/view-pick-measurements.md`).
+That run took vLLM's own choice of runner, V2 from the source, and no log of it is kept here to show which it was.
+The proof's `schema` step adds an observation with `min_p` on.
+
+## min_p on for the chat, 2026-10-30
+
+The owner, the same day: «Если все норм то в main тогда дефолт для чата». The proof passed on an RTX 5090 at 18:28 to
+18:38 UTC, exit 0: at `min_p` 0.08 no token of 6400 fell below the filter, against 97 of 6400 in the control at 0, on
+the V2 runner, with drafts accepted at the same rate, and speed unchanged at 124.6 to 125.8 tokens a second. So
+`MIN_P_WHILE_DRAFTING=1` is what the manifest now commits, which replaces the section above on that point, and the
+refusal of 2026-09-27 holds only at 0. The run's numbers and what it did not show are in the
+[runbook](runbook.md#min_p-while-drafting). The gateway only passes the field: the chat's value is the bot's to send.

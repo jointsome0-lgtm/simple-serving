@@ -12,8 +12,8 @@
 # the preparation changes no onstart, which the platform may restore at a start. A second run changes nothing that
 # is in place, and no run prints a hash. Exit codes: 0 prepared and started; 1 a download or a check failed;
 # 3 a pin or a lock is missing, MTP_SPECULATIVE_TOKENS, KV_OFFLOADING_GIB, KV_CACHE_MEMORY_MIB or GENERATIONS_AT_ONCE
-# is not a count or the last is above MAX_NUM_SEQS, THINKING_BUDGET, VISION or WARM_UP is neither 0 nor 1, MODEL_PROFILE is not
-# gemma, qwen or small, or it is not gemma with VISION=1; 4 no keys, or not two or three
+# is not a count or the last is above MAX_NUM_SEQS, THINKING_BUDGET, VISION, WARM_UP or MIN_P_WHILE_DRAFTING is neither
+# 0 nor 1, MODEL_PROFILE is not gemma, qwen or small, or it is not gemma with VISION=1; 4 no keys, or not two or three
 # different SHA-256 digests; 5 the card holds other keys, which stay; 9 the container does not fit the manifest, and
 # nothing was installed or fetched: KV_OFFLOADING_GIB does not fit /dev/shm or the memory, or the qwen profile's
 # weights need another card or more disk (simple_serving/preflight.py prints the numbers).
@@ -63,6 +63,8 @@ for file in "${stamped[@]}"; do [[ -s $file ]] || exit 3; done
 # counts, 0 for neither, and no more generations than vLLM's batch holds.
 [[ ${KV_CACHE_MEMORY_MIB:=0} =~ ^(0|[1-9][0-9]*)$ && ${GENERATIONS_AT_ONCE:=0} =~ ^(0|[1-9][0-9]*)$ ]] || exit 3
 (( GENERATIONS_AT_ONCE <= MAX_NUM_SEQS )) || exit 3
+[[ ${MIN_P_WHILE_DRAFTING:-} =~ ^[01]$ ]] || exit 3  # vLLM's refusal of a min_p while it drafts, lifted or not
+[[ ${MIN_P_PRISTINE:-} =~ ^[0-9a-f]{64}$ && ${MIN_P_LIFTED:-} =~ ^[0-9a-f]{64}$ ]] || exit 3
 if [[ $MTP_SPECULATIVE_TOKENS != 0 && $profile != qwen ]]; then
   for pin in DRAFTER_REPO DRAFTER_REVISION DRAFTER_FILES; do [[ -n ${!pin:-} ]] || exit 3; done
 fi
@@ -119,6 +121,31 @@ for venv in gateway vllm; do
     -r "$code/card/$venv-requirements.txt"
   "$state/$venv/bin/pip" check  # --no-deps trusts the lock to hold every requirement; this checks that it does
 done
+
+# rewrite <file> <from line> <to line> <hash of the result>: the file with that line changed, in one step, or as it was
+# when the result is not the one pinned.
+rewrite() {
+  cp -p "$1" "$1.new"
+  sed -i "s/^$2\$/$3/" "$1.new"
+  [[ $(sha256sum < "$1.new") == "$4  -" ]] || { rm -f "$1.new"; exit 1; }
+  mv -f "$1.new" "$1"
+}
+# vLLM 0.30.0 refuses a min_p while it drafts, a guard that holds for the V1 runner, which drops the filter. With
+# MIN_P_WHILE_DRAFTING at 1 and a drafter, that line goes, and only from the file the wheel holds: any other file stops
+# the preparation. Otherwise a file with the line lifted, which pip leaves in place, gets it back, and all else stays.
+refused='        if self.min_p > _SAMPLING_EPS or self.logit_bias:'
+lifted='        if self.logit_bias:'
+sampling=("$state"/vllm/lib/python*/site-packages/vllm/sampling_params.py)
+held=$(sha256sum 2>/dev/null < "${sampling[0]}" || true)
+if [[ $MIN_P_WHILE_DRAFTING == 1 && $MTP_SPECULATIVE_TOKENS != 0 ]]; then
+  if [[ $held == "$MIN_P_PRISTINE  -" ]]; then
+    rewrite "${sampling[0]}" "$refused" "$lifted" "$MIN_P_LIFTED"
+  elif [[ $held != "$MIN_P_LIFTED  -" ]]; then
+    exit 1
+  fi
+elif [[ $held == "$MIN_P_LIFTED  -" ]]; then
+  rewrite "${sampling[0]}" "$lifted" "$refused" "$MIN_P_PRISTINE"
+fi
 
 # fetch <repo> <revision> <files> <directory>: each name:sha256 of the comma-separated files, from the Hugging Face
 # hub, kept only with its hash. A file arrives under a hidden name, with aria2's control file beside it, and takes its

@@ -32,8 +32,9 @@ if TYPE_CHECKING:
 STARTING_RETRY_S = 1.0
 FORCED_STOP_S = 120  # from the start of a sleep; the one place where the instance stops under unfinished work
 PINNED_PACKAGES = ("fastapi", "starlette", "uvicorn", "httpx")
-# vLLM 0.30.0 refuses min_p above its sampling epsilon while speculative decoding is on. Greedy sampling sets
-# min_p to 0 first; an omitted temperature defaults to 1 under --generation-config vllm.
+# vLLM 0.30.0 refuses min_p above its sampling epsilon while speculative decoding is on, unless the card lifts that
+# refusal (card/manifest.env, MIN_P_WHILE_DRAFTING). Greedy sampling sets min_p to 0 first; an omitted temperature
+# defaults to 1 under --generation-config vllm.
 MIN_P_EPS = 1e-5
 
 
@@ -322,10 +323,14 @@ class Service(Lifecycle):
         if request.max_tokens > self.config.limits[caller.cls].max_tokens:
             raise ServiceError("limit_exceeded")
 
+    @property
+    def min_p_refused(self) -> bool:
+        return self.config.speculative and not self.config.min_p_while_drafting
+
     def check_min_p(self, request: ChatRequest) -> None:
         """Refuse incompatible sampling before any engine call. Counting sends no sampling parameters."""
         sampling = request.sampling
-        if self.config.speculative and sampling.get("min_p", 0) > MIN_P_EPS and sampling.get("temperature", 1) != 0:
+        if self.min_p_refused and sampling.get("min_p", 0) > MIN_P_EPS and sampling.get("temperature", 1) != 0:
             raise ServiceError("min_p_unavailable")
 
     def check_thinking_budget(self, caller: Caller, request: ChatRequest) -> None:
@@ -365,7 +370,7 @@ class Service(Lifecycle):
         if control:
             state.update(sleep_requested=self.sleep_requested, active=self.admission.active_counts(),
                          waiting=self.admission.waiting_counts(), versions=self._versions())
-            if self.config.speculative:
+            if self.min_p_refused:
                 state["unavailable_fields"] = ["min_p"]
         return state
 

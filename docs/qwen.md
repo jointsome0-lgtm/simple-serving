@@ -28,7 +28,8 @@ what a rental has to check before the profile is trusted.
   `--language-model-only` always, `<think>` and `</think>` as the budget's markers while `THINKING_BUDGET=1`, and
   `--prefix-match-unit` when `QWEN_PREFIX_MATCH_UNIT` is above 0. There is no `--trust-remote-code`.
 - **The gateway.** `/v1/state` names `model_profile: qwen` among the versions, and the drafted count, so the gateway
-  refuses the same `min_p` as with Gemma's drafter.
+  treats `min_p` as with Gemma's drafter: it passes the field while `MIN_P_WHILE_DRAFTING` is 1, and refuses it at 0.
+  The card's proof of that switch ran on Gemma alone, so a card of this profile runs the proof first.
 
 ## The contract, mapped
 

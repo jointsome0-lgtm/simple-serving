@@ -158,8 +158,15 @@ Any other field, at any depth, is refused with 400 `unsupported_field`. The rule
 the gateway passes on as it is. A value of the wrong type or out of range is refused with 400 `invalid_request`. So is
 a body whose objects and arrays nest more than 64 deep, counting the body itself and the inside of `schema`.
 
-While the engine drafts tokens, vLLM 0.30.0 loads no `min_p` filter. The gateway rejects a generation with
-`min_p > 1e-5` and `temperature` other than 0 with 400 `min_p_unavailable`, before counting or admission.
+`MIN_P_WHILE_DRAFTING=1` in the text manifest is the default. vLLM's V2 model runner filters drafted positions like
+any other, and the pinned engine's refusal of `min_p` while it drafts holds for the V1 runner, which drops the filter.
+With the switch on the preparation lifts that one line of the pinned engine, hash-checked, the launcher fixes the V2
+runner and writes `versions.min_p_while_drafting`, and the gateway passes valid `min_p` values through unchanged while
+the engine drafts. A card proved it on 2026-10-30; see [the runbook](runbook.md#min_p-while-drafting).
+
+With the switch at 0, while the engine drafts tokens, vLLM 0.30.0 loads no `min_p` filter. The gateway rejects a
+generation with `min_p > 1e-5` and `temperature` other than 0 with 400 `min_p_unavailable`, before counting or
+admission.
 An absent temperature means 1. At temperature 0, vLLM samples greedily and ignores `min_p`.
 An absent `min_p` or a value at most `1e-5` passes this check. Ordinary type and range checks still apply.
 This follows the [pinned engine's sampling validation](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/sampling_params.py).
@@ -317,8 +324,9 @@ sets one. `/v1/state` shows the same number.
 - In any status except `ready`, the inference routes answer 503. The code is the status itself, except `failed`,
   which answers `engine_unavailable`.
 - For the control key the answer also holds `sleep_requested`, true once a sleep has begun (section 8); `active` and
-  `waiting`, counted by class; and the pinned versions of section 12. While the engine drafts tokens, only the
-  control key also sees `"unavailable_fields": ["min_p"]`. The field is absent when drafting is off.
+  `waiting`, counted by class; and the pinned versions of section 12. While the engine drafts tokens and refuses
+  `min_p`, only the control key also sees `"unavailable_fields": ["min_p"]`. The field is absent when drafting is off
+  or `MIN_P_WHILE_DRAFTING` is 1.
   `active` and `waiting` cover generation
   admission only (section 7): a count, and a generation still in its count stage, are in neither. Whether the card
   may stop is the gateway's own decision (section 8), never a client's reading of these counters.
@@ -591,7 +599,8 @@ the control key. A change to any of them makes a new configuration, which is mea
 The text launcher's `versions.mtp_speculative_tokens` entry is a string matching `[1-9][0-9]*`, a positive
 decimal count of drafted tokens. The launcher includes it only when `MTP_SPECULATIVE_TOKENS > 0`.
 When drafting is off, omit the entry. Invalid values, including `"0"`, are configuration errors.
-This entry enables the gateway's MTP `min_p` check and its control-only `unavailable_fields` state.
+This entry enables the gateway's MTP `min_p` check and its control-only `unavailable_fields` state, unless
+`versions.min_p_while_drafting`, exactly `"on"` beside it while `MIN_P_WHILE_DRAFTING` is 1, says that vLLM filters.
 
 The text launcher's `versions.thinking_budget` entry is exactly `"on"` while request budgets are enabled.
 Omit it when disabled. Other values are configuration errors. The control key sees this entry; it does not add
