@@ -262,7 +262,9 @@ At 1, with MTP on, `bootstrap.sh` takes one line out of `vllm/sampling_params.py
 filter silently, hence the fixed runner and its check below.
 
 Nothing has proved this on a GPU. The proof takes about 15 minutes on a card that serves nothing else, after the
-preparation has run with the switch at 1 and the pair is ready:
+preparation has run with the switch at 1 and the pair is ready. That is the launcher's `ready` row: the engine's
+`/health` answers other than 200 for about a minute after `weights_load` (2026-10-30, `ready` at 141510 ms), so a wait
+on it needs `curl -f`.
 
 ```
 cd /workspace/simple-serving

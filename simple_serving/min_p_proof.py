@@ -6,10 +6,12 @@ It asks vLLM directly on the card's loopback, since the gateway takes no logprob
 other request runs. Each step prints one JSON line of numbers and fixed words, never a prompt or an answer:
 
 - runner: the launcher's last row of vLLM's runner says V2, and the manifest's switch is on.
-- filter: each token's logprob against the position's best one. vLLM keeps a token when its probability after the
-  temperature is at least min_p of the best, so exp((logprob - best) / temperature) >= min_p, on raw logprobs
-  (vllm/v1/worker/gpu/spec_decode/rejection_sampler.py:258). At min_p 0.08 no token may fall below that, while the
-  control at min_p 0 must show such tokens: without them the step says nothing, and it fails as inconclusive.
+- filter: each token's logprob against the position's best one, the larger of the two that vLLM returns: it puts the
+  sampled token first (vllm/v1/engine/logprobs.py:107), then its ranking, so the best is one of the two. vLLM keeps a
+  token when its probability after the temperature is at least min_p of the best, so exp((logprob - best) /
+  temperature) >= min_p, on raw logprobs (vllm/v1/worker/gpu/spec_decode/rejection_sampler.py:258). At min_p 0.08 no
+  token may fall below that, while the control at min_p 0 must show such tokens: without them the step says nothing,
+  and it fails as inconclusive.
 - repeat: a repetition_penalty of 1.5 must lower the share of tokens that the answer already holds.
 - schema: answers with a schema at min_p 0.08 and temperature 0.8, beside plain requests that come and go, so that
   batches with and without a schema alternate as the bot's do. Each must end in `stop` and follow it. A count of 0
@@ -44,7 +46,9 @@ MIN_P, TEMPERATURE, PENALTY = 0.08, 0.8, 1.5
 MARGIN = 1e-3  # of the threshold: logprobs arrive as rounded floats
 ENOUGH_TOKENS, ENOUGH_BELOW = 2000, 5  # the least of a filter step that can say anything
 SPEED_S, CALL_S = 150, 120
-ESTIMATES = {"runner": 5, "filter": 180, "repeat": 60, "schema": 120, "speed": 3 * SPEED_S + CALL_S}
+LOGPROBS = 2  # the sampled token and the next of the position's ranking: one would be the sampled token alone
+# filter: 12800 tokens at most, 50 s on 2026-10-30's card; two requests at 57 tok/s each, undrafted, would take 112 s.
+ESTIMATES = {"runner": 5, "filter": 120, "repeat": 60, "schema": 120, "speed": 3 * SPEED_S + CALL_S}
 PROMPTS = ("Write a long story about a lighthouse keeper and a stray dog on a winter night.",
            "Опиши подробно один день смотрителя маяка и бродячей собаки, которая к нему прибилась.",
            "Write a long story about two sisters repairing an old boat before a storm.",
@@ -59,8 +63,8 @@ SCHEMA_PROMPT = "Invent a short title and three people for a story about a light
 
 def below(entries: Sequence[dict[str, Any]], min_p: float, temperature: float) -> int:
     """How many tokens of an answer's logprobs a filter of min_p should have removed."""
-    return sum(math.exp((entry["logprob"] - entry["top_logprobs"][0]["logprob"]) / temperature) < min_p * (1 - MARGIN)
-               for entry in entries)
+    return sum(math.exp((entry["logprob"] - max(top["logprob"] for top in entry["top_logprobs"])) / temperature)
+               < min_p * (1 - MARGIN) for entry in entries)
 
 
 def repeated(tokens: Sequence[str]) -> int:
@@ -109,7 +113,7 @@ class Engine:
         return answer.json()["choices"][0] if answer.status_code == 200 else {}
 
     def tokens(self, prompt: str, max_tokens: int, **fields: Any) -> list[dict[str, Any]]:
-        choice = self.ask(prompt, max_tokens, logprobs=True, top_logprobs=1, **fields)
+        choice = self.ask(prompt, max_tokens, logprobs=True, top_logprobs=LOGPROBS, **fields)
         return list((choice.get("logprobs") or {}).get("content") or [])
 
 

@@ -6,11 +6,14 @@ from simple_serving.min_p_proof import ENOUGH_BELOW, ENOUGH_TOKENS, below, filte
 
 
 def test_a_token_counts_as_below_by_its_probability_after_the_temperature() -> None:
-    def token(ratio: float, temperature: float = 0.8) -> dict[str, object]:
-        return {"logprob": -1 + temperature * math.log(ratio), "top_logprobs": [{"logprob": -1}]}
+    def token(ratio: float, temperature: float = 0.8) -> dict[str, object]:  # as vLLM gives it: the sampled token first
+        sampled = -1 + temperature * math.log(ratio)
+        return {"logprob": sampled, "top_logprobs": [{"logprob": sampled}, {"logprob": -1}]}
 
     assert below([token(1), token(0.08), token(0.081)], 0.08, 0.8) == 0
     assert below([token(0.07), token(0.01), token(1)], 0.08, 0.8) == 2
+    best_sampled = {"logprob": -1, "top_logprobs": [{"logprob": -1}, {"logprob": -5}]}
+    assert below([best_sampled], 0.08, 0.8) == 0
 
 
 def test_the_filter_passes_only_where_the_control_shows_what_it_removes_and_tokens_were_drafted() -> None:
