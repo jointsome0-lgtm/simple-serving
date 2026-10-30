@@ -145,7 +145,8 @@ def test_mtp_thinking_budget_and_vision_reach_vllm_and_the_pins_only_when_on(sta
     assert on.engine().argv == [*off.engine().argv, "--speculative-config",
                                 f'{{"method": "mtp", "model": "{drafter}", "num_speculative_tokens": 3}}']
     assert card.pinned_versions(on.manifest) == card.pinned_versions(off.manifest) | {
-        "drafter_revision": on.manifest["DRAFTER_REVISION"], "mtp_speculative_tokens": "3"}
+        "drafter_revision": on.manifest["DRAFTER_REVISION"], "mtp_speculative_tokens": "3",
+        "min_p_while_drafting": "on"}
     assert on.manifest["THINKING_BUDGET"] == "0"
     assert "--reasoning-config" not in on.engine().argv and "thinking_budget" not in card.pinned_versions(on.manifest)
     budget = card_at(state, THINKING_BUDGET="1")
@@ -163,8 +164,8 @@ def test_mtp_thinking_budget_and_vision_reach_vllm_and_the_pins_only_when_on(sta
 
 
 def test_vllms_refusal_of_a_min_p_stays_with_the_switch_off_and_a_lifted_one_fixes_the_v2_runner(state: Path) -> None:
-    off, on = card_at(state), card_at(state, MIN_P_WHILE_DRAFTING="1")
-    assert off.manifest["MIN_P_WHILE_DRAFTING"] == "0"  # the committed state, until a card proves it
+    off, on = card_at(state, MIN_P_WHILE_DRAFTING="0"), card_at(state)
+    assert on.manifest["MIN_P_WHILE_DRAFTING"] == "1"  # on by default since the card's proof of 2026-10-30
     assert "VLLM_USE_V2_MODEL_RUNNER" not in off.engine().env
     assert on.engine().env["VLLM_USE_V2_MODEL_RUNNER"] == "1" and on.engine().argv == off.engine().argv
     assert card.pinned_versions(on.manifest) == card.pinned_versions(off.manifest) | {"min_p_while_drafting": "on"}
@@ -705,7 +706,8 @@ def test_bootstrap_changes_nothing_when_it_runs_again_and_the_rentals_onstart_st
     before_calls, before_prepared = calls.read_bytes(), (state / "prepared").read_bytes()
     for switch in ("THINKING_BUDGET", "VISION", "MIN_P_WHILE_DRAFTING"):
         for value in (None, "", "2", "01", "-1", "on"):
-            changed = base.replace(f"{switch}=0\n", "") if value is None else base + f"{switch}={value}\n"
+            line = rf"^{switch}=\d\n"
+            changed = re.sub(line, "", base, flags=re.MULTILINE) if value is None else base + f"{switch}={value}\n"
             manifest_path.write_text(changed)
             assert bootstrap("") == 3
             assert calls.read_bytes() == before_calls and (state / "prepared").read_bytes() == before_prepared

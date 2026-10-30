@@ -311,3 +311,12 @@ principle verify drafts against grammar rows that allow everything. The evidence
 card is 124 of 124 frame requests parsed on 2026-09-28 (simple-story-chat's `docs/knowledge/view-pick-measurements.md`).
 That run took vLLM's own choice of runner, V2 from the source, and no log of it is kept here to show which it was.
 The proof's `schema` step adds an observation with `min_p` on.
+
+## min_p on for the chat, 2026-10-30
+
+The owner, the same day: «Если все норм то в main тогда дефолт для чата». The proof passed on an RTX 5090 at 18:28 to
+18:38 UTC, exit 0: at `min_p` 0.08 no token of 6400 fell below the filter, against 97 of 6400 in the control at 0, on
+the V2 runner, with drafts accepted at the same rate, and speed unchanged at 124.6 to 125.8 tokens a second. So
+`MIN_P_WHILE_DRAFTING=1` is what the manifest now commits, which replaces the section above on that point, and the
+refusal of 2026-09-27 holds only at 0. The run's numbers and what it did not show are in the
+[runbook](runbook.md#min_p-while-drafting). The gateway only passes the field: the chat's value is the bot's to send.

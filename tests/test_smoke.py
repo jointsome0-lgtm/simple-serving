@@ -213,8 +213,8 @@ async def test_the_dry_run_passes_every_probe_and_prints_no_key_no_prompt_and_no
     lines = {line["probe"]: line for line in map(json.loads, out.splitlines())}
     assert "vision" not in lines and len(lines) == 11
     min_p, budget = lines["fields"]["min_p"], lines["fields"]["thinking_token_budget"]
-    drafting = int(manifest["MTP_SPECULATIVE_TOKENS"]) > 0  # the gateway refuses the min_p that vLLM would
-    assert (min_p["status"], min_p.get("code")) == ((400, "min_p_unavailable") if drafting else (200, None))
+    drafting = int(manifest["MTP_SPECULATIVE_TOKENS"]) > 0
+    assert int(manifest["MIN_P_WHILE_DRAFTING"]) > 0 and (min_p["status"], min_p.get("code")) == (200, None)
     held = int(manifest["THINKING_BUDGET"]) > 0  # off, the gateway refuses the budget
     assert not held  # integration keeps the unmeasured GPU feature off
     assert (budget["status"], budget.get("code")) == ((200, None) if held else (400, "thinking_budget_unavailable"))
@@ -222,13 +222,13 @@ async def test_the_dry_run_passes_every_probe_and_prints_no_key_no_prompt_and_no
     assert lines["budget"]["enforcement"] == "disabled"
 
     # The enabled route is checked on a second fake gateway without changing the committed manifest.
-    enabled = manifest | {"THINKING_BUDGET": "1", "MIN_P_WHILE_DRAFTING": "1"}
+    enabled = manifest | {"THINKING_BUDGET": "1", "MIN_P_WHILE_DRAFTING": "0"}  # and off, the refusal of the min_p
     setup = json.loads(launcher.read_text())
     setup["versions"] = card.pinned_versions(enabled)
     launcher.write_text(json.dumps(setup))
     async with launched(config=str(launcher)) as launch, httpx.AsyncClient(timeout=None, trust_env=False) as client:
         trial = smoke.Smoke(client, launch.public, launch.control, BOT, CONTROL, manifest["MODEL_ALIAS"],
-                            int(manifest["CONTEXT_TOKENS"]), fake=True, mtp=drafting, budget=True, min_p=True)
+                            int(manifest["CONTEXT_TOKENS"]), fake=True, mtp=drafting, budget=True, min_p=False)
         assert await smoke.run(trial, ["fields", "budget"]) == 0
     printed = capsys.readouterr()
     enabled_lines = {line["probe"]: line for line in map(json.loads, printed.out.splitlines())}
